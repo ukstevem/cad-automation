@@ -1,0 +1,27 @@
+{
+  "name": "CAD Automation Dev",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "api",
+  "workspaceFolder": "/app",
+  "shutdownAction": "stopCompose",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-azuretools.vscode-docker",
+        "ms-python.black-formatter",
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        "python.analysis.autoImportCompletions": true,
+        "python.formatting.provider": "black",
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localWorkspaceFolder}/app,target=/app/app,type=bind,consistency=delegated",
+    "source=${localWorkspaceFolder}/uploads,target=/app/uploads,type=bind,consistency=delegated"
+  ]
+}

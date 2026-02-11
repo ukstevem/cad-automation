@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+*.log
+
+# Uploads/generated files
+uploads/
+*.step
+*.stp
+*.dxf
+*.nc1
+*.csv
+
+# VSCode / Dev Container
+.vscode/
+.devcontainer/.env
+*.code-workspace
+
+# Docker
+*.pid
+*.tar
+*.bak
+*.tmp
+
+# System
+.DS_Store
+Thumbs.db
