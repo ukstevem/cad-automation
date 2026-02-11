@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    container_name: cad-automation-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind mount for live code editing
+      - ./app:/app/app
+      # Tests and config
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
+      # Persistent volumes for data
+      - ./uploads:/app/uploads
+      - ./temp:/app/temp
+      - ./outputs:/app/outputs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - UPLOAD_DIR=/app/uploads
+      - TEMP_DIR=/app/temp
+      - OUTPUT_DIR=/app/outputs
+    restart: unless-stopped
+    networks:
+      - cad-network
+
+networks:
+  cad-network:
+    driver: bridge
