@@ -1,0 +1,408 @@
+/* ===== Upload zone ===== */
+.upload-zone {
+    border: 2px dashed var(--cad-muted);
+    border-radius: 12px;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background-color 0.2s;
+    background: var(--cad-surface);
+}
+
+.upload-zone:hover,
+.upload-zone:focus-visible {
+    border-color: var(--cad-primary);
+    background: #eff6ff;
+    outline: none;
+}
+
+.upload-zone.dragover {
+    border-color: var(--cad-primary);
+    background: #dbeafe;
+    border-style: solid;
+}
+
+.upload-zone.uploading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.upload-zone-content svg {
+    color: var(--cad-muted);
+    margin-bottom: 0.5rem;
+}
+
+.upload-zone-content p {
+    margin-bottom: 0.25rem;
+}
+
+/* ===== Progress ===== */
+.progress-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+.progress-wrapper progress {
+    flex: 1;
+    margin-bottom: 0;
+}
+
+#progress-text {
+    white-space: nowrap;
+    font-size: 0.875rem;
+    color: var(--cad-muted);
+    min-width: 10ch;
+}
+
+/* ===== Verdict banner ===== */
+.verdict-banner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+
+.verdict-banner.verdict-pass {
+    background: var(--cad-success-bg);
+    border: 1px solid var(--cad-success);
+    color: #15803d;
+}
+
+.verdict-banner.verdict-fail {
+    background: var(--cad-error-bg);
+    border: 1px solid var(--cad-error);
+    color: #b91c1c;
+}
+
+.verdict-icon {
+    font-size: 2rem;
+    line-height: 1;
+}
+
+.verdict-label {
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+.verdict-subtitle {
+    font-size: 0.875rem;
+    opacity: 0.8;
+}
+
+/* ===== Result cards ===== */
+.result-card {
+    border-left: 4px solid var(--cad-muted);
+    margin-bottom: 1rem;
+}
+
+.result-card.pass {
+    border-left-color: var(--cad-success);
+}
+
+.result-card.fail {
+    border-left-color: var(--cad-error);
+}
+
+.result-card.neutral {
+    border-left-color: var(--cad-primary);
+}
+
+.result-card header {
+    padding-bottom: 0.5rem;
+}
+
+.result-card table {
+    margin-bottom: 0;
+}
+
+.result-card table td:first-child {
+    font-weight: 500;
+    white-space: nowrap;
+    width: 40%;
+    color: var(--cad-muted);
+}
+
+/* ===== Check rows ===== */
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.check-row:last-child {
+    border-bottom: none;
+}
+
+.check-icon {
+    font-size: 1.1rem;
+    width: 1.5rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.check-pass .check-icon {
+    color: var(--cad-success);
+}
+
+.check-fail .check-icon {
+    color: var(--cad-error);
+}
+
+.check-label {
+    flex: 1;
+}
+
+.check-detail {
+    font-size: 0.85rem;
+    color: var(--cad-muted);
+}
+
+/* ===== Status badges ===== */
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.badge.pass {
+    background: var(--cad-success-bg);
+    color: var(--cad-success);
+}
+
+.badge.fail {
+    background: var(--cad-error-bg);
+    color: var(--cad-error);
+}
+
+/* ===== Assembly tree ===== */
+.assembly-tree {
+    font-size: 0.9rem;
+    margin: 1rem 0;
+}
+
+.assembly-tree ul {
+    list-style: none;
+    padding-left: 1.5rem;
+    margin: 0;
+}
+
+.assembly-tree > ul {
+    padding-left: 0;
+}
+
+.tree-node {
+    padding: 0.4rem 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.tree-node:last-child {
+    border-bottom: none;
+}
+
+.tree-node-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.tree-toggle {
+    width: 1.25rem;
+    height: 1.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border: none;
+    background: none;
+    padding: 0;
+    font-size: 0.75rem;
+    color: var(--cad-muted);
+    flex-shrink: 0;
+    transition: transform 0.15s;
+}
+
+.tree-toggle.expanded {
+    transform: rotate(90deg);
+}
+
+.tree-toggle.leaf {
+    visibility: hidden;
+}
+
+.tree-node-name {
+    font-weight: 500;
+}
+
+.node-instance-ref {
+    font-size: 0.75rem;
+    color: var(--cad-muted);
+    opacity: 0.7;
+    font-style: italic;
+}
+
+.node-type-badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.node-type-badge.assembly {
+    background: #ede9fe;
+    color: #6d28d9;
+}
+
+.node-type-badge.part_single_solid {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.node-type-badge.part_multi_solid {
+    background: var(--cad-warning-bg);
+    color: var(--cad-warning);
+}
+
+.node-type-badge.part_no_solid {
+    background: #f1f5f9;
+    color: var(--cad-muted);
+}
+
+.node-solid-count {
+    font-size: 0.8rem;
+    color: var(--cad-muted);
+}
+
+.node-actions {
+    display: inline-flex;
+    gap: 0.35rem;
+    margin-left: auto;
+}
+
+.node-actions button {
+    padding: 0.15rem 0.55rem;
+    font-size: 0.72rem;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid #cbd5e1;
+    background: #fff;
+    transition: background 0.15s;
+}
+
+.node-actions button:hover {
+    background: #f1f5f9;
+}
+
+.node-actions button.btn-cnc {
+    border-color: var(--cad-primary);
+    color: var(--cad-primary);
+}
+
+.node-actions button.btn-cnc:hover {
+    background: #eff6ff;
+}
+
+.node-actions button.btn-bought-out {
+    border-color: var(--cad-muted);
+    color: var(--cad-muted);
+}
+
+.node-actions button.btn-explode {
+    border-color: var(--cad-warning);
+    color: var(--cad-warning);
+}
+
+.node-actions button.btn-explode:hover {
+    background: var(--cad-warning-bg);
+}
+
+.node-classified {
+    opacity: 0.55;
+}
+
+.node-classified .tree-node-name::after {
+    font-size: 0.7rem;
+    font-weight: 600;
+    margin-left: 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.node-classified[data-classification="cnc"] .tree-node-name::after {
+    content: "CNC";
+    color: var(--cad-primary);
+}
+
+.node-classified[data-classification="bought-out"] .tree-node-name::after {
+    content: "BOUGHT-OUT";
+    color: var(--cad-muted);
+}
+
+.node-classified[data-classification="exploded"] .tree-node-name::after {
+    content: "EXPLODED";
+    color: var(--cad-warning);
+}
+
+/* ===== Analysis page extras ===== */
+.analysis-controls {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-end;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.analysis-controls select {
+    min-width: 250px;
+    max-width: 100%;
+    flex: 1;
+    margin-bottom: 0;
+}
+
+.analysis-controls button {
+    margin-bottom: 0;
+    white-space: nowrap;
+}
+
+.analysis-summary {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.summary-stat {
+    font-size: 0.85rem;
+    color: var(--cad-muted);
+}
+
+.summary-stat strong {
+    color: inherit;
+    font-size: 1.1rem;
+    display: block;
+}
+
+/* ===== Shape details ===== */
+details {
+    margin-top: 1rem;
+}
+
+details summary {
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: var(--cad-primary);
+}

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where:*)",
+      "Bash(docker version:*)",
+      "Bash(docker compose:*)",
+      "Bash(curl:*)",
+      "Bash(docker exec:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(dir:*)",
+      "Bash(timeout:*)",
+      "Bash(python -m json.tool:*)",
+      "Bash(python -c:*)",
+      "WebSearch",
+      "WebFetch(domain:cadquery.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:dev.opencascade.org)",
+      "Bash(docker ps:*)"
+    ]
+  }
+}

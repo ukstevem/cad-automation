@@ -1,0 +1,63 @@
+/* Custom properties */
+:root {
+    --cad-primary: #2563eb;
+    --cad-success: #16a34a;
+    --cad-success-bg: #f0fdf4;
+    --cad-warning: #d97706;
+    --cad-warning-bg: #fffbeb;
+    --cad-error: #dc2626;
+    --cad-error-bg: #fef2f2;
+    --cad-surface: #f8fafc;
+    --cad-muted: #64748b;
+}
+
+/* Layout */
+#app-content {
+    min-height: 60vh;
+    padding-top: 1rem;
+}
+
+footer {
+    margin-top: 2rem;
+    padding: 1rem 0;
+    text-align: center;
+    color: var(--cad-muted);
+}
+
+/* App title */
+.app-title {
+    color: var(--cad-primary);
+    letter-spacing: -0.5px;
+}
+
+/* Navigation */
+nav .nav-link {
+    text-decoration: none;
+    padding: 0.25rem 0;
+    border-bottom: 2px solid transparent;
+    transition: border-color 0.2s;
+}
+
+nav .nav-link.active {
+    border-bottom-color: var(--cad-primary);
+    font-weight: 600;
+}
+
+nav .nav-link.disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* API status in footer */
+.status-healthy {
+    color: var(--cad-success);
+}
+
+.status-error {
+    color: var(--cad-error);
+}
+
+/* Button */
+.upload-another {
+    margin-top: 1.5rem;
+}

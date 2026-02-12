@@ -10,6 +10,8 @@ services:
       # Tests and config
       - ./tests:/app/tests
       - ./pytest.ini:/app/pytest.ini
+      # Frontend
+      - ./frontend:/app/frontend
       # Persistent volumes for data
       - ./uploads:/app/uploads
       - ./temp:/app/temp

@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import upload
+from fastapi.staticfiles import StaticFiles
+from app.routers import upload, frontend, analysis
 from app.exceptions import CADAutomationException
 
 # Configure structured logging
@@ -107,8 +108,13 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 
+# Static files for frontend
+app.mount("/static", StaticFiles(directory="/app/frontend/static"), name="static")
+
 # Include routers
+app.include_router(frontend.router, tags=["frontend"])
 app.include_router(upload.router, prefix="/api/v1", tags=["upload"])
+app.include_router(analysis.router, prefix="/api/v1", tags=["analysis"])
 
 
 @app.get("/")

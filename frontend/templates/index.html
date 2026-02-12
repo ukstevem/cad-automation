@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CAD Automation</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/components.css">
+    <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <header class="container">
+        <nav>
+            <ul>
+                <li><strong class="app-title">CAD Automation</strong></li>
+            </ul>
+            <ul>
+                <li><a href="#upload" data-page="upload" class="nav-link active">Upload</a></li>
+                <li><a href="#analysis" data-page="analysis" class="nav-link">Analysis</a></li>
+                <li><a href="#projects" data-page="projects" class="nav-link disabled">Projects</a></li>
+                <li><a href="#settings" data-page="settings" class="nav-link disabled">Settings</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main class="container" id="app-content">
+        <p>Loading...</p>
+    </main>
+
+    <footer class="container">
+        <small>
+            <span id="api-status">Checking API...</span> |
+            <span id="api-version"></span>
+        </small>
+    </footer>
+
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
