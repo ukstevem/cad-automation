@@ -69,6 +69,41 @@ export class ApiClient {
         return this._get(`/api/v1/analysis/assembly/${encodeURIComponent(filename)}`);
     }
 
+    async getAnalysisStatus(taskId) {
+        return this._get(`/api/v1/analysis/status/${encodeURIComponent(taskId)}`);
+    }
+
+    async generateSTL(filename) {
+        return this._post(`/api/v1/stl/generate/${encodeURIComponent(filename)}`);
+    }
+
+    async getSTLStatus(taskId) {
+        return this._get(`/api/v1/stl/status/${encodeURIComponent(taskId)}`);
+    }
+
+    async listSTLFiles(filename) {
+        return this._get(`/api/v1/stl/files/${encodeURIComponent(filename)}`);
+    }
+
+    async generateSTLChildren(filename, parentId) {
+        return this._post(
+            `/api/v1/stl/generate-children/${encodeURIComponent(filename)}?parent_id=${encodeURIComponent(parentId)}`
+        );
+    }
+
+    async generateSTLSolids(filename, nodeId) {
+        return this._post(
+            `/api/v1/stl/generate-solids/${encodeURIComponent(filename)}?node_id=${encodeURIComponent(nodeId)}`
+        );
+    }
+
+    async saveProjectState(filename, state) {
+        return this._put(
+            `/api/v1/analysis/project-state/${encodeURIComponent(filename)}`,
+            state,
+        );
+    }
+
     async _get(path) {
         const res = await fetch(`${this.baseUrl}${path}`);
         if (!res.ok) throw await this._handleError(res);
@@ -77,6 +112,16 @@ export class ApiClient {
 
     async _post(path) {
         const res = await fetch(`${this.baseUrl}${path}`, { method: 'POST' });
+        if (!res.ok) throw await this._handleError(res);
+        return res.json();
+    }
+
+    async _put(path, body) {
+        const res = await fetch(`${this.baseUrl}${path}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
         if (!res.ok) throw await this._handleError(res);
         return res.json();
     }

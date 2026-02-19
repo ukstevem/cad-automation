@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from fastapi.staticfiles import StaticFiles
-from app.routers import upload, frontend, analysis
+from app.routers import upload, frontend, analysis, stl
 from app.exceptions import CADAutomationException
 
 # Configure structured logging
@@ -35,7 +35,8 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
-    
+    os.makedirs(settings.STL_OUTPUT_DIR, exist_ok=True)
+
     logger.info(
         "directories_initialized",
         upload_dir=settings.UPLOAD_DIR,
@@ -44,8 +45,10 @@ async def lifespan(app: FastAPI):
     )
     
     yield
-    
+
     # Shutdown
+    from app.services.task_manager import task_manager
+    task_manager.shutdown()
     logger.info("application_shutting_down")
 
 
@@ -111,10 +114,15 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Static files for frontend
 app.mount("/static", StaticFiles(directory="/app/frontend/static"), name="static")
 
+# Serve generated STL files (ensure dir exists before mount)
+os.makedirs(settings.STL_OUTPUT_DIR, exist_ok=True)
+app.mount("/outputs/stl", StaticFiles(directory=settings.STL_OUTPUT_DIR), name="stl-outputs")
+
 # Include routers
 app.include_router(frontend.router, tags=["frontend"])
 app.include_router(upload.router, prefix="/api/v1", tags=["upload"])
 app.include_router(analysis.router, prefix="/api/v1", tags=["analysis"])
+app.include_router(stl.router, prefix="/api/v1", tags=["stl"])
 
 
 @app.get("/")

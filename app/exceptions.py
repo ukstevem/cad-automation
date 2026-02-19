@@ -39,3 +39,8 @@ class GeometryExtractionError(CADAutomationException):
 class ConversionError(CADAutomationException):
     """Raised when file conversion fails"""
     pass
+
+
+class STLGenerationError(CADAutomationException):
+    """Raised when STL mesh generation fails"""
+    pass

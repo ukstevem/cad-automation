@@ -143,10 +143,19 @@ class AssemblyAnalyzer:
             totals["parts"] += 1
             totals["solids"] += num_solids
 
+        # ref_id: entry of the referred/prototype label.
+        # Two instances of the same shape share the same ref_id.
+        ref_id = self._label_entry(referred)
+
+        # Chirality: detect if this instance has a mirror transformation (det = -1).
+        is_mirrored = self._is_mirrored(label)
+
         node: Dict[str, Any] = {
             "id": entry_str,
             "name": display_name,
             "instance_ref": instance_name,
+            "ref_id": ref_id,
+            "is_mirrored": is_mirrored,
             "node_type": node_type,
             "solid_count": num_solids,
             "children": [],
@@ -186,6 +195,23 @@ class AssemblyAnalyzer:
             count += 1
             explorer.Next()
         return count
+
+    @staticmethod
+    def _is_mirrored(label) -> bool:
+        """
+        Mirror/chirality detection is temporarily disabled.
+
+        Any XCAFDoc_Location attribute access (including the constructor and
+        FindAttribute call) causes SIGSEGV in OCC 7.7.x / OCP for certain XCAF
+        labels in complex STEP files.  Until a safe implementation is found
+        (e.g., via BRep_Builder shape comparison rather than XCAF attribute reads),
+        this always returns False so that all instances are treated as non-mirrored.
+
+        Consequence: chiralKey is always "{ref_id}:N"; mirrored instances share
+        STL meshes with their non-mirrored counterparts (visually incorrect for
+        asymmetric parts, but functionally harmless for the classification workflow).
+        """
+        return False
 
     @staticmethod
     def _classify_node(is_assembly: bool, num_solids: int) -> str:

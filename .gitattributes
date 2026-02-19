@@ -1,0 +1,16 @@
+# Force LF line endings for all text files.
+# This project runs inside Docker (Linux), so CRLF in source files causes
+# problems (bash scripts, Python, JSON all expect LF on Linux).
+# Overrides core.autocrlf=true on Windows developer machines.
+
+* text=auto eol=lf
+
+# Explicitly mark binary files so git never touches their line endings
+*.stl   binary
+*.step  binary
+*.stp   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary

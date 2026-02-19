@@ -215,6 +215,58 @@
     align-items: center;
     gap: 0.5rem;
     flex-wrap: wrap;
+    cursor: default;
+    border-radius: 4px;
+    padding: 0.15rem 0.35rem;
+    transition: background 0.1s;
+}
+
+.tree-node-row.node-selectable {
+    cursor: pointer;
+}
+
+.tree-node-row.node-selectable:hover {
+    background: #f0f4ff;
+}
+
+.tree-node-row.node-selected {
+    background: #dbeafe;
+    outline: 2px solid var(--cad-primary);
+    outline-offset: -2px;
+}
+
+/* Dim non-selectable node names */
+.tree-node-row:not(.node-selectable) .tree-node-name {
+    opacity: 0.55;
+}
+
+/* Exploded assembly indicator */
+.tree-node-row.node-exploded .tree-node-name::after {
+    content: " (exploded)";
+    font-size: 0.7rem;
+    color: var(--cad-warning);
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+/* STL loading spinner */
+.node-stl-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #e2e8f0;
+    border-top-color: var(--cad-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.node-stl-spinner[hidden] {
+    display: none;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 .tree-toggle {
@@ -282,6 +334,23 @@
     color: var(--cad-muted);
 }
 
+.node-type-badge.solid {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.node-mirrored-badge {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: #fef3c7;
+    color: #92400e;
+    margin-left: 0.25rem;
+}
+
 .node-solid-count {
     font-size: 0.8rem;
     color: var(--cad-muted);
@@ -307,12 +376,12 @@
     background: #f1f5f9;
 }
 
-.node-actions button.btn-cnc {
+.node-actions button.btn-postprocess {
     border-color: var(--cad-primary);
     color: var(--cad-primary);
 }
 
-.node-actions button.btn-cnc:hover {
+.node-actions button.btn-postprocess:hover {
     background: #eff6ff;
 }
 
@@ -342,8 +411,8 @@
     letter-spacing: 0.3px;
 }
 
-.node-classified[data-classification="cnc"] .tree-node-name::after {
-    content: "CNC";
+.node-classified[data-classification="postprocess"] .tree-node-name::after {
+    content: "POSTPROCESS";
     color: var(--cad-primary);
 }
 
@@ -396,6 +465,100 @@
     display: block;
 }
 
+/* ===== STL Progress ===== */
+.stl-progress {
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    background: #f8fafc;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+}
+
+.stl-progress progress {
+    width: 100%;
+    height: 6px;
+    margin: 0;
+    border-radius: 3px;
+}
+
+.stl-progress-text {
+    font-size: 0.8rem;
+    color: var(--cad-muted);
+    margin-bottom: 0.4rem;
+}
+
+.stl-progress-done {
+    color: var(--cad-success);
+    font-weight: 600;
+}
+
+.stl-progress-error {
+    color: var(--cad-error);
+}
+
+/* ===== Analysis Workspace (side-by-side tree + viewer) ===== */
+.analysis-workspace {
+    display: grid;
+    grid-template-columns: minmax(300px, 1fr) minmax(400px, 1.5fr);
+    gap: 1rem;
+    height: calc(100vh - 260px);
+    min-height: 500px;
+}
+
+.workspace-tree-panel {
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 0.5rem;
+    background: #fff;
+}
+
+.workspace-viewer-panel {
+    overflow: hidden;
+}
+
+/* Responsive: stack on narrow screens */
+@media (max-width: 900px) {
+    .analysis-workspace {
+        grid-template-columns: 1fr;
+        height: auto;
+    }
+
+    .workspace-viewer-panel .stl-viewer-panel {
+        height: 400px;
+    }
+}
+
+/* ===== STL Viewer Panel ===== */
+.stl-viewer-panel {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #f8fafc;
+    height: 100%;
+    min-height: 400px;
+    position: relative;
+}
+
+.stl-viewer-panel.loading::after {
+    content: "Loading...";
+    position: absolute;
+    top: 0.5rem;
+    right: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--cad-muted);
+    z-index: 1;
+}
+
+.stl-viewer-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--cad-muted);
+    font-size: 0.9rem;
+}
+
 /* ===== Shape details ===== */
 details {
     margin-top: 1rem;
@@ -405,4 +568,102 @@ details summary {
     cursor: pointer;
     font-size: 0.875rem;
     color: var(--cad-primary);
+}
+
+/* ===== Classification Summary Tables ===== */
+.classification-tables-section {
+    margin-top: 1rem;
+}
+
+.classification-tables-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+@media (max-width: 900px) {
+    .classification-tables-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.classification-table-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+}
+
+.classification-table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.classification-table-header.postprocess {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.classification-table-header.bought-out {
+    background: #dcfce7;
+    color: #15803d;
+}
+
+.classification-table-count {
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 999px;
+    padding: 0.1rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.classification-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+
+.classification-table th {
+    text-align: left;
+    padding: 0.4rem 0.75rem;
+    background: #f8fafc;
+    color: var(--cad-muted);
+    font-weight: 500;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.classification-table td {
+    padding: 0.35rem 0.75rem;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.classification-table tr:last-child td {
+    border-bottom: none;
+}
+
+.classification-table-parent {
+    color: var(--cad-muted);
+    font-size: 0.78rem;
+}
+
+.classification-table-qty-col {
+    width: 3rem;
+    text-align: right;
+}
+
+.classification-table-qty {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--cad-muted);
+}
+
+.classification-table-empty {
+    padding: 0.75rem;
+    color: var(--cad-muted);
+    font-size: 0.82rem;
+    margin: 0;
 }

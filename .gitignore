@@ -56,3 +56,8 @@ outputs/*
 # OS
 .DS_Store
 Thumbs.db
+nul
+
+# Local tooling
+.claude/
+*.old

@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     # Processing settings
     TEMP_DIR: str = "/tmp/cad-processing"
     OUTPUT_DIR: str = "/outputs"
+
+    # Analysis cache
+    ANALYSIS_OUTPUT_DIR: str = "/outputs/analysis"
+
+    # STL generation settings
+    STL_OUTPUT_DIR: str = "/outputs/stl"
+    STL_LINEAR_DEFLECTION: float = 0.5
+    STL_ANGULAR_DEFLECTION: float = 0.5
     
     # API settings
     API_TITLE: str = "CAD Automation API"
