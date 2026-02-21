@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from fastapi.staticfiles import StaticFiles
-from app.routers import upload, frontend, analysis, stl
+from app.routers import upload, frontend, analysis, stl, cnc_analysis
 from app.exceptions import CADAutomationException
 
 # Configure structured logging
@@ -123,6 +123,7 @@ app.include_router(frontend.router, tags=["frontend"])
 app.include_router(upload.router, prefix="/api/v1", tags=["upload"])
 app.include_router(analysis.router, prefix="/api/v1", tags=["analysis"])
 app.include_router(stl.router, prefix="/api/v1", tags=["stl"])
+app.include_router(cnc_analysis.router, prefix="/api/v1", tags=["cnc-analysis"])
 
 
 @app.get("/")

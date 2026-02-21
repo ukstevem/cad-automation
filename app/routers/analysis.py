@@ -15,11 +15,13 @@ import structlog
 from app.config import settings
 from app.services.task_manager import task_manager, TaskStatus
 
-# Path to the standalone analysis worker script
+# Path to the standalone worker scripts
 _WORKER = Path(__file__).parent.parent / "workers" / "analyze_step.py"
+_CONSOLIDATE_WORKER = Path(__file__).parent.parent / "workers" / "consolidate_parts.py"
 
 # Hard timeout for a single XCAF parse (seconds)
 _ANALYSIS_TIMEOUT = 600  # 10 minutes
+_CONSOLIDATE_TIMEOUT = 600  # 10 minutes
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -89,6 +91,33 @@ def _save_project_state(filename: str, state: dict):
 
     existing["project_state"] = state
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+
+def _save_consolidation(filename: str, result: dict):
+    """Update the consolidation section of the cache, preserving other sections.
+
+    ``result`` is the dict returned by PartsConsolidator.consolidate():
+    ``{"part_groups": [...], "solid_groups": [...], "intra_solid_groups": [...]}``
+    """
+    path = _analysis_json_path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    existing["consolidation"] = result
+    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    logger.info(
+        "consolidation_cached",
+        filename=filename,
+        part_groups=len(result.get("part_groups", [])),
+        solid_groups=len(result.get("solid_groups", [])),
+        intra_solid_groups=len(result.get("intra_solid_groups", [])),
+    )
 
 
 # ---------------------------------------------------------------
@@ -270,6 +299,310 @@ async def get_analysis_status(task_id: str) -> Dict[str, Any]:
     # The frontend polls on status.status === 'completed' — make sure the field is present
     response["status"] = "completed"
     return response
+
+
+def _collect_parts(nodes: List[dict], parent_name: Optional[str], result: dict) -> None:
+    """
+    Recursively walk an assembly tree and collect all parts (non-assemblies) by ref_id.
+
+    result is modified in place: ref_id -> {ref_id, name, node_type, instances[]}
+    where each instance has {node_id, parent_name, is_mirrored}.
+    """
+    for node in nodes:
+        if node.get("node_type") == "assembly":
+            _collect_parts(node.get("children", []), node["name"], result)
+        else:
+            ref_id = node.get("ref_id") or node["id"]
+            if ref_id not in result:
+                result[ref_id] = {
+                    "ref_id": ref_id,
+                    "name": node["name"],
+                    "node_type": node.get("node_type", "part_single_solid"),
+                    "instances": [],
+                }
+            result[ref_id]["instances"].append({
+                "node_id": node["id"],
+                "parent_name": parent_name,
+                "is_mirrored": node.get("is_mirrored", False),
+            })
+
+
+@router.get("/analysis/parts-list/{filename}")
+async def get_parts_list(filename: str) -> Dict[str, Any]:
+    """
+    Return a consolidated flat list of all unique parts in the assembly.
+
+    Walks the cached analysis tree (no STEP re-parse), deduplicates by ref_id,
+    and annotates each part with its classification (from project_state) and
+    the list of parent assemblies it appears in.
+
+    Used to build the full BOM even before the user has manually exploded
+    every assembly — the server-side tree walk covers all levels.
+    """
+    cache = _load_cache(filename)
+    if not cache or "analysis" not in cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Analysis not cached for this file", "filename": filename},
+        )
+
+    tree = cache["analysis"].get("assembly_tree", [])
+    classifications: dict = (cache.get("project_state") or {}).get("classifications", {})
+
+    # Walk the full tree
+    parts_by_ref: dict = {}
+    _collect_parts(tree, None, parts_by_ref)
+
+    result = []
+    for info in parts_by_ref.values():
+        node_ids = [i["node_id"] for i in info["instances"]]
+
+        # Any instance classified counts for the whole part
+        classification = next(
+            (classifications[nid] for nid in node_ids if nid in classifications),
+            None,
+        )
+
+        mirrored_count = sum(1 for i in info["instances"] if i.get("is_mirrored"))
+
+        # Ordered unique list of parent assemblies
+        seen: set = set()
+        parent_assemblies = []
+        for inst in info["instances"]:
+            pn = inst.get("parent_name")
+            if pn and pn not in seen:
+                seen.add(pn)
+                parent_assemblies.append(pn)
+
+        result.append({
+            "ref_id": info["ref_id"],
+            "name": info["name"],
+            "node_type": info["node_type"],
+            "total_count": len(info["instances"]),
+            "mirrored_count": mirrored_count,
+            "classification": classification,
+            "parent_assemblies": parent_assemblies,
+            "node_ids": node_ids,
+        })
+
+    # Unclassified first, then by count descending, then name
+    result.sort(key=lambda p: (
+        p["classification"] is not None,
+        -p["total_count"],
+        p["name"].lower(),
+    ))
+
+    return {
+        "parts": result,
+        "filename": filename,
+        "total_unique_parts": len(result),
+    }
+
+
+@router.get("/analysis/consolidate/{filename}")
+async def get_consolidation(filename: str) -> Dict[str, Any]:
+    """
+    Return cached parts consolidation groups for a STEP file.
+
+    Returns the groups immediately if consolidation has been run before.
+    Returns 404 if not yet consolidated (use POST to start).
+    """
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "File not found", "filename": filename},
+        )
+
+    cache = _load_cache(filename)
+    # Support new dict format ("consolidation") and old list format ("consolidated_parts")
+    if cache and "consolidation" in cache:
+        logger.info("consolidation_cache_hit", filename=filename)
+        c = cache["consolidation"]
+        return {
+            "groups": c.get("part_groups", []),
+            "solid_groups": c.get("solid_groups", []),
+            "intra_solid_groups": c.get("intra_solid_groups", []),
+            "filename": filename,
+            "status": "cached",
+        }
+    if cache and "consolidated_parts" in cache:
+        logger.info("consolidation_cache_hit_legacy", filename=filename)
+        return {
+            "groups": cache["consolidated_parts"],
+            "solid_groups": [],
+            "intra_solid_groups": [],
+            "filename": filename,
+            "status": "cached",
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"error": "Consolidation not yet run for this file", "filename": filename},
+    )
+
+
+@router.post("/analysis/consolidate/{filename}")
+async def start_consolidation(filename: str) -> Dict[str, Any]:
+    """
+    Start a background parts consolidation task for a STEP file.
+
+    Always submits a fresh run (or returns the existing in-progress task id
+    if one is already running).  The GET endpoint serves cached results for
+    the BOM panel; the POST endpoint is for the "Consolidate" button which
+    should always re-compute to pick up algorithm or geometry changes.
+
+    Returns ``{"consolidation_task_id": "...", "status": "pending"}`` while
+    running, or the completed result once polling is done.
+
+    Requires the assembly analysis to be cached first.
+    """
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "File not found", "filename": filename},
+        )
+
+    cache = _load_cache(filename)
+    if not cache or "analysis" not in cache:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Assembly analysis not yet available for this file",
+                "filename": filename,
+            },
+        )
+
+    # Check for an existing in-progress task
+    existing = task_manager.get_tasks_for_file(filename, task_type="parts_consolidation")
+    for task in existing:
+        if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            logger.info(
+                "consolidation_task_already_running",
+                filename=filename,
+                task_id=task.task_id,
+            )
+            return {"consolidation_task_id": task.task_id, "status": task.status.value}
+
+    # Submit a new consolidation task
+    analysis_json_path = str(_analysis_json_path(filename))
+
+    async def run_consolidation_async(_progress_callback):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(_CONSOLIDATE_WORKER),
+                str(file_path),
+                analysis_json_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to launch consolidation worker: {exc}")
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=float(_CONSOLIDATE_TIMEOUT),
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                f"Consolidation timed out after {_CONSOLIDATE_TIMEOUT // 60} minutes"
+            )
+
+        returncode = proc.returncode
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+
+        if returncode != 0:
+            stdout_tail = stdout.strip()[-500:] if stdout.strip() else ""
+            err = (
+                f"Worker failed (exit {returncode}): {stderr}"
+                if stderr
+                else f"Worker crashed (exit {returncode}), last output: {stdout_tail}"
+            )
+            logger.error(
+                "consolidation_worker_failed",
+                filename=filename,
+                returncode=returncode,
+                stderr=stderr[:1000] if stderr else "",
+                stdout_tail=stdout_tail,
+            )
+            raise RuntimeError(err)
+
+        # Worker outputs a JSON object {"part_groups": [...], "solid_groups": [...], "intra_solid_groups": [...]}
+        # (older builds output a bare JSON array — handle both for compatibility)
+        json_line = next(
+            (
+                line
+                for line in stdout.splitlines()
+                if line.strip().startswith("{") or line.strip().startswith("[")
+            ),
+            None,
+        )
+        if json_line is None:
+            raise RuntimeError(
+                f"No JSON in consolidation worker output. Stdout: {stdout[:300]}"
+            )
+        raw = json.loads(json_line)
+        if isinstance(raw, list):
+            # Legacy format — wrap into the new structure
+            result = {"part_groups": raw, "solid_groups": [], "intra_solid_groups": []}
+        else:
+            result = raw
+        _save_consolidation(filename, result)
+        return result
+
+    task_id = task_manager.submit_async(
+        "parts_consolidation", filename, run_consolidation_async
+    )
+    logger.info("consolidation_task_submitted", filename=filename, task_id=task_id)
+    return {"consolidation_task_id": task_id, "status": "pending"}
+
+
+@router.get("/analysis/consolidate-status/{task_id}")
+async def get_consolidation_status(task_id: str) -> Dict[str, Any]:
+    """
+    Poll the status of a background parts consolidation task.
+
+    While pending/running: returns ``{"status": "pending"|"running"}``.
+    On failure:            returns ``{"status": "failed", "error": "..."}``.
+    On completion:         returns ``{"status": "completed", "groups": [...], "filename": "..."}``.
+    """
+    info = task_manager.get_task(task_id)
+    if not info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Task not found", "task_id": task_id},
+        )
+
+    if info.status == TaskStatus.FAILED:
+        return {"status": "failed", "error": info.error or "Consolidation failed"}
+
+    if info.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+        return {"status": info.status.value, "consolidation_task_id": task_id}
+
+    # Completed — return groups and solid_groups
+    result = info.results or {}
+    if isinstance(result, list):
+        # Legacy format from an older worker run
+        return {
+            "status": "completed",
+            "groups": result,
+            "solid_groups": [],
+            "intra_solid_groups": [],
+            "filename": info.filename,
+        }
+    return {
+        "status": "completed",
+        "groups": result.get("part_groups", []),
+        "solid_groups": result.get("solid_groups", []),
+        "intra_solid_groups": result.get("intra_solid_groups", []),
+        "filename": info.filename,
+    }
 
 
 @router.put("/analysis/project-state/{filename}")

@@ -97,11 +97,48 @@ export class ApiClient {
         );
     }
 
+    async getPartsList(filename) {
+        return this._get(`/api/v1/analysis/parts-list/${encodeURIComponent(filename)}`);
+    }
+
     async saveProjectState(filename, state) {
         return this._put(
             `/api/v1/analysis/project-state/${encodeURIComponent(filename)}`,
             state,
         );
+    }
+
+    async getConsolidation(filename) {
+        return this._get(`/api/v1/analysis/consolidate/${encodeURIComponent(filename)}`);
+    }
+
+    async startConsolidation(filename) {
+        return this._post(`/api/v1/analysis/consolidate/${encodeURIComponent(filename)}`);
+    }
+
+    async getConsolidationStatus(taskId) {
+        return this._get(`/api/v1/analysis/consolidate-status/${encodeURIComponent(taskId)}`);
+    }
+
+    async getCncResult(filename) {
+        return this._get(`/api/v1/cnc-analysis/result/${encodeURIComponent(filename)}`);
+    }
+
+    async startCncAnalysis(filename, refIds, memberIds, parentNames = {}, projectNumber = '', steelGrade = '') {
+        return this._postJson(
+            `/api/v1/cnc-analysis/analyse/${encodeURIComponent(filename)}`,
+            {
+                ref_ids: refIds,
+                member_ids: memberIds,
+                parent_names: parentNames,
+                project_number: projectNumber,
+                steel_grade: steelGrade,
+            },
+        );
+    }
+
+    async getCncStatus(taskId) {
+        return this._get(`/api/v1/cnc-analysis/status/${encodeURIComponent(taskId)}`);
     }
 
     async _get(path) {
@@ -112,6 +149,16 @@ export class ApiClient {
 
     async _post(path) {
         const res = await fetch(`${this.baseUrl}${path}`, { method: 'POST' });
+        if (!res.ok) throw await this._handleError(res);
+        return res.json();
+    }
+
+    async _postJson(path, body) {
+        const res = await fetch(`${this.baseUrl}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
         if (!res.ok) throw await this._handleError(res);
         return res.json();
     }

@@ -14,6 +14,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import structlog
 
+import multiprocessing
+import os
+
 from OCP.TDocStd import TDocStd_Document
 from OCP.TCollection import TCollection_ExtendedString, TCollection_AsciiString
 from OCP.STEPCAFControl import STEPCAFControl_Reader
@@ -39,6 +42,53 @@ def _safe_filename(name: str) -> str:
     """Sanitize a string for use as a filename."""
     safe = _UNSAFE_RE.sub("_", name).strip(". ")
     return safe or "unnamed"
+
+
+def _mesh_to_stl_child(
+    shape,
+    output_path_str: str,
+    linear_deflection: float,
+    angular_deflection: float,
+) -> None:
+    """
+    Entry point for a per-item forked child process.
+
+    Runs BRepMesh_IncrementalMesh + StlAPI_Writer for a single shape and
+    exits immediately via os._exit() so that Python's atexit / __del__
+    machinery never runs in the child (which would corrupt OCC reference
+    counts in the parent's address space after fork).
+
+    Exit codes:
+        0  success
+        1  Python exception during meshing / writing
+        2  BRepMesh_IncrementalMesh.IsDone() returned False
+        3  StlAPI_Writer.Write() returned False
+    """
+    try:
+        # Give the child a large stack for OCC's recursive mesh algorithms
+        # (mirrors the threading.stack_size(64 MB) used in the worker script).
+        try:
+            import resource as _resource
+            _resource.setrlimit(
+                _resource.RLIMIT_STACK,
+                (64 * 1024 * 1024, _resource.RLIM_INFINITY),
+            )
+        except Exception:
+            pass
+
+        mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection)
+        mesh.Perform()
+        if not mesh.IsDone():
+            os._exit(2)
+
+        writer = StlAPI_Writer()
+        writer.ASCIIMode = False
+        if not writer.Write(shape, output_path_str):
+            os._exit(3)
+
+        os._exit(0)
+    except Exception:
+        os._exit(1)
 
 
 class STLGenerator:
@@ -418,18 +468,54 @@ class STLGenerator:
         return {"name": name, "shape": shape, "node_id": node_id}
 
     def _generate_stl(self, shape, output_path: Path):
-        """Mesh a shape and write binary STL."""
-        mesh = BRepMesh_IncrementalMesh(shape, self.linear_deflection, False, self.angular_deflection)
-        mesh.Perform()
+        """
+        Mesh a shape and write binary STL.
 
-        if not mesh.IsDone():
-            raise STLGenerationError(f"Meshing failed for {output_path.stem}")
+        Each item is meshed in an isolated forked child process so that a
+        SIGSEGV (exit -11) from OCC on degenerate geometry only kills that
+        one child.  The parent catches the non-zero exit code and raises
+        STLGenerationError, which the generation loop already handles by
+        recording an error for that item and continuing with the rest.
 
-        writer = StlAPI_Writer()
-        writer.ASCIIMode = False
-        success = writer.Write(shape, str(output_path))
-        if not success:
-            raise STLGenerationError(f"StlAPI_Writer failed for {output_path.stem}")
+        Two attempts are made before giving up — intermittent SIGSEGV crashes
+        from OCC often do not reproduce on retry because ASLR gives a different
+        memory layout, avoiding whatever alignment triggered the original fault.
+
+        Uses 'fork' (Linux/Docker default) so the OCC shape objects are
+        available in the child's address space without pickling.
+        """
+        reasons = {2: "IsDone() False", 3: "StlAPI_Writer failed"}
+        last_error: Exception = STLGenerationError(f"No attempts made for {output_path.stem}")
+
+        for attempt in range(2):
+            ctx = multiprocessing.get_context("fork")
+            p = ctx.Process(
+                target=_mesh_to_stl_child,
+                args=(shape, str(output_path), self.linear_deflection, self.angular_deflection),
+            )
+            p.start()
+            p.join(timeout=300)  # 5-minute per-item ceiling
+
+            if p.exitcode is None:
+                p.kill()
+                p.join()
+                last_error = STLGenerationError(f"Meshing timed out for {output_path.stem}")
+            elif p.exitcode == 0:
+                return  # success
+            else:
+                detail = reasons.get(p.exitcode, f"exit {p.exitcode}")
+                last_error = STLGenerationError(
+                    f"Meshing subprocess failed ({detail}) for {output_path.stem}"
+                )
+
+            if attempt == 0:
+                logger.warning(
+                    "stl_generation_retrying",
+                    stem=output_path.stem,
+                    exitcode=p.exitcode,
+                )
+
+        raise last_error
 
     @staticmethod
     def _label_entry(label) -> str:

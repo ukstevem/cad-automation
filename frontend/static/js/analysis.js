@@ -31,6 +31,9 @@ export class AnalysisPage {
         /** @type {Map<string, {name: string, parentName: string|null}>} nodeId -> {name, parentName} */
         this._parentMap = new Map();
 
+        /** @type {Map<string, string>} nodeId -> refId (populated from tree data, not DOM) */
+        this._nodeRefMap = new Map();
+
         /** @type {Map<string, number>} key -> setInterval timer id */
         this._explodePollTimers = new Map();
 
@@ -51,6 +54,42 @@ export class AnalysisPage {
 
         /** @type {number|null} debounce timer for project state save */
         this._saveTimer = null;
+
+        /** @type {Array|null} cached part-level consolidation groups (null = not yet loaded) */
+        this._consolidationGroups = null;
+
+        /** @type {Array|null} cached solid-level consolidation groups (cross-ref) */
+        this._solidConsolidationGroups = null;
+
+        /** @type {Array|null} cached intra-part solid consolidation groups */
+        this._intraSolidGroups = null;
+
+        /** @type {number|null} consolidation poll timer */
+        this._consolidatePollTimer = null;
+
+        /** @type {boolean} true while a consolidation task is running */
+        this._consolidating = false;
+
+        /** @type {Array|null} raw assembly_tree nodes from API response */
+        this._treeData = null;
+
+        /** @type {Map<string, number>} refId -> total instance count in tree (for qty display) */
+        this._refIdInstanceCount = new Map();
+
+        /** @type {Object|null} CNC analysis results keyed by ref_id (null = not yet loaded) */
+        this._cncAnalysisResults = null;
+
+        /** @type {number|null} CNC analysis poll timer */
+        this._cncPollTimer = null;
+
+        /** @type {boolean} true while a CNC analysis task is running */
+        this._cncAnalysing = false;
+
+        /** @type {string} last project number entered by user */
+        this._lastProjectNumber = '';
+
+        /** @type {string} last steel grade entered by user */
+        this._lastSteelGrade = 'S275';
     }
 
     render(container) {
@@ -86,13 +125,32 @@ export class AnalysisPage {
             clearTimeout(this._saveTimer);
             this._saveTimer = null;
         }
+        if (this._consolidatePollTimer) {
+            clearInterval(this._consolidatePollTimer);
+            this._consolidatePollTimer = null;
+        }
+        if (this._cncPollTimer) {
+            clearInterval(this._cncPollTimer);
+            this._cncPollTimer = null;
+        }
         this.stlMap.clear();
         this.explodedNodes.clear();
         this.classifications.clear();
         this._solidChildrenCache.clear();
         this._parentMap.clear();
+        this._nodeRefMap.clear();
+        this._refIdInstanceCount.clear();
         this._selectedNodeId = null;
         this._currentFilename = null;
+        this._consolidationGroups = null;
+        this._solidConsolidationGroups = null;
+        this._intraSolidGroups = null;
+        this._consolidating = false;
+        this._treeData = null;
+        this._cncAnalysisResults = null;
+        this._cncAnalysing = false;
+        // Note: _lastProjectNumber and _lastSteelGrade are intentionally NOT reset
+        // on cleanup so values persist across file selections within the same session.
     }
 
     // ---------------------------------------------------------------
@@ -124,6 +182,10 @@ export class AnalysisPage {
 
                 <div class="analysis-workspace">
                     <div class="workspace-tree-panel">
+                        <div class="tree-toolbar">
+                            <input id="tree-search" type="search" placeholder="Filter parts…" class="tree-search-input">
+                            <span id="classification-progress" class="classification-progress"></span>
+                        </div>
                         <div id="assembly-tree-container" class="assembly-tree"></div>
                     </div>
                     <div class="workspace-viewer-panel">
@@ -135,7 +197,10 @@ export class AnalysisPage {
                     </div>
                 </div>
 
-                <div id="classification-tables" class="classification-tables-section" hidden></div>
+                <div id="parts-list-bar" class="parts-list-bar" hidden>
+                    <button id="show-parts-list-btn" class="outline">BOM</button>
+                </div>
+                <div id="parts-list-panel" class="parts-list-panel" hidden></div>
             </section>
         `;
     }
@@ -155,6 +220,24 @@ export class AnalysisPage {
         btn.addEventListener('click', () => {
             const filename = select.value;
             if (filename) this._analyze(filename);
+        });
+
+        this.container.addEventListener('click', (e) => {
+            if (e.target.id === 'show-parts-list-btn') {
+                this._togglePartsList();
+            }
+        });
+
+        // Search input is inside #tree-results (added when tree renders), so bind via delegation
+        this.container.addEventListener('input', (e) => {
+            if (e.target.id === 'tree-search') {
+                this._filterTree(e.target.value);
+            }
+        });
+        this.container.addEventListener('search', (e) => {
+            if (e.target.id === 'tree-search') {
+                this._filterTree('');
+            }
         });
     }
 
@@ -340,10 +423,15 @@ export class AnalysisPage {
         `;
 
         const nodes = data.assembly_tree || [];
+        this._treeData = nodes;
         treeEl.innerHTML = '<ul>' + nodes.map(n => this._renderNode(n, 0)).join('') + '</ul>';
 
         this._buildParentMap(nodes, null);
         this._bindTreeEvents(treeEl);
+
+        // Show the "All Parts" button once the tree is available
+        const partsBar = this.container.querySelector('#parts-list-bar');
+        if (partsBar) partsBar.hidden = false;
     }
 
     _renderNode(node, depth) {
@@ -412,111 +500,44 @@ export class AnalysisPage {
     _buildParentMap(nodes, parentName) {
         for (const node of nodes) {
             this._parentMap.set(node.id, { name: node.name, parentName });
+            // Also record nodeId → refId so BOM walk never
+            // needs a DOM querySelector to resolve refId (fails for hidden nodes).
+            if (node.ref_id) {
+                this._nodeRefMap.set(node.id, node.ref_id);
+                // Count instances per refId — used to display correct qty for solid bodies
+                this._refIdInstanceCount.set(
+                    node.ref_id,
+                    (this._refIdInstanceCount.get(node.ref_id) || 0) + 1
+                );
+            }
             if (node.children && node.children.length > 0) {
                 this._buildParentMap(node.children, node.name);
             }
         }
     }
 
-    /**
-     * Re-render the two classification summary tables from the current
-     * this.classifications map. Called after every classify or restore.
-     *
-     * Deduplicates by ref_id so each unique part type appears exactly once
-     * with a Qty column showing the number of classified instances.
-     */
-    _updateClassificationTables() {
-        const el = this.container.querySelector('#classification-tables');
-        if (!el) return;
-
-        const treeEl = this.container.querySelector('#assembly-tree-container');
-
-        // Group by ref_id within each action bucket.
-        // Map: refId -> { name, usedIn, qty }
-        const postprocess = new Map();
-        const bought = new Map();
-
-        for (const [nodeId, action] of this.classifications) {
-            const targetMap = action === 'postprocess' ? postprocess
-                            : action === 'bought-out'  ? bought
-                            : null;
-            if (!targetMap) continue;
-
-            // Resolve ref_id for deduplication
-            const domEl = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(nodeId)}"]`);
-            const refId = domEl?.dataset.refId || nodeId;
-
-            if (targetMap.has(refId)) {
-                targetMap.get(refId).qty++;
-                continue;
-            }
-
-            // First occurrence — resolve name and parent
-            let name, usedIn;
-            const info = this._parentMap.get(nodeId);
-            if (info) {
-                name = info.name;
-                usedIn = info.parentName || '—';
-            } else if (domEl) {
-                name = domEl.dataset.nodeName || nodeId;
-                const parentAssembly = domEl.parentElement?.closest('.tree-node[data-node-type="assembly"]');
-                usedIn = parentAssembly?.dataset.nodeName || '—';
-            } else {
-                continue;
-            }
-
-            targetMap.set(refId, { name, usedIn, qty: 1 });
-        }
-
-        const ppRows = Array.from(postprocess.values());
-        const boRows = Array.from(bought.values());
-
-        const hasData = ppRows.length > 0 || boRows.length > 0;
-        el.hidden = !hasData;
-        if (!hasData) return;
-
-        const renderTable = (rows, label, cls) => `
-            <div class="classification-table-card">
-                <div class="classification-table-header ${cls}">
-                    <span>${label}</span>
-                    <span class="classification-table-count">${rows.length}</span>
-                </div>
-                ${rows.length === 0
-                    ? '<p class="classification-table-empty">None classified yet</p>'
-                    : `<table class="classification-table">
-                        <thead><tr><th>Part</th><th>Used In</th><th class="classification-table-qty-col">Qty</th></tr></thead>
-                        <tbody>${rows.map(r =>
-                            `<tr><td>${this._esc(r.name)}</td><td class="classification-table-parent">${this._esc(r.usedIn)}</td><td class="classification-table-qty">${r.qty}</td></tr>`
-                        ).join('')}</tbody>
-                    </table>`
-                }
-            </div>
-        `;
-
-        el.innerHTML = `
-            <div class="classification-tables-grid">
-                ${renderTable(ppRows, 'Postprocess', 'postprocess')}
-                ${renderTable(boRows, 'Bought Out', 'bought-out')}
-            </div>
-        `;
-    }
-
     _actionsHtml(node) {
         const btns = [];
         switch (node.node_type) {
             case 'assembly':
-                btns.push('<button class="btn-explode" data-action="explode" hidden>Explode</button>');
+                btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Explode</button>');
+                btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_multi_solid':
-                btns.push('<button class="btn-explode" data-action="explode" hidden>Explode</button>');
-                btns.push('<button class="btn-bought-out" data-action="bought-out" hidden>Bought-out</button>');
+                btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Solids</button>');
+                btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>');
+                btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_single_solid':
-                btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>Postprocess</button>');
-                btns.push('<button class="btn-bought-out" data-action="bought-out" hidden>Bought-out</button>');
+                btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>');
+                btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_no_solid':
-                btns.push('<button class="btn-bought-out" data-action="bought-out" hidden>Bought-out</button>');
+                btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
         }
         return btns.length ? `<span class="node-actions">${btns.join('')}</span>` : '';
@@ -549,13 +570,17 @@ export class AnalysisPage {
                 return;
             }
 
-            // 3. Classification buttons (Postprocess, Bought-out)
+            // 3. Classification buttons (Postprocess, Bought-out) and Unclassify
             const actionBtn = e.target.closest('[data-action]:not(.btn-explode)');
             if (actionBtn) {
                 const li = actionBtn.closest('.tree-node');
                 const nodeId = li.dataset.nodeId;
                 const action = actionBtn.dataset.action;
-                this._classifyNode(li, nodeId, action);
+                if (action === 'unclassify') {
+                    this._unclassifyNode(li, nodeId);
+                } else {
+                    this._classifyNode(li, nodeId, action);
+                }
                 return;
             }
 
@@ -582,21 +607,36 @@ export class AnalysisPage {
             const hasStl = this.stlMap.has(nodeId);
             const isExploded = this.explodedNodes.has(nodeId);
             const isClassified = this.classifications.has(nodeId);
+            const currentAction = li.dataset.classification || null;
             const row = li.querySelector(':scope > .tree-node-row');
 
-            // Selectable = has an STL, not classified, not exploded
-            const selectable = hasStl && !isClassified && !isExploded;
-            row.classList.toggle('node-selectable', selectable);
+            // Selectable = has an STL and not exploded (classified nodes stay clickable)
+            row.classList.toggle('node-selectable', hasStl && !isExploded);
 
-            // Explode button: visible if has STL and not already exploded
+            // Explode button: visible when has STL and not already exploded
             const explodeBtn = row.querySelector('.btn-explode');
             if (explodeBtn) {
                 explodeBtn.hidden = !hasStl || isExploded;
             }
 
-            // Action buttons (postprocess, bought-out): visible when has STL, not classified, not exploded
-            for (const btn of row.querySelectorAll('.btn-postprocess, .btn-bought-out')) {
-                btn.hidden = !hasStl || isClassified || isExploded;
+            // BO button: visible when has STL and not exploded; active when currently BO
+            const boughtOutBtn = row.querySelector('.btn-bought-out');
+            if (boughtOutBtn) {
+                boughtOutBtn.hidden = !hasStl || isExploded;
+                boughtOutBtn.classList.toggle('btn-active', isClassified && currentAction === 'bought-out');
+            }
+
+            // CNC button: visible when has STL and not exploded; active when currently CNC
+            const ppBtn = row.querySelector('.btn-postprocess');
+            if (ppBtn) {
+                ppBtn.hidden = !hasStl || isExploded;
+                ppBtn.classList.toggle('btn-active', isClassified && currentAction === 'postprocess');
+            }
+
+            // Unclassify button: only visible when classified and not exploded
+            const unclassifyBtn = row.querySelector('.btn-unclassify');
+            if (unclassifyBtn) {
+                unclassifyBtn.hidden = !isClassified || isExploded;
             }
 
             row.classList.toggle('node-selected', this._selectedNodeId === nodeId);
@@ -970,6 +1010,9 @@ export class AnalysisPage {
         const childUl = document.createElement('ul');
         const parentDepth = parseInt(li.dataset.depth) || 0;
 
+        const parentRefId = li.dataset.refId;
+        const parentName = li.dataset.nodeName || null;
+
         for (const child of childrenInfo) {
             const childLi = document.createElement('li');
             childLi.className = 'tree-node';
@@ -987,12 +1030,22 @@ export class AnalysisPage {
                     <span class="node-type-badge solid">Solid</span>
                     <span class="node-stl-spinner" hidden></span>
                     <span class="node-actions">
-                        <button class="btn-postprocess" data-action="postprocess" hidden>Postprocess</button>
-                        <button class="btn-bought-out" data-action="bought-out" hidden>Bought-out</button>
+                        <button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>
+                        <button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>
+                        <button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>
                     </span>
                 </div>
             `;
             childUl.appendChild(childLi);
+
+            // Register in parent/node maps so BOM walk can display solid body rows.
+            // _solidParentRefId lets _buildBOMItems look up the correct instance qty.
+            this._parentMap.set(child.nodeId, {
+                name: child.name,
+                parentName,
+                _solidParentRefId: parentRefId,
+            });
+            this._nodeRefMap.set(child.nodeId, child.nodeId);
         }
 
         li.appendChild(childUl);
@@ -1039,15 +1092,43 @@ export class AnalysisPage {
             this.classifications.set(elNodeId, action);
             el.classList.add('node-classified');
             el.dataset.classification = action;
-
-            const actionsEl = el.querySelector('.node-actions');
-            if (actionsEl) actionsEl.hidden = true;
-
-            const row = el.querySelector(':scope > .tree-node-row');
-            if (row) row.classList.remove('node-selectable');
         }
 
-        this._updateClassificationTables();
+        this._updateTreeSelectability();
+        this._updateProgress();
+        this._debouncedSave();
+    }
+
+    _unclassifyNode(li, nodeId) {
+        const refId = li.dataset.refId;
+        const nodeType = li.dataset.nodeType;
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+
+        // Mirror _classifyNode's collection logic — same ref_id + node_type peers
+        const toUnclassify = new Set([li]);
+        if (treeEl) {
+            for (const el of treeEl.querySelectorAll(
+                `.tree-node[data-node-id="${CSS.escape(nodeId)}"]`
+            )) {
+                toUnclassify.add(el);
+            }
+            if (refId) {
+                for (const el of treeEl.querySelectorAll(
+                    `.tree-node[data-ref-id="${CSS.escape(refId)}"][data-node-type="${CSS.escape(nodeType)}"]`
+                )) {
+                    toUnclassify.add(el);
+                }
+            }
+        }
+
+        for (const el of toUnclassify) {
+            this.classifications.delete(el.dataset.nodeId);
+            el.classList.remove('node-classified');
+            delete el.dataset.classification;
+        }
+
+        this._updateTreeSelectability();
+        this._updateProgress();
         this._debouncedSave();
     }
 
@@ -1109,15 +1190,13 @@ export class AnalysisPage {
                 for (const li of allLis) {
                     li.classList.add('node-classified');
                     li.dataset.classification = action;
-                    const actions = li.querySelector('.node-actions');
-                    if (actions) actions.hidden = true;
                 }
             }
         }
 
         // Apply selectability based on restored state
         this._updateTreeSelectability();
-        this._updateClassificationTables();
+        this._updateProgress();
 
         // Auto-select first available node
         if (this.stlMap.size > 0) {
@@ -1152,6 +1231,936 @@ export class AnalysisPage {
         } catch (err) {
             console.error('Failed to save project state:', err);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Progress counter + tree filter
+    // ---------------------------------------------------------------
+
+    /**
+     * Update the classification progress counter in the tree toolbar.
+     * Shows unique-part counts (by ref_id) for CNC and Bought-out.
+     */
+    _updateProgress() {
+        const progressEl = this.container.querySelector('#classification-progress');
+        if (!progressEl) return;
+
+        // Build per-ref_id classification map (last classification wins per ref_id)
+        const refIdCl = new Map();
+        for (const [nodeId, action] of this.classifications) {
+            const refId = this._nodeRefMap.get(nodeId) || nodeId;
+            refIdCl.set(refId, action);
+        }
+
+        let cnc = 0, bo = 0;
+        for (const action of refIdCl.values()) {
+            if (action === 'postprocess') cnc++;
+            else if (action === 'bought-out') bo++;
+        }
+
+        const parts = [];
+        if (cnc > 0) parts.push(`<span class="prog-cnc">${cnc} CNC</span>`);
+        if (bo > 0)  parts.push(`<span class="prog-bo">${bo} BO</span>`);
+        progressEl.innerHTML = parts.length
+            ? parts.join(' <span class="prog-sep">·</span> ')
+            : '';
+    }
+
+    /**
+     * Filter tree nodes by name. Matching nodes are shown; non-matching hidden.
+     * Parents of matching nodes are always expanded and shown.
+     */
+    _filterTree(query) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        if (!treeEl) return;
+
+        const q = query.trim().toLowerCase();
+
+        if (!q) {
+            // Clear filter — restore all nodes to visible
+            for (const li of treeEl.querySelectorAll('.tree-node')) {
+                li.style.display = '';
+            }
+            return;
+        }
+
+        // First pass: mark each node as matching or not
+        const matching = new Set();
+        for (const li of treeEl.querySelectorAll('.tree-node')) {
+            const name = (li.dataset.nodeName || '').toLowerCase();
+            if (name.includes(q)) matching.add(li);
+        }
+
+        // Second pass: also include ancestors of matching nodes
+        const visible = new Set(matching);
+        for (const li of matching) {
+            let ancestor = li.parentElement?.closest('.tree-node');
+            while (ancestor) {
+                visible.add(ancestor);
+                // Expand ancestor so child is reachable
+                const childUl = ancestor.querySelector(':scope > ul');
+                const toggle = ancestor.querySelector(':scope > .tree-node-row .tree-toggle');
+                if (childUl) {
+                    childUl.hidden = false;
+                    if (toggle) toggle.classList.add('expanded');
+                }
+                ancestor = ancestor.parentElement?.closest('.tree-node');
+            }
+        }
+
+        // Apply visibility
+        for (const li of treeEl.querySelectorAll('.tree-node')) {
+            li.style.display = visible.has(li) ? '' : 'none';
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // BOM view — explode-aware classified items
+    // ---------------------------------------------------------------
+
+    _togglePartsList() {
+        const panel = this.container.querySelector('#parts-list-panel');
+        const btn = this.container.querySelector('#show-parts-list-btn');
+        if (!panel) return;
+
+        if (!panel.hidden) {
+            panel.hidden = true;
+            btn.textContent = 'BOM';
+            return;
+        }
+
+        const filename = this._currentFilename;
+        if (!filename) return;
+
+        // Load cached consolidation and CNC analysis data (best-effort, non-blocking)
+        Promise.allSettled([
+            this.api.getConsolidation(filename)
+                .then(resp => {
+                    if (resp?.groups) {
+                        this._consolidationGroups = resp.groups;
+                        this._solidConsolidationGroups = resp.solid_groups || [];
+                        this._intraSolidGroups = resp.intra_solid_groups || [];
+                        this._consolidating = false;
+                    }
+                }),
+            this.api.getCncResult(filename)
+                .then(resp => {
+                    if (resp?.results) {
+                        this._cncAnalysisResults = resp.results;
+                        this._cncAnalysing = false;
+                    }
+                }),
+        ]).finally(() => {
+            this._renderPartsList(this._consolidationGroups);
+        });
+    }
+
+    /**
+     * Walk the assembly tree respecting the user's explode decisions and
+     * return a Map of BOM items keyed by ref_id (or solidNodeId for solid bodies).
+     *
+     * Only the current "effective" level is walked:
+     *   - Unexploded assemblies → one item (the assembly itself)
+     *   - Exploded assemblies   → recurse into children
+     *   - Multi-solid, solid-exploded → individual solid body items
+     *   - Multi-solid, not exploded   → one item
+     *   - Single-solid / no-solid    → one item
+     */
+    _buildBOMItems() {
+        const itemMap = new Map();
+        this._walkForBOM(this._treeData || [], null, itemMap);
+
+        // Merge solid body items that belong to the same solid consolidation group
+        // (e.g. solid 2 of part 1091 is geometrically identical to solid 0 of part 1085)
+        this._mergeSolidGroups(itemMap);
+
+        // Merge intra-part duplicate solids
+        // (e.g. solids 0,1,3,4 of a weldment are four identical plates)
+        this._mergeIntraSolidGroups(itemMap);
+
+        const cncItems = [];
+        const boItems  = [];
+
+        for (const item of itemMap.values()) {
+            const classifiedId = item.nodeIds.find(nid => this.classifications.has(nid));
+            const action = classifiedId ? this.classifications.get(classifiedId) : null;
+            if (action === 'postprocess') cncItems.push(item);
+            else if (action === 'bought-out') boItems.push(item);
+            // unclassified → skip
+        }
+
+        // Sort each section: by name
+        const byName = (a, b) => a.name.localeCompare(b.name);
+        cncItems.sort(byName);
+        boItems.sort(byName);
+
+        return { cncItems, boItems };
+    }
+
+    /**
+     * Post-walk pass: merge BOM items whose solid nodeIds belong to the same
+     * solid consolidation group.
+     *
+     * Solid nodeIds in the BOM have the form "<ref_id>:s<N>" (matching the
+     * synthetic ids used by the STL generator).  The solid_groups from the
+     * consolidation worker describe which (ref_id, solid_index) pairs share
+     * identical geometry across different parent multi-solid parts.
+     *
+     * When merging, the first encountered item is kept as canonical; subsequent
+     * same-group items have their qty, mirroredCount, nodeIds, and parentNames
+     * folded in, then removed from the map.
+     */
+    _mergeSolidGroups(itemMap) {
+        const groups = this._solidConsolidationGroups;
+        if (!groups || groups.length === 0) return;
+
+        // Build lookup: solid nodeId → group object
+        const solidIdToGroup = new Map();
+        for (const sg of groups) {
+            for (const m of sg.members) {
+                solidIdToGroup.set(`${m.ref_id}:s${m.solid_index}`, sg);
+            }
+        }
+
+        // Track which key is canonical for each group (first one seen wins)
+        const groupCanonicalKey = new Map();
+
+        for (const key of [...itemMap.keys()]) {
+            const sg = solidIdToGroup.get(key);
+            if (!sg) continue;
+
+            if (groupCanonicalKey.has(sg)) {
+                // Fold this item into the canonical item
+                const canonicalKey = groupCanonicalKey.get(sg);
+                const canonical = itemMap.get(canonicalKey);
+                const item = itemMap.get(key);
+                if (canonical && item) {
+                    canonical.qty += item.qty;
+                    canonical.mirroredCount += item.mirroredCount;
+                    canonical.nodeIds.push(...item.nodeIds);
+                    for (const p of item.parentNames) {
+                        if (!canonical.parentNames.includes(p)) canonical.parentNames.push(p);
+                    }
+                    itemMap.delete(key);
+                }
+            } else {
+                groupCanonicalKey.set(sg, key);
+                // canonical item keeps its name — it already has a human-readable name
+            }
+        }
+    }
+
+    /**
+     * Post-walk pass: merge BOM rows for identical solid bodies within the same
+     * multi-solid prototype (intra-part duplicate solids).
+     *
+     * For example, a weldment whose STEP compound contains four geometrically
+     * identical gusset plates will appear as four separate solid rows when
+     * solid-exploded.  The backend reports these in intra_solid_groups; this
+     * method folds them into a single row so the BOM shows qty×(plates per
+     * instance × number of instances) rather than separate rows per solid body.
+     */
+    _mergeIntraSolidGroups(itemMap) {
+        const groups = this._intraSolidGroups;
+        if (!groups || groups.length === 0) return;
+
+        for (const ig of groups) {
+            const keys = ig.solid_indices.map(idx => `${ig.ref_id}:s${idx}`);
+            const presentKeys = keys.filter(k => itemMap.has(k));
+            if (presentKeys.length < 2) continue;
+
+            const [canonicalKey, ...restKeys] = presentKeys;
+            const canonical = itemMap.get(canonicalKey);
+            for (const key of restKeys) {
+                const item = itemMap.get(key);
+                if (item) {
+                    canonical.qty += item.qty;
+                    canonical.mirroredCount += item.mirroredCount;
+                    canonical.nodeIds.push(...item.nodeIds);
+                    for (const p of item.parentNames) {
+                        if (!canonical.parentNames.includes(p)) canonical.parentNames.push(p);
+                    }
+                    itemMap.delete(key);
+                }
+            }
+        }
+    }
+
+    _walkForBOM(nodes, parentName, itemMap) {
+        for (const node of nodes) {
+            const refId     = node.ref_id || node.id;
+            const isMirr    = !!node.is_mirrored;
+
+            if (node.node_type === 'assembly') {
+                if (this.explodedNodes.has(node.id)) {
+                    this._walkForBOM(node.children || [], node.name, itemMap);
+                } else {
+                    this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
+                }
+
+            } else if (node.node_type === 'part_multi_solid') {
+                if (this.explodedNodes.has(node.id)) {
+                    const chiralKey = `${refId}:${isMirr ? 'M' : 'N'}`;
+                    const altKey    = `${refId}:${isMirr ? 'N' : 'M'}`;
+                    const solids    = this._solidChildrenCache.get(chiralKey)
+                                   ?? this._solidChildrenCache.get(altKey);
+                    if (solids && solids.length > 0) {
+                        for (const solid of solids) {
+                            this._bomUpsert(itemMap, solid.nodeId, solid.name,
+                                            solid.nodeId, isMirr, node.name);
+                        }
+                    } else {
+                        // Solid children not yet loaded — show the multi-solid itself
+                        this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
+                    }
+                } else {
+                    this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
+                }
+
+            } else {
+                // part_single_solid / part_no_solid
+                this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
+            }
+        }
+    }
+
+    _bomUpsert(itemMap, key, name, nodeId, isMirrored, parentName) {
+        if (itemMap.has(key)) {
+            const item = itemMap.get(key);
+            item.qty++;
+            if (isMirrored) item.mirroredCount++;
+            item.nodeIds.push(nodeId);
+            if (parentName && !item.parentNames.includes(parentName)) {
+                item.parentNames.push(parentName);
+            }
+        } else {
+            itemMap.set(key, {
+                key,
+                name,
+                nodeIds: [nodeId],
+                qty: 1,
+                mirroredCount: isMirrored ? 1 : 0,
+                parentNames: parentName ? [parentName] : [],
+            });
+        }
+    }
+
+    _renderPartsList(consolidationGroups = null) {
+        const panel = this.container.querySelector('#parts-list-panel');
+        if (!panel) return;
+
+        const { cncItems, boItems } = this._buildBOMItems();
+        const totalClassified = cncItems.length + boItems.length;
+
+        // Build a ref_id → consolidation group lookup for merged display
+        const refToGroup = new Map();
+        if (consolidationGroups) {
+            for (const g of consolidationGroups) {
+                for (const rid of g.ref_ids) {
+                    refToGroup.set(rid, g);
+                }
+            }
+        }
+
+        const renderRows = (items, isCnc = false) => {
+            // When consolidation is active, merge items in the same group into one row
+            if (consolidationGroups && refToGroup.size > 0) {
+                const seen = new Set();
+                const merged = [];
+
+                for (const item of items) {
+                    const g = refToGroup.get(item.key);
+                    if (g) {
+                        if (seen.has(g)) continue;
+                        seen.add(g);
+                        // Combine qty/mirrored from all group members that are classified
+                        const members = g.ref_ids
+                            .map(rid => items.find(it => it.key === rid))
+                            .filter(Boolean);
+                        const qty = members.reduce((s, m) => s + m.qty, 0);
+                        const mirr = members.reduce((s, m) => s + m.mirroredCount, 0);
+                        const parents = [...new Set(members.flatMap(m => m.parentNames))];
+                        const mergeTag = members.length > 1
+                            ? ` <span class="parts-list-group-tag" title="${members.length} identical CAD definitions merged — qty is combined total">&times;${members.length}</span>`
+                            : '';
+                        const mirrorNote = mirr > 0
+                            ? ` <span class="parts-list-mirror">(+${mirr}M)</span>` : '';
+                        const parentsCells = parents.length > 0
+                            ? parents.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
+                            : '<span class="used-in-item">—</span>';
+                        // Use first group member's result for CNC badge
+                        const cncHtml = isCnc && members[0]
+                            ? this._cncResultHtml(members[0], filename) : '';
+                        merged.push(`<tr>
+                            <td>${this._esc(g.canonical_name)}${mergeTag}${cncHtml ? ' ' + cncHtml : ''}</td>
+                            <td class="parts-list-qty">${qty}${mirrorNote}</td>
+                            <td class="parts-list-parents">${parentsCells}</td>
+                        </tr>`);
+                    } else {
+                        merged.push(isCnc ? this._cncBomRow(item, filename) : this._bomRow(item));
+                    }
+                }
+                return merged.join('');
+            }
+            return items.map(item =>
+                isCnc ? this._cncBomRow(item, filename) : this._bomRow(item)
+            ).join('');
+        };
+
+        const CL_BADGE = {
+            postprocess: '<span class="parts-list-cl-badge postprocess">CNC</span>',
+            'bought-out': '<span class="parts-list-cl-badge bought-out">BO</span>',
+        };
+
+        const filename = this._currentFilename;
+
+        // Determine which bulk downloads are available
+        let hasDxf = false, hasNc1 = false;
+        if (this._cncAnalysisResults) {
+            for (const r of Object.values(this._cncAnalysisResults)) {
+                const checks = r.type === 'multi_solid' ? (r.solids || []) : [r];
+                for (const s of checks) {
+                    if (s.dxf_path) hasDxf = true;
+                    if (s.nc1_path) hasNc1 = true;
+                }
+            }
+        }
+        const enc = encodeURIComponent(filename || '');
+        const dxfZipLink = hasDxf
+            ? `<a href="/api/v1/cnc-analysis/download-all/${enc}/dxf" class="parts-cnc-dl-btn" download>\u2193\u00a0DXF</a>`
+            : '';
+        const nc1ZipLink = hasNc1
+            ? `<a href="/api/v1/cnc-analysis/download-all/${enc}/nc1" class="parts-cnc-dl-btn" download>\u2193\u00a0NC1</a>`
+            : '';
+
+        const analyseBtn = this._cncAnalysing
+            ? `<button class="parts-cnc-analyse-btn outline" disabled>Analysing\u2026</button>`
+            : `<button class="parts-cnc-analyse-btn outline">Analyse</button>`;
+
+        let tbody = '';
+        if (cncItems.length > 0) {
+            tbody += `<tr class="parts-list-section-header parts-list-section-pp">
+                <td colspan="2">Post Process &middot; ${cncItems.length}</td>
+                <td class="parts-list-section-action">${analyseBtn}${dxfZipLink}${nc1ZipLink}</td>
+            </tr>`;
+            tbody += renderRows(cncItems, true);
+        }
+        if (boItems.length > 0) {
+            tbody += `<tr class="parts-list-section-header parts-list-section-bo">
+                <td colspan="3">Bought Out &middot; ${boItems.length}</td>
+            </tr>`;
+            tbody += renderRows(boItems, false);
+        }
+        if (totalClassified === 0) {
+            tbody = `<tr><td colspan="3" class="parts-list-empty-msg">No items classified yet — use CNC / BO buttons in the tree.</td></tr>`;
+        }
+
+        const consolidateBtn = this._consolidating
+            ? `<button class="parts-consolidate-btn outline" disabled>Consolidating…</button>`
+            : (consolidationGroups
+                ? `<button class="parts-consolidate-btn outline" title="Re-run consolidation">Consolidate</button>`
+                : `<button class="parts-consolidate-btn">Consolidate</button>`);
+
+        const bomDlBtn = totalClassified > 0
+            ? `<button class="parts-bom-dl-btn outline">\u2193\u00a0BOM</button>`
+            : '';
+
+        panel.innerHTML = `
+            <div class="parts-list-card">
+                <div class="parts-list-header">
+                    <span>BOM${totalClassified > 0 ? ' &middot; ' + totalClassified : ''}</span>
+                    <div class="parts-list-header-actions">
+                        ${consolidateBtn}
+                        ${bomDlBtn}
+                        <button id="parts-list-close-btn" class="outline parts-list-close">&#x2715;</button>
+                    </div>
+                </div>
+                <div class="parts-list-scroll">
+                    <table class="parts-list-table">
+                        <thead>
+                            <tr>
+                                <th>Part</th>
+                                <th class="parts-list-qty">Qty</th>
+                                <th class="parts-list-used-in-header">Used In</th>
+                            </tr>
+                        </thead>
+                        <tbody>${tbody}</tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+        panel.hidden = false;
+
+        panel.querySelector('#parts-list-close-btn')?.addEventListener('click', () => {
+            panel.hidden = true;
+            const btn = this.container.querySelector('#show-parts-list-btn');
+            if (btn) btn.textContent = 'BOM';
+        });
+
+        panel.querySelector('.parts-consolidate-btn')?.addEventListener('click', () => {
+            this._startConsolidation();
+        });
+
+        panel.querySelector('.parts-cnc-analyse-btn')?.addEventListener('click', () => {
+            this._startCncAnalysis(cncItems);
+        });
+
+        panel.querySelector('.parts-bom-dl-btn')?.addEventListener('click', () => {
+            this._downloadBOM(cncItems, boItems);
+        });
+    }
+
+    _bomRow(item) {
+        const mirrorNote = item.mirroredCount > 0
+            ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
+        const parentsCells = item.parentNames.length > 0
+            ? item.parentNames.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
+            : '<span class="used-in-item">—</span>';
+        return `<tr>
+            <td>${this._esc(item.name)}</td>
+            <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
+            <td class="parts-list-parents">${parentsCells}</td>
+        </tr>`;
+    }
+
+    _cncBomRow(item, filename) {
+        const mirrorNote = item.mirroredCount > 0
+            ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
+        const parentsCells = item.parentNames.length > 0
+            ? item.parentNames.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
+            : '<span class="used-in-item">—</span>';
+        const cncHtml = this._cncResultHtml(item, filename);
+        return `<tr>
+            <td>${this._esc(item.name)}${cncHtml ? ' ' + cncHtml : ''}</td>
+            <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
+            <td class="parts-list-parents">${parentsCells}</td>
+        </tr>`;
+    }
+
+    /**
+     * Resolve the CNC analysis result for a BOM item.
+     * For single-solid parts: looks up by item.key (= XCAF ref_id).
+     * For solid bodies from exploded multi-solids: looks up via _solidParentRefId,
+     * then picks the correct per-solid result using the solid index encoded in nodeId.
+     */
+    _cncResultForItem(item) {
+        if (!this._cncAnalysisResults) return null;
+
+        // Direct lookup (single-solid part)
+        const direct = this._cncAnalysisResults[item.key];
+        if (direct) return { result: direct, xcafRefId: item.key, solidIdx: null };
+
+        // Solid body from exploded multi-solid
+        const parentInfo = this._parentMap.get(item.key);
+        if (parentInfo?._solidParentRefId) {
+            const xcafRefId = parentInfo._solidParentRefId;
+            const parentResult = this._cncAnalysisResults[xcafRefId];
+            if (!parentResult) return null;
+
+            if (parentResult.type === 'multi_solid') {
+                // Try to extract solid index from nodeId (expected format "<ref_id>:s<N>")
+                const match = item.key.match(/:s(\d+)$/);
+                const solidIdx = match ? parseInt(match[1]) : 0;
+                const solidResult = parentResult.solids?.[solidIdx];
+                if (solidResult) return { result: solidResult, xcafRefId, solidIdx };
+                // Fall back to parent result if index extraction fails
+                return { result: parentResult, xcafRefId, solidIdx: null };
+            }
+            // Non-multi_solid result stored under parent ref_id
+            return { result: parentResult, xcafRefId, solidIdx: null };
+        }
+
+        return null;
+    }
+
+    /**
+     * Return HTML string with result badge and optional download link for a CNC BOM item.
+     */
+    _cncResultHtml(item, filename) {
+        const info = this._cncResultForItem(item);
+        if (!info) return '';
+
+        const { result, xcafRefId, solidIdx } = info;
+        let badge = '';
+        let downloadLink = '';
+
+        // Construct safe_ref: ref_id with colons→hyphens, plus "-s{N}" for solid N>0
+        const baseSafeRef = xcafRefId.replace(/:/g, '-');
+        const safeRef = (solidIdx != null && solidIdx > 0)
+            ? `${baseSafeRef}-s${solidIdx}`
+            : baseSafeRef;
+
+        switch (result.type) {
+            case 'plate': {
+                const { L, W, T } = result.dims || {};
+                const dimStr = (L && W && T)
+                    ? ` ${Math.round(L)}\u00d7${Math.round(W)}\u00d7${Math.round(T)}`
+                    : '';
+                badge = `<span class="cnc-badge cnc-badge-plate">PLATE${this._esc(dimStr)}</span>`;
+                if (filename) {
+                    const url = `/api/v1/cnc-analysis/download/${encodeURIComponent(filename)}/${encodeURIComponent(safeRef)}/dxf`;
+                    downloadLink = `<a href="${url}" class="cnc-download" download>\u2193DXF</a>`;
+                }
+                break;
+            }
+            case 'section': {
+                const label = result.designation
+                    ? `${result.category || ''} ${result.designation}`.trim()
+                    : result.category || 'SECTION';
+                badge = `<span class="cnc-badge cnc-badge-section">${this._esc(label)}</span>`;
+                if (filename && result.nc1_path) {
+                    const url = `/api/v1/cnc-analysis/download/${encodeURIComponent(filename)}/${encodeURIComponent(safeRef)}/nc1`;
+                    downloadLink = `<a href="${url}" class="cnc-download" download>\u2193NC1</a>`;
+                }
+                break;
+            }
+            case 'multi_solid':
+                badge = `<span class="cnc-badge cnc-badge-multi">MULTI (${result.n_solids})</span>`;
+                break;
+            case 'unknown': {
+                const msg = result.message ? this._esc(result.message) : '';
+                badge = `<span class="cnc-badge cnc-badge-unknown">UNKNOWN</span>`
+                      + (msg ? `<span class="cnc-unknown-msg" title="${msg}">${msg}</span>` : '');
+                break;
+            }
+            default:
+                return '';
+        }
+
+        return badge + (downloadLink ? ' ' + downloadLink : '');
+    }
+
+    /**
+     * Generate and download a BOM JSON file with full ordering information.
+     * Includes CNC items with dims, weight, qty, filenames; and bought-out items.
+     */
+    _downloadBOM(cncItems, boItems) {
+        const DENSITY = 7.85e-6; // kg/mm³ (steel)
+        const r3 = v => (v != null && isFinite(v)) ? Math.round(v * 1000) / 1000 : null;
+        const r1 = v => (v != null && isFinite(v)) ? Math.round(v * 10)   / 10   : null;
+
+        const cnc_entries = cncItems.map(item => {
+            const info = this._cncResultForItem(item);
+            const res  = info?.result ?? null;
+
+            // Weight — prefer stored mass_kg, fall back to volume × density, then dims × density
+            let massEach = res?.mass_kg ?? null;
+            if (massEach == null && res?.volume_mm3 != null) {
+                massEach = r3(res.volume_mm3 * DENSITY);
+            }
+            if (massEach == null && res?.dims) {
+                const { L, W, T } = res.dims;
+                if (L && W && T) massEach = r3(L * W * T * DENSITY);
+            }
+
+            const baseName = fn => fn
+                ? fn.replace(/\\/g, '/').split('/').pop()
+                : null;
+
+            return {
+                name:             item.name,
+                ref_id:           item.key,
+                qty:              item.qty,
+                parent_assemblies: item.parentNames,
+                type:             res?.type        ?? null,
+                category:         res?.category    ?? null,
+                designation:      res?.designation ?? null,
+                profile_type:     res?.profile_type ?? null,
+                dims_mm:          res?.dims        ?? null,
+                volume_mm3:       res?.volume_mm3  ?? null,
+                mass_kg_each:     massEach,
+                total_weight_kg:  massEach != null ? r3(massEach * item.qty) : null,
+                dxf_file:         baseName(res?.dxf_path),
+                nc1_file:         baseName(res?.nc1_path),
+                holes:            res?.holes      ?? null,
+                end_cuts:         res?.end_cuts   ?? null,
+                match_score:      res?.match_score ?? null,
+                analysed_at:      res?.analysed_at ?? null,
+            };
+        });
+
+        const bo_entries = boItems.map(item => ({
+            name:             item.name,
+            qty:              item.qty,
+            parent_assemblies: item.parentNames,
+        }));
+
+        const totalCncQty  = cnc_entries.reduce((s, e) => s + e.qty, 0);
+        const totalWeight  = cnc_entries.reduce((s, e) => s + (e.total_weight_kg ?? 0), 0);
+        const totalBoQty   = bo_entries.reduce((s, e) => s + e.qty, 0);
+
+        const bom = {
+            project_number:  this._lastProjectNumber  || null,
+            steel_grade:     this._lastSteelGrade     || null,
+            step_file:       this._currentFilename    || null,
+            generated_at:    new Date().toISOString(),
+            cnc_items:       cnc_entries,
+            bought_out_items: bo_entries,
+            summary: {
+                total_cnc_types:           cnc_entries.length,
+                total_cnc_qty:             totalCncQty,
+                total_estimated_weight_kg: r1(totalWeight),
+                total_bought_out_types:    bo_entries.length,
+                total_bought_out_qty:      totalBoQty,
+            },
+        };
+
+        const blob = new Blob([JSON.stringify(bom, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `${this._lastProjectNumber || 'project'}-bom.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    }
+
+    /**
+     * Show the settings dialog, then collect XCAF ref_ids and start the analysis.
+     */
+    _startCncAnalysis(cncItems) {
+        if (this._cncAnalysing) return;
+        const filename = this._currentFilename;
+        if (!filename || cncItems.length === 0) return;
+
+        this._showCncSettingsDialog((projectNumber, steelGrade) => {
+            const refIdSet = new Set();
+            const memberIds = {};
+            const parentNames = {};
+
+            for (const item of cncItems) {
+                let xcafRefId = item.key;
+
+                // For solid body items, use the parent multi-solid's XCAF ref_id
+                const parentInfo = this._parentMap.get(item.key);
+                if (parentInfo?._solidParentRefId) {
+                    xcafRefId = parentInfo._solidParentRefId;
+                }
+
+                refIdSet.add(xcafRefId);
+                if (!memberIds[xcafRefId]) {
+                    memberIds[xcafRefId] = parentInfo?._solidParentRefId
+                        ? (parentInfo.parentName || item.name)
+                        : item.name;
+                }
+                if (!parentNames[xcafRefId]) {
+                    // Use the first parentNames entry as the external reference (e.g. C25001).
+                    // Fall back to the item's own name if no parent is available.
+                    const firstParent = item.parentNames?.[0];
+                    parentNames[xcafRefId] = firstParent || item.name || '';
+                }
+            }
+
+            if (refIdSet.size === 0) return;
+
+            this._cncAnalysing = true;
+            this._renderPartsList(this._consolidationGroups);
+
+            this.api.startCncAnalysis(filename, [...refIdSet], memberIds, parentNames, projectNumber, steelGrade)
+                .then(resp => {
+                    if (resp.cnc_task_id) {
+                        this._pollCncAnalysis(resp.cnc_task_id);
+                    } else {
+                        // Unexpected inline result
+                        this._cncAnalysing = false;
+                        this._renderPartsList(this._consolidationGroups);
+                    }
+                })
+                .catch(err => {
+                    console.error('Failed to start CNC analysis:', err);
+                    this._cncAnalysing = false;
+                    this._renderPartsList(this._consolidationGroups);
+                });
+        });
+    }
+
+    /**
+     * Show a <dialog> modal to collect project number and steel grade before
+     * starting CNC analysis.  Calls onConfirm(projectNumber, steelGrade) when
+     * the user clicks Analyse; does nothing if the user cancels.
+     */
+    _showCncSettingsDialog(onConfirm) {
+        // Remove any stale dialog left from a previous call
+        const existing = document.getElementById('cnc-settings-dialog');
+        if (existing) existing.remove();
+
+        const dialog = document.createElement('dialog');
+        dialog.id = 'cnc-settings-dialog';
+        dialog.className = 'cnc-settings-dialog';
+        dialog.innerHTML = `
+            <form method="dialog" class="cnc-settings-form">
+                <h3 class="cnc-settings-title">CNC Analysis Settings</h3>
+                <div class="cnc-settings-field">
+                    <label for="cnc-project-number">Project Number</label>
+                    <input type="text" id="cnc-project-number"
+                           placeholder="e.g. C25001"
+                           value="${this._esc(this._lastProjectNumber)}"
+                           autocomplete="off">
+                </div>
+                <div class="cnc-settings-field">
+                    <label for="cnc-steel-grade">Steel Grade</label>
+                    <input type="text" id="cnc-steel-grade"
+                           placeholder="e.g. S275"
+                           value="${this._esc(this._lastSteelGrade)}"
+                           autocomplete="off">
+                </div>
+                <div class="cnc-settings-actions">
+                    <button type="button" id="cnc-settings-cancel" class="outline">Cancel</button>
+                    <button type="submit">Analyse</button>
+                </div>
+            </form>
+        `;
+
+        document.body.appendChild(dialog);
+        dialog.showModal();
+
+        // Focus the first input
+        dialog.querySelector('#cnc-project-number')?.focus();
+
+        dialog.querySelector('#cnc-settings-cancel').addEventListener('click', () => {
+            dialog.close();
+            dialog.remove();
+        });
+
+        dialog.querySelector('form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const projNum = dialog.querySelector('#cnc-project-number').value.trim();
+            const grade   = dialog.querySelector('#cnc-steel-grade').value.trim() || 'S275';
+            this._lastProjectNumber = projNum;
+            this._lastSteelGrade   = grade;
+            dialog.close();
+            dialog.remove();
+            onConfirm(projNum, grade);
+        });
+
+        // ESC key — browser fires 'cancel' on <dialog>
+        dialog.addEventListener('cancel', () => {
+            dialog.remove();
+        });
+    }
+
+    _pollCncAnalysis(taskId) {
+        if (this._cncPollTimer) clearInterval(this._cncPollTimer);
+
+        this._cncPollTimer = setInterval(() => {
+            this.api.getCncStatus(taskId)
+                .then(resp => {
+                    if (resp.status === 'completed') {
+                        clearInterval(this._cncPollTimer);
+                        this._cncPollTimer = null;
+                        this._cncAnalysing = false;
+                        this._cncAnalysisResults = resp.results || {};
+
+                        const panel = this.container?.querySelector('#parts-list-panel');
+                        if (panel && !panel.hidden) {
+                            this._renderPartsList(this._consolidationGroups);
+                        }
+                    } else if (resp.status === 'failed') {
+                        clearInterval(this._cncPollTimer);
+                        this._cncPollTimer = null;
+                        this._cncAnalysing = false;
+                        console.error('CNC analysis failed:', resp.error);
+
+                        const panel = this.container?.querySelector('#parts-list-panel');
+                        if (panel && !panel.hidden) {
+                            this._renderPartsList(this._consolidationGroups);
+                        }
+                    }
+                    // pending/running → keep polling
+                })
+                .catch(() => { /* network hiccup — keep polling */ });
+        }, 2000);
+    }
+
+    _startConsolidation() {
+        if (this._consolidating) return;
+        const filename = this._currentFilename;
+        if (!filename) return;
+
+        this._consolidating = true;
+        this._renderPartsList(null);  // Re-render to show "Consolidating…" button state
+
+        this.api.startConsolidation(filename)
+            .then(resp => {
+                if (resp.groups) {
+                    this._consolidationGroups = resp.groups;
+                    this._solidConsolidationGroups = resp.solid_groups || [];
+                    this._intraSolidGroups = resp.intra_solid_groups || [];
+                    this._consolidating = false;
+                    this._renderPartsList(this._consolidationGroups);
+                } else if (resp.consolidation_task_id) {
+                    this._pollConsolidation(resp.consolidation_task_id);
+                } else {
+                    this._consolidating = false;
+                    this._renderPartsList(null);
+                }
+            })
+            .catch(err => {
+                console.error('Failed to start consolidation:', err);
+                this._consolidating = false;
+                this._renderPartsList(null);
+            });
+    }
+
+    _pollConsolidation(taskId) {
+        if (this._consolidatePollTimer) clearInterval(this._consolidatePollTimer);
+
+        this._consolidatePollTimer = setInterval(() => {
+            this.api.getConsolidationStatus(taskId)
+                .then(resp => {
+                    if (resp.status === 'completed') {
+                        clearInterval(this._consolidatePollTimer);
+                        this._consolidatePollTimer = null;
+                        this._consolidating = false;
+                        this._consolidationGroups = resp.groups;
+                        this._solidConsolidationGroups = resp.solid_groups || [];
+                        this._intraSolidGroups = resp.intra_solid_groups || [];
+
+                        const panel = this.container?.querySelector('#parts-list-panel');
+                        if (panel && !panel.hidden) {
+                            this._renderPartsList(this._consolidationGroups);
+                        }
+                    } else if (resp.status === 'failed') {
+                        clearInterval(this._consolidatePollTimer);
+                        this._consolidatePollTimer = null;
+                        this._consolidating = false;
+                        console.error('Consolidation failed:', resp.error);
+                        const panel = this.container?.querySelector('#parts-list-panel');
+                        if (panel && !panel.hidden) {
+                            this._renderPartsList(null);
+                        }
+                    }
+                    // pending/running → keep polling
+                })
+                .catch(() => {/* network hiccup — keep polling */});
+        }, 2000);
+    }
+
+    /**
+     * Classify all instances of a part by nodeId list.
+     * Used by the parts list panel to classify parts that may not yet be
+     * visible in the DOM (unexploded assemblies).
+     */
+    _classifyAllInstances(nodeIds, action) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+
+        for (const nodeId of nodeIds) {
+            this.classifications.set(nodeId, action);
+
+            if (treeEl) {
+                for (const li of treeEl.querySelectorAll(
+                    `.tree-node[data-node-id="${CSS.escape(nodeId)}"]`
+                )) {
+                    li.classList.add('node-classified');
+                    li.dataset.classification = action;
+                }
+            }
+        }
+
+        this._updateTreeSelectability();
+        this._updateProgress();
+        this._debouncedSave();
     }
 
     // ---------------------------------------------------------------

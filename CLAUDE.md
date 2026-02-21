@@ -179,31 +179,24 @@ writer.ASCIIMode = False          # CORRECT (property)
 # writer.SetASCIIMode(False)      # WRONG (AttributeError)
 ```
 
-## Known OCC Issue: Chirality Detection Disabled
+## OCC Chirality Detection
 
-**`AssemblyAnalyzer._is_mirrored()` always returns `False`.**
+**`AssemblyAnalyzer._is_mirrored(label)`** detects mirrored instances using BRep-level location:
 
-Accessing `XCAFDoc_Location` XCAF attributes (via `FindAttribute`, `GetID_s`, `Get`, or `IsReversed`) causes a **SIGSEGV** for certain XCAF labels in complex STEP files. The crash occurs in OCC's C++ code before Python can catch it.
-
-As a result:
-- `_is_mirrored` is a stub returning `False`
-- `chiralKey` is always `"{ref_id}:N"` (never `"{ref_id}:M"`)
-- All instances of a part (mirrored or not) share the same STL mesh
-- For symmetric parts this is invisible; for asymmetric mirrored parts the STL is visually wrong
-
-**Safe re-implementation path**: Use BRep-level location instead of XCAF attribute:
 ```python
-from OCP.XCAFDoc import XCAFDoc_ShapeTool
-shape = XCAFDoc_ShapeTool.GetShape_s(label)          # get BRep shape
+shape = XCAFDoc_ShapeTool.GetShape_s(label)   # safe — avoids XCAFDoc_Location attribute
 loc = shape.Location()
-is_mirrored = loc.IsNegative()                        # or IsReversed() on the trsf
+return loc.IsNegative()                        # True if transformation determinant is -1
 ```
-This avoids `XCAFDoc_Location` entirely and works on the BRep representation.
+
+**Why not `XCAFDoc_Location`**: Accessing `XCAFDoc_Location` XCAF attributes (via `FindAttribute`, `GetID_s`, `Get`) causes **SIGSEGV** in OCC 7.7.x for certain XCAF labels in complex STEP files. The BRep path avoids this entirely.
+
+**STL meshes for mirrored parts**: The STL generator currently meshes the prototype shape (via the referred/prototype label), not the instance shape. Mirrored instances therefore show the non-mirrored mesh in the 3D viewer — visually wrong for asymmetric parts but functionally harmless for the classification workflow. Fixing this would require applying the instance's mirror transform to the mesh before writing the STL.
 
 ## Upcoming Work
 
-- **Re-enable chirality detection** using BRep-level `shape.Location().IsNegative()` (see above)
-- **Postprocess item consolidation worker**: Background worker to identify duplicate postprocess items across exploded assemblies. Many parts appear multiple times (once per parent assembly they appear in). Consolidation should group by `ref_id` (already done in BOM display), but may also need geometric deduplication for parts that are identical shapes but have different XCAF prototypes.
+- **Postprocess item consolidation worker**: Background worker to build a cross-assembly flat parts list — all unique `ref_id` parts with total instance counts across the whole tree, regardless of which parent assembly they live in. Currently the BOM deduplicates visible classified nodes by ref_id, but doesn't aggregate across unexploded assemblies.
+- **Mirrored-part STL meshes**: STL generator always meshes the prototype shape; mirrored instances show the non-mirrored mesh. Fix: apply the instance's mirror transform to the mesh before writing the STL.
 - **DXF/DWG output** (ezdxf installed, not wired)
 - **NC code generation**
 - **Full BOM export** (CSV/Excel)
@@ -326,8 +319,8 @@ docker exec cad-automation-api python -m pytest tests/ -v
 
 ## What's Not Yet Built
 
-- **Chirality detection** — currently disabled (always returns non-mirrored); mirrored parts use wrong-handed mesh
-- **Postprocess consolidation worker** — deduplicate across assemblies, identify truly unique parts
+- **Mirrored-part STL meshes** — `is_mirrored` is now correctly detected; STL generator still meshes the prototype (non-mirrored) shape; mirrored parts show wrong-handed mesh in viewer
+- **Postprocess consolidation worker** — cross-assembly flat parts list, identify truly unique parts by ref_id across all assembly levels
 - DXF/DWG output generation (ezdxf is installed but not wired up)
 - NC code generation
 - BOM export (CSV/Excel)

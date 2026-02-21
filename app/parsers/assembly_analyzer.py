@@ -199,19 +199,28 @@ class AssemblyAnalyzer:
     @staticmethod
     def _is_mirrored(label) -> bool:
         """
-        Mirror/chirality detection is temporarily disabled.
+        Detect if this instance has a mirror transformation (negative determinant).
 
-        Any XCAFDoc_Location attribute access (including the constructor and
-        FindAttribute call) causes SIGSEGV in OCC 7.7.x / OCP for certain XCAF
-        labels in complex STEP files.  Until a safe implementation is found
-        (e.g., via BRep_Builder shape comparison rather than XCAF attribute reads),
-        this always returns False so that all instances are treated as non-mirrored.
+        Uses BRep-level shape location from XCAFDoc_ShapeTool.GetShape_s() rather
+        than reading the XCAFDoc_Location XCAF attribute directly.  The XCAF
+        attribute path caused SIGSEGV in OCC 7.7.x for certain labels in complex
+        STEP files; this approach is safe because it operates on the Python-level
+        TopoDS_Shape and TopLoc_Location objects, not on XCAF attribute nodes.
 
-        Consequence: chiralKey is always "{ref_id}:N"; mirrored instances share
-        STL meshes with their non-mirrored counterparts (visually incorrect for
-        asymmetric parts, but functionally harmless for the classification workflow).
+        Returns True if the transformation determinant is negative (reflected/mirrored).
+        Wrapped in try/except so any API mismatch falls back to False rather than
+        raising (SIGSEGV cannot be caught, but that path is avoided here).
         """
-        return False
+        try:
+            shape = XCAFDoc_ShapeTool.GetShape_s(label)
+            if shape.IsNull():
+                return False
+            loc = shape.Location()
+            if loc.IsIdentity():
+                return False
+            return loc.IsNegative()
+        except Exception:
+            return False
 
     @staticmethod
     def _classify_node(is_assembly: bool, num_solids: int) -> str:
