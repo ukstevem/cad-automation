@@ -48,6 +48,8 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
+temp/*
+!temp/.gitkeep
 /tmp/
 
 # Docker

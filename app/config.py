@@ -22,10 +22,10 @@ class Settings(BaseSettings):
     OUTPUT_DIR: str = "/outputs"
 
     # Analysis cache
-    ANALYSIS_OUTPUT_DIR: str = "/outputs/analysis"
+    ANALYSIS_OUTPUT_DIR: str = "/app/outputs/analysis"
 
     # STL generation settings
-    STL_OUTPUT_DIR: str = "/outputs/stl"
+    STL_OUTPUT_DIR: str = "/app/outputs/stl"
     STL_LINEAR_DEFLECTION: float = 0.5
     STL_ANGULAR_DEFLECTION: float = 0.5
     

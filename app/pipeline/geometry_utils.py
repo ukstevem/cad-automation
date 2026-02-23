@@ -537,7 +537,7 @@ def swap_width_and_height_if_required(profile_match: Dict[str, Any], shape: Topo
     if not requires_swap:
         return shape, obb_geom
 
-    print("Swapping height/width axes to match profile classification")
+    print("Swapping height/width axes to match profile classification", file=__import__("sys").stderr)
     trsf = gp_Trsf()
     trsf.SetRotation(gp_Ax1(obb_geom["aligned_center"], obb_geom["aligned_dir_x"]), math.pi / 2.0)
     shape_rotated = BRepBuilderAPI_Transform(shape, trsf, True).Shape()
@@ -814,7 +814,7 @@ def _outer_cg_yz_robust(shape_local, x_abs: float, *, L: float, H: float, W: flo
                 c = g.CentreOfMass()
                 return float(c.Y()), float(c.Z())
 
-    print(f"[sec] failed near X~{x_abs:.2f} (L={L:.1f}, H={H:.1f}, W={W:.1f})")
+    print(f"[sec] failed near X~{x_abs:.2f} (L={L:.1f}, H={H:.1f}, W={W:.1f})", file=__import__("sys").stderr)
     return None
 
 
@@ -892,7 +892,7 @@ def _cg_from_best_section(shape_local, *, xmin, xmax, ymin, ymax, zmin, zmax, L,
                 c = g.CentreOfMass()
                 return float(c.Y()), float(c.Z())
 
-    print(f"[sec] no closed loop in core region [{x_lo:.1f},{x_hi:.1f}] (miters?)")
+    print(f"[sec] no closed loop in core region [{x_lo:.1f},{x_hi:.1f}] (miters?)", file=__import__("sys").stderr)
     return None
 
 
@@ -911,7 +911,7 @@ def force_canonical_dstv_pose(shape_local, profile_type: str, x_frac: float = 0.
     if cg is not None:
         y_c, z_c = cg
         if profile_type == "U" and z_c > 0.5 * W:
-            print("CG test (U): far side -> rotate 180 deg about X")
+            print("CG test (U): far side -> rotate 180 deg about X", file=__import__("sys").stderr)
             shape_local = _rot_180_about_X(shape_local)
 
     xmin, xmax, ymin, ymax, zmin, zmax = _bbox_local(shape_local)

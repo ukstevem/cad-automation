@@ -99,5 +99,5 @@ def generate_nc1_file(df_holes, header_data, nc_dir, web_cut) -> tuple:
         f.write("EN\n")
 
     nc1_hash = nc1_group_key(out_file)
-    print(f"DSTV written to {out_file}, hash={nc1_hash}")
+    print(f"DSTV written to {out_file}, hash={nc1_hash}", file=__import__("sys").stderr)
     return out_file, nc1_hash

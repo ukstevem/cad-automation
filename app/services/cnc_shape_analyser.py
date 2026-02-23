@@ -494,7 +494,10 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
                 member_id: Optional[str] = None,
                 parent_name: Optional[str] = None,
                 project_number: Optional[str] = None,
-                steel_grade: Optional[str] = None) -> Dict[str, Any]:
+                steel_grade: Optional[str] = None,
+                *,
+                _doc=None,
+                _shape_tool=None) -> Dict[str, Any]:
     """
     Analyse one XCAF prototype shape identified by ref_id.
 
@@ -503,8 +506,17 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
       - type='section' -> {type, category, designation, dims, nc1_path, holes, end_cuts}
       - type='multi_solid' -> {type, solids: [result_per_solid, ...]}
       - type='unknown' -> {type, message}
+
+    ``_doc`` and ``_shape_tool`` are optional keyword-only arguments that allow
+    the caller to supply a pre-opened XCAF document.  When processing many
+    ref_ids from the same file, pass the result of ``_read_xcaf(file_path)``
+    once and reuse it for every call — this avoids the OCC memory build-up that
+    occurs when the full STEP file is parsed N times in the same process.
     """
-    doc, shape_tool = _read_xcaf(file_path)
+    if _doc is not None and _shape_tool is not None:
+        doc, shape_tool = _doc, _shape_tool
+    else:
+        doc, shape_tool = _read_xcaf(file_path)
     shape = _get_shape(doc, ref_id)
 
     n_solids = count_solids_in_shape(shape)

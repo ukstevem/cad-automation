@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import FileResponse
 import structlog
 
 from app.config import settings
@@ -209,6 +210,43 @@ async def get_stl_status(task_id: str) -> Dict[str, Any]:
             detail={"error": "Task not found", "task_id": task_id},
         )
     return info.to_dict()
+
+
+@router.get("/stl/thumbnail/{filename}")
+async def get_thumbnail(filename: str):
+    """
+    Return a PNG thumbnail of the full top-level assembly.
+
+    Generated on first request (may take a few seconds for large assemblies)
+    then cached permanently under the same STL output directory.
+    """
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "STEP file not found", "filename": filename},
+        )
+
+    output_dir = _stl_output_dir(filename)
+    thumb_path = output_dir / "_thumbnail.png"
+
+    if not thumb_path.exists():
+        from app.services.thumbnail_generator import generate_thumbnail
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(None, generate_thumbnail, file_path, thumb_path)
+        if not ok or not thumb_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Thumbnail generation failed", "filename": filename},
+            )
+
+    return FileResponse(
+        str(thumb_path),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @router.get("/stl/files/{filename}")

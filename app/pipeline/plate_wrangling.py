@@ -253,7 +253,7 @@ def align_plate_to_xy_plane(
             and obb_vs_x_deg > warn_obb_delta_deg
             and not is_square
         ):
-            print(f"OBB long vs chosen X differs by {obb_vs_x_deg:.2f} deg")
+            print(f"OBB long vs chosen X differs by {obb_vs_x_deg:.2f} deg", file=__import__("sys").stderr)
 
         return (True, transformed, dstv_ax3, thickness_mm, length_mm, width_mm, step_mass,
                 "Plate aligned to XY; thickness = min(X,Y,Z)", sig)

@@ -192,7 +192,7 @@ def classify_and_project_holes_dstv(
 
     if hole_rows:
         codes = [h["Code"] for h in hole_rows]
-        print(f"[holes] {ptype}  V={codes.count('V')}  U={codes.count('U')}  O={codes.count('O')}  H={codes.count('H')}")
+        print(f"[holes] {ptype}  V={codes.count('V')}  U={codes.count('U')}  O={codes.count('O')}  H={codes.count('H')}", file=__import__("sys").stderr)
 
     return pd.DataFrame(hole_rows)
 
@@ -211,7 +211,7 @@ def check_duplicate_holes(df_holes, tolerance=0.1):
     duplicates = df_check.duplicated(subset=["Code", "X_r", "Y_r"], keep=False)
 
     if duplicates.any():
-        print(f"Found {duplicates.sum()} potential duplicate holes.")
+        print(f"Found {duplicates.sum()} potential duplicate holes.", file=__import__("sys").stderr)
         dup_df = df_holes[duplicates]
         return True, dup_df
     else:
@@ -243,7 +243,7 @@ def analyze_end_faces_web_and_flange(solid, ax3: gp_Ax3, tol: float = 1e-3):
     explorer = TopExp_Explorer(solid, TopAbs_FACE)
     face_data = []
     while explorer.More():
-        f   = explorer.Current()
+        f   = TopoDS.Face_s(explorer.Current())
         c   = get_face_center(f)
         n   = get_face_normal(f)
         x_d = np.dot(c, axis_x)

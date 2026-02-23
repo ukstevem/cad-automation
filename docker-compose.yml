@@ -21,6 +21,8 @@ services:
       - UPLOAD_DIR=/app/uploads
       - TEMP_DIR=/app/temp
       - OUTPUT_DIR=/app/outputs
+      - ANALYSIS_OUTPUT_DIR=/app/outputs/analysis
+      - STL_OUTPUT_DIR=/app/outputs/stl
     restart: unless-stopped
     networks:
       - cad-network

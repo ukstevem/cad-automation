@@ -44,8 +44,11 @@ from app.services.task_manager import task_manager, TaskStatus
 # Path to the standalone worker script
 _CNC_WORKER = Path(__file__).parent.parent / "workers" / "analyse_cnc_parts.py"
 
-# Hard timeout for a single CNC analysis run (seconds)
-_CNC_TIMEOUT = 600  # 10 minutes
+# Hard timeout for a single CNC analysis run (seconds).
+# The worker saves each part's result progressively, so a timeout only loses
+# the part currently being processed.  Re-clicking Analyse resumes from where
+# the previous run left off (already-analysed ref_ids are skipped).
+_CNC_TIMEOUT = 1800  # 30 minutes
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -102,7 +105,10 @@ def _save_cnc_analysis(
         except (json.JSONDecodeError, OSError):
             pass
 
-    existing["cnc_analysis"] = results
+    # Merge into existing results rather than replacing, so that partial results
+    # already saved by the worker (progressive saving) are preserved for any
+    # ref_ids that aren't in this batch (e.g. resumed after a previous timeout).
+    existing.setdefault("cnc_analysis", {}).update(results)
     if member_ids:
         existing["cnc_member_names"] = member_ids
     if parent_names:
@@ -179,8 +185,8 @@ async def start_cnc_analysis(
         )
 
     # Check for an existing in-progress task for this file
-    existing = task_manager.get_tasks_for_file(filename, task_type="cnc_analysis")
-    for task in existing:
+    existing_tasks = task_manager.get_tasks_for_file(filename, task_type="cnc_analysis")
+    for task in existing_tasks:
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             logger.info(
                 "cnc_task_already_running",
@@ -189,12 +195,33 @@ async def start_cnc_analysis(
             )
             return {"cnc_task_id": task.task_id, "status": task.status.value}
 
+    # Skip ref_ids that already have analysis results in the cache.
+    # This makes "Analyse" resumable: after a timeout the user clicks the button
+    # again and only the remaining unanalysed parts are processed.
+    cache = _load_cache(filename)
+    already_done: set = set((cache or {}).get("cnc_analysis", {}).keys())
+    pending_ref_ids = [r for r in ref_ids if r not in already_done]
+    skipped = len(ref_ids) - len(pending_ref_ids)
+    if skipped:
+        logger.info(
+            "cnc_resuming",
+            filename=filename,
+            total=len(ref_ids),
+            already_done=skipped,
+            pending=len(pending_ref_ids),
+        )
+
+    if not pending_ref_ids:
+        # All ref_ids already have results — return the cached data immediately
+        cached_results = (cache or {}).get("cnc_analysis", {})
+        return {"status": "completed", "results": cached_results, "resumed": True}
+
     # Prepare paths and arguments
     analysis_json_path = str(_analysis_json_path(filename))
     out_dir = _cnc_out_dir(filename)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ref_ids_json = json.dumps(ref_ids)
+    ref_ids_json = json.dumps(pending_ref_ids)
     member_ids_json = json.dumps(member_ids)
     parent_names_json = json.dumps(parent_names)
     # project_number / steel_grade are plain strings — pass directly as argv
@@ -336,10 +363,34 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
 
     path_key = "dxf_path" if ext == "dxf" else "nc1_path"
 
+    # Build a deduplication map from part-level consolidation groups so that
+    # geometrically identical parts (consolidated into one BOM row) also produce
+    # only one file in the ZIP rather than one copy per XCAF ref_id.
+    #
+    # canonical_map: ref_id → canonical_ref_id
+    #   Non-canonical ref_ids map to a different canonical; skip them in the loop.
+    # group_all_refs: canonical_ref_id → [all ref_ids in that group]
+    #   Used to populate consolidated_ref_ids in the manifest.
+    canonical_map: dict = {}
+    group_all_refs: dict = {}
+    part_groups = cache.get("consolidation", {}).get("part_groups", [])
+    for group in part_groups:
+        grp_refs: List[str] = group.get("ref_ids", [])
+        if len(grp_refs) <= 1:
+            continue
+        # Canonical = first ref_id in this group that has an analysis result
+        members_with_results = [r for r in grp_refs if r in cnc_results]
+        if not members_with_results:
+            continue
+        canon = members_with_results[0]
+        for rid in grp_refs:
+            canonical_map[rid] = canon
+        group_all_refs[canon] = grp_refs
+
     # Collect (arc_name, file_path, meta) for each output file
     entries: List[tuple] = []
 
-    def _collect(ref_id: str, result: dict, solid_idx: Optional[int]) -> None:
+    def _collect(ref_id: str, result: dict, solid_idx: Optional[int], consolidated_ref_ids: Optional[List[str]] = None) -> None:
         path_str = result.get(path_key)
         if not path_str:
             return
@@ -350,6 +401,7 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
         meta = {
             "filename": fp.name,
             "ref_id": ref_id,
+            "consolidated_ref_ids": consolidated_ref_ids or [ref_id],
             "solid_idx": solid_idx,
             "part_name": member_names.get(ref_id, ""),
             "parent_assembly": parent_names_cache.get(ref_id, ""),
@@ -366,11 +418,16 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
         entries.append((fp.name, fp, meta))
 
     for ref_id, result in cnc_results.items():
+        # Skip non-canonical refs — their geometry is identical to the canonical
+        # ref_id whose file is already included.
+        if canonical_map.get(ref_id, ref_id) != ref_id:
+            continue
+        consolidated = group_all_refs.get(ref_id, [ref_id])
         if result.get("type") == "multi_solid":
             for idx, solid in enumerate(result.get("solids", [])):
-                _collect(ref_id, solid, idx)
+                _collect(ref_id, solid, idx, consolidated)
         else:
-            _collect(ref_id, result, None)
+            _collect(ref_id, result, None, consolidated)
 
     if not entries:
         raise HTTPException(

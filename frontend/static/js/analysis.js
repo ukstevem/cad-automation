@@ -170,6 +170,11 @@ export class AnalysisPage {
                     <button id="analyze-btn" disabled>Analyze</button>
                 </div>
 
+                <div id="file-preview-panel" class="file-preview-panel" hidden>
+                    <div id="file-preview-viewer" class="file-preview-viewer"></div>
+                    <p class="file-preview-label" id="file-preview-label"></p>
+                </div>
+
                 <div id="analysis-error" hidden></div>
                 <div id="analysis-loading" hidden>
                     <p aria-busy="true"><span id="analysis-status-msg">Analysing assembly structure...</span> <span id="elapsed-timer"></span></p>
@@ -215,6 +220,7 @@ export class AnalysisPage {
 
         select.addEventListener('change', () => {
             btn.disabled = !select.value;
+            this._loadFilePreview(select.value);
         });
 
         btn.addEventListener('click', () => {
@@ -264,6 +270,48 @@ export class AnalysisPage {
         } catch {
             select.innerHTML = '<option value="">Failed to load files</option>';
         }
+    }
+
+    // ---------------------------------------------------------------
+    // File preview (shown on file-select change, before Analyze is clicked)
+    // ---------------------------------------------------------------
+
+    _loadFilePreview(filename) {
+        const panel = this.container.querySelector('#file-preview-panel');
+        const viewerEl = this.container.querySelector('#file-preview-viewer');
+        const label = this.container.querySelector('#file-preview-label');
+
+        if (!filename) {
+            panel.hidden = true;
+            viewerEl.innerHTML = '';
+            return;
+        }
+
+        // Show panel with a loading placeholder immediately
+        label.textContent = filename;
+        panel.hidden = false;
+        viewerEl.innerHTML = '<p class="file-preview-status" aria-busy="true">Generating preview…</p>';
+
+        // The server generates the PNG thumbnail on first request (may take several
+        // seconds for a large assembly) then caches it for subsequent selections.
+        // A plain <img> handles the async wait naturally via onload/onerror.
+        const enc = encodeURIComponent(filename);
+        const img = new Image();
+        img.className = 'file-preview-img';
+        img.alt = filename;
+
+        img.onload = () => {
+            viewerEl.innerHTML = '';
+            viewerEl.appendChild(img);
+        };
+
+        img.onerror = () => {
+            viewerEl.innerHTML = '<p class="file-preview-status">Preview unavailable — click Analyze to generate one.</p>';
+        };
+
+        // Setting src kicks off the request.  If the user picks a different file
+        // before this completes the stale img is simply dropped.
+        img.src = `/api/v1/stl/thumbnail/${enc}`;
     }
 
     // ---------------------------------------------------------------
@@ -610,8 +658,9 @@ export class AnalysisPage {
             const currentAction = li.dataset.classification || null;
             const row = li.querySelector(':scope > .tree-node-row');
 
-            // Selectable = has an STL and not exploded (classified nodes stay clickable)
-            row.classList.toggle('node-selectable', hasStl && !isExploded);
+            // Selectable = has an STL (exploded parents remain clickable so the user
+            // can still load the assembly/compound STL to see where it sits in the model).
+            row.classList.toggle('node-selectable', hasStl);
 
             // Explode button: visible when has STL and not already exploded
             const explodeBtn = row.querySelector('.btn-explode');
@@ -966,9 +1015,12 @@ export class AnalysisPage {
 
                     this._populateStlMap(status.results, filename);
 
-                    // Cache solid children info keyed by chiralKey
+                    // Cache solid children info keyed by chiralKey.
+                    // Include all solids with a node_id, even those whose STL
+                    // generation failed (stl_file may be null) — they still need
+                    // to appear in the BOM and tree for classification purposes.
                     const childrenInfo = (status.results || [])
-                        .filter(r => r.stl_file && r.node_id)
+                        .filter(r => r.node_id)
                         .map(r => ({ name: r.name, nodeId: r.node_id }));
                     this._solidChildrenCache.set(chiralKey, childrenInfo);
 
@@ -1839,7 +1891,48 @@ export class AnalysisPage {
         const r3 = v => (v != null && isFinite(v)) ? Math.round(v * 1000) / 1000 : null;
         const r1 = v => (v != null && isFinite(v)) ? Math.round(v * 10)   / 10   : null;
 
-        const cnc_entries = cncItems.map(item => {
+        // Apply part-level consolidation groups — same merge logic as the visual
+        // BOM table uses in renderRows().  cncItems/boItems are pre-solid-consolidation
+        // but not yet part-group consolidated; without this step the exported BOM
+        // would list separate rows for every XCAF ref_id even when they represent
+        // geometrically identical parts already merged on screen.
+        const _consolidate = (items) => {
+            const groups = this._consolidationGroups;
+            if (!groups || groups.length === 0) return items;
+            const refToGroup = new Map();
+            for (const g of groups) {
+                for (const rid of g.ref_ids) refToGroup.set(rid, g);
+            }
+            const seen = new Map();   // group object → merged item
+            const out  = [];
+            for (const item of items) {
+                const g = refToGroup.get(item.key);
+                if (g) {
+                    if (seen.has(g)) {
+                        // Fold into the canonical entry
+                        const c = seen.get(g);
+                        c.qty          += item.qty;
+                        c.mirroredCount += item.mirroredCount;
+                        for (const p of item.parentNames) {
+                            if (!c.parentNames.includes(p)) c.parentNames.push(p);
+                        }
+                    } else {
+                        // First member: shallow-clone and apply canonical name
+                        const merged = Object.assign({}, item, { name: g.canonical_name });
+                        seen.set(g, merged);
+                        out.push(merged);
+                    }
+                } else {
+                    out.push(item);
+                }
+            }
+            return out;
+        };
+
+        const mergedCnc = _consolidate(cncItems);
+        const mergedBo  = _consolidate(boItems);
+
+        const cnc_entries = mergedCnc.map(item => {
             const info = this._cncResultForItem(item);
             const res  = info?.result ?? null;
 
@@ -1879,7 +1972,7 @@ export class AnalysisPage {
             };
         });
 
-        const bo_entries = boItems.map(item => ({
+        const bo_entries = mergedBo.map(item => ({
             name:             item.name,
             qty:              item.qty,
             parent_assemblies: item.parentNames,
@@ -1961,8 +2054,17 @@ export class AnalysisPage {
                 .then(resp => {
                     if (resp.cnc_task_id) {
                         this._pollCncAnalysis(resp.cnc_task_id);
+                    } else if (resp.status === 'completed') {
+                        // All ref_ids were already analysed — backend returned inline.
+                        // Merge into existing results so prior partial runs are preserved.
+                        this._cncAnalysing = false;
+                        if (resp.results) {
+                            this._cncAnalysisResults = Object.assign(
+                                {}, this._cncAnalysisResults || {}, resp.results
+                            );
+                        }
+                        this._renderPartsList(this._consolidationGroups);
                     } else {
-                        // Unexpected inline result
                         this._cncAnalysing = false;
                         this._renderPartsList(this._consolidationGroups);
                     }
@@ -2050,7 +2152,11 @@ export class AnalysisPage {
                         clearInterval(this._cncPollTimer);
                         this._cncPollTimer = null;
                         this._cncAnalysing = false;
-                        this._cncAnalysisResults = resp.results || {};
+                        // Merge new results into any pre-existing ones so that
+                        // results from earlier partial runs are not discarded.
+                        this._cncAnalysisResults = Object.assign(
+                            {}, this._cncAnalysisResults || {}, resp.results || {}
+                        );
 
                         const panel = this.container?.querySelector('#parts-list-panel');
                         if (panel && !panel.hidden) {
@@ -2062,9 +2168,30 @@ export class AnalysisPage {
                         this._cncAnalysing = false;
                         console.error('CNC analysis failed:', resp.error);
 
-                        const panel = this.container?.querySelector('#parts-list-panel');
-                        if (panel && !panel.hidden) {
-                            this._renderPartsList(this._consolidationGroups);
+                        // Reload cached results from the server — the worker may have
+                        // saved partial results progressively before timing out.
+                        const fn = this._currentFilename;
+                        if (fn) {
+                            this.api.getCncResult(fn)
+                                .then(r => {
+                                    if (r?.results) {
+                                        this._cncAnalysisResults = Object.assign(
+                                            {}, this._cncAnalysisResults || {}, r.results
+                                        );
+                                    }
+                                })
+                                .catch(() => {})
+                                .finally(() => {
+                                    const panel = this.container?.querySelector('#parts-list-panel');
+                                    if (panel && !panel.hidden) {
+                                        this._renderPartsList(this._consolidationGroups);
+                                    }
+                                });
+                        } else {
+                            const panel = this.container?.querySelector('#parts-list-panel');
+                            if (panel && !panel.hidden) {
+                                this._renderPartsList(this._consolidationGroups);
+                            }
                         }
                     }
                     // pending/running → keep polling

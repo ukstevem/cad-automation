@@ -68,26 +68,66 @@ def main() -> None:
     result_holder: list = [None]
     error_holder: list = [None]
 
+    def _save_partial(ref_id: str, result: dict) -> None:
+        """Write a single ref_id result into the sidecar JSON immediately.
+
+        Progressive saving ensures partial progress survives a timeout or crash.
+        Only the current ref_id is updated; all other sidecar sections are
+        preserved (assembly analysis, project state, consolidation, etc.).
+        """
+        path = Path(analysis_json_path)
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        existing.setdefault("cnc_analysis", {})[ref_id] = result
+        try:
+            path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        except OSError as e:
+            print(f"WARNING: could not write partial result for {ref_id}: {e}", file=sys.stderr)
+
     def run() -> None:
         try:
-            from app.services.cnc_shape_analyser import analyse_ref
+            from app.services.cnc_shape_analyser import analyse_ref, _read_xcaf
+
+            # Open the STEP file ONCE and reuse the document for every ref_id.
+            # Re-opening for each ref_id causes OCC to accumulate memory until
+            # it segfaults (exit -11) on large assemblies with 100+ parts.
+            print(f"Opening STEP file: {file_path}", file=sys.stderr)
+            doc, shape_tool = _read_xcaf(file_path)
+            print(f"STEP file loaded, processing {len(ref_ids)} ref_ids", file=sys.stderr)
 
             results = {}
-            for ref_id in ref_ids:
+            for i, ref_id in enumerate(ref_ids):
                 member_id = member_ids.get(ref_id)
                 parent_name = parent_names.get(ref_id)
+                print(f"[{i+1}/{len(ref_ids)}] Analysing {ref_id}", file=sys.stderr)
                 try:
-                    results[ref_id] = analyse_ref(file_path, ref_id, out_dir,
-                                                  member_id, parent_name,
-                                                  project_number or None,
-                                                  steel_grade or None)
+                    result = analyse_ref(file_path, ref_id, out_dir,
+                                        member_id, parent_name,
+                                        project_number or None,
+                                        steel_grade or None,
+                                        _doc=doc,
+                                        _shape_tool=shape_tool)
                 except Exception as exc:
                     import traceback
                     traceback.print_exc(file=sys.stderr)
-                    results[ref_id] = {"type": "unknown", "message": str(exc)}
+                    result = {"type": "unknown", "message": str(exc)}
+
+                results[ref_id] = result
+                # Save immediately so a timeout only loses the part currently
+                # being processed, not all previously completed parts.
+                try:
+                    _save_partial(ref_id, result)
+                except Exception as save_exc:
+                    import traceback as _tb
+                    print(f"WARNING: _save_partial failed for {ref_id}: {save_exc}", file=sys.stderr)
+                    _tb.print_exc(file=sys.stderr)
 
             result_holder[0] = {"results": results}
         except Exception as exc:
+            import traceback as _tb
+            _tb.print_exc(file=sys.stderr)
             error_holder[0] = exc
 
     # Run in a thread with a larger stack — OCC XCAF reader can recurse deeply
