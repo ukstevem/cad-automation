@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 import structlog
 
@@ -150,6 +150,7 @@ async def get_cnc_result(filename: str) -> Dict[str, Any]:
 async def start_cnc_analysis(
     filename: str,
     body: Dict[str, Any] = Body(...),
+    force_query: bool = Query(False, alias="force"),
 ) -> Dict[str, Any]:
     """
     Start background CNC shape analysis for a list of XCAF ref_ids.
@@ -177,6 +178,7 @@ async def start_cnc_analysis(
     parent_names: Dict[str, str] = body.get("parent_names", {})
     project_number: str = body.get("project_number", "")
     steel_grade: str = body.get("steel_grade", "")
+    force: bool = force_query or bool(body.get("force", False))
 
     if not ref_ids:
         raise HTTPException(
@@ -198,8 +200,9 @@ async def start_cnc_analysis(
     # Skip ref_ids that already have analysis results in the cache.
     # This makes "Analyse" resumable: after a timeout the user clicks the button
     # again and only the remaining unanalysed parts are processed.
+    # Pass force=True to bypass the cache and re-analyse everything.
     cache = _load_cache(filename)
-    already_done: set = set((cache or {}).get("cnc_analysis", {}).keys())
+    already_done: set = set() if force else set((cache or {}).get("cnc_analysis", {}).keys())
     pending_ref_ids = [r for r in ref_ids if r not in already_done]
     skipped = len(ref_ids) - len(pending_ref_ids)
     if skipped:

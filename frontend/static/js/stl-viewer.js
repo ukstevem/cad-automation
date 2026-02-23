@@ -47,6 +47,7 @@ export class STLViewer {
         this.scene.add(backLight);
 
         this._mesh = null;
+        this._edges = null;
         this._animId = null;
         this._loadGen = 0;  // incremented on each loadSTL call; used to cancel stale loads
 
@@ -73,11 +74,16 @@ export class STLViewer {
                         return;
                     }
                     try {
-                        // Remove previous mesh
+                        // Remove previous mesh and edges
                         if (this._mesh) {
                             this.scene.remove(this._mesh);
                             this._mesh.geometry.dispose();
                             this._mesh.material.dispose();
+                        }
+                        if (this._edges) {
+                            this.scene.remove(this._edges);
+                            this._edges.geometry.dispose();
+                            this._edges.material.dispose();
                         }
 
                         const material = new THREE.MeshPhongMaterial({
@@ -91,6 +97,12 @@ export class STLViewer {
                         const mesh = new THREE.Mesh(geometry, material);
                         this._mesh = mesh;
                         this.scene.add(mesh);
+
+                        // Edge lines — drawn at face boundaries above 15° dihedral angle
+                        const edgesGeo = new THREE.EdgesGeometry(geometry, 15);
+                        const edgesMat = new THREE.LineBasicMaterial({ color: 0x0d1f33 });
+                        this._edges = new THREE.LineSegments(edgesGeo, edgesMat);
+                        this.scene.add(this._edges);
 
                         this._fitCamera(geometry);
                         resolve();
@@ -114,8 +126,9 @@ export class STLViewer {
         box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z);
 
-        // Center geometry
+        // Center geometry (apply same offset to edge lines)
         this._mesh.position.sub(center);
+        if (this._edges) this._edges.position.sub(center);
 
         // Position camera
         const fov = this.camera.fov * (Math.PI / 180);
@@ -157,6 +170,11 @@ export class STLViewer {
             this.scene.remove(this._mesh);
             this._mesh.geometry.dispose();
             this._mesh.material.dispose();
+        }
+        if (this._edges) {
+            this.scene.remove(this._edges);
+            this._edges.geometry.dispose();
+            this._edges.material.dispose();
         }
         this.controls.dispose();
         this.renderer.dispose();

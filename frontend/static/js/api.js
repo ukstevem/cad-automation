@@ -124,7 +124,7 @@ export class ApiClient {
         return this._get(`/api/v1/cnc-analysis/result/${encodeURIComponent(filename)}`);
     }
 
-    async startCncAnalysis(filename, refIds, memberIds, parentNames = {}, projectNumber = '', steelGrade = '') {
+    async startCncAnalysis(filename, refIds, memberIds, parentNames = {}, projectNumber = '', steelGrade = '', force = false) {
         return this._postJson(
             `/api/v1/cnc-analysis/analyse/${encodeURIComponent(filename)}`,
             {
@@ -133,6 +133,7 @@ export class ApiClient {
                 parent_names: parentNames,
                 project_number: projectNumber,
                 steel_grade: steelGrade,
+                force: force,
             },
         );
     }

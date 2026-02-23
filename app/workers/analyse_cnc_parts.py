@@ -16,6 +16,7 @@ FastAPI event loop.  The parent awaits asyncio.create_subprocess_exec() so
 uvicorn remains fully responsive while geometry analysis runs.
 """
 import faulthandler
+import gc
 import json
 import sys
 import threading
@@ -115,6 +116,10 @@ def main() -> None:
                     result = {"type": "unknown", "message": str(exc)}
 
                 results[ref_id] = result
+                # Force GC to release OCC shape objects before JSON serialization.
+                # Without this, OCC's internal allocator can corrupt heap memory
+                # that manifests as a SIGSEGV inside json.dumps on large assemblies.
+                gc.collect()
                 # Save immediately so a timeout only loses the part currently
                 # being processed, not all previously completed parts.
                 try:

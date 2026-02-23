@@ -86,7 +86,7 @@ def generate_nc1_file(df_holes, header_data, nc_dir, web_cut) -> tuple:
         f.write(f"   {web_cut['end_flange']:8.1f}\n")
         f.write("  -\n" * 4)
         if not df_holes.empty:
-            for face in ['V', 'U', 'O']:
+            for face in ['V', 'U', 'O', 'H']:
                 df_face = df_holes[df_holes['Code'] == face]
                 if df_face.empty:
                     continue

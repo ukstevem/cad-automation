@@ -239,7 +239,7 @@ def _detect_hollow_section(shape, obb: Dict,
         else:
             # Wall thickness estimate (thin-wall): t ≈ (H·W − actual_csa) / (2·(H+W))
             t_approx = (bounding_rect_area - actual_csa) / max(2.0 * (H + W), 1.0)
-            if 1.0 <= t_approx <= 0.40 * min(H, W):
+            if 1.0 <= t_approx <= 0.20 * min(H, W):
                 if abs(H - W) < 0.05 * max(H, W):
                     category = "SHS"
                     designation = f"{int(round(H))}x{round(t_approx, 1)}"
@@ -366,19 +366,33 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
         profile_type = profile_match.get("Profile_type", "I")
         profile_dims = profile_match.get("JSON", {})
 
-        # DSTV pose
+        # DSTV pose  (channel_mode="web_at_z0" matches original dstv.py and
+        # the hole-detection convention: channel web at Z=0, flanges at Z=W)
         refined_shape, dstv_ax3, tr_world_to_dstv, pose_diag = compute_dstv_pose(
-            aligned, profile_type, profile_dims
+            aligned, profile_type, profile_dims, channel_mode="web_at_z0"
         )
+        logger.info("dstv_pose", ref_id=ref_id,
+                    profile_type=profile_type,
+                    turns=pose_diag.get("turns_about_X"),
+                    y_norm=round(pose_diag.get("y_norm", 0), 3),
+                    z_norm=round(pose_diag.get("z_norm", 0), 3),
+                    policy=pose_diag.get("policy"),
+                    confidence=pose_diag.get("confidence"))
 
-        # Dimensions
+        # Dimensions — use actual bbox of the *refined* (posed) shape so that
+        # hole-detection thresholds reference the true geometry rather than the
+        # library nominal values (which may differ by several mm).
         step_vals = profile_match.get("STEP", {})
         L_mm = float(pose_diag.get("L", obb["aligned_extents"][0]))
-        H_mm = float(step_vals.get("height", obb["aligned_extents"][1]))
-        W_mm = float(step_vals.get("width",  obb["aligned_extents"][2]))
+        H_mm = float(pose_diag.get("H", step_vals.get("height", obb["aligned_extents"][1])))
+        W_mm = float(pose_diag.get("W", step_vals.get("width",  obb["aligned_extents"][2])))
 
         # DSTV origin at (0,0,0) since compute_dstv_pose translates to min-corner
         origin_dstv = gp_Pnt(0.0, 0.0, 0.0)
+
+        logger.info("hole_detection_dims", ref_id=ref_id,
+                    profile_type=profile_type,
+                    L_mm=round(L_mm, 1), H_mm=round(H_mm, 1), W_mm=round(W_mm, 1))
 
         # Holes
         try:
@@ -397,11 +411,19 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
         if df_holes is None:
             df_holes = pd.DataFrame()
 
+        if not df_holes.empty:
+            codes = df_holes["Code"].value_counts().to_dict()
+            logger.info("holes_detected", ref_id=ref_id, total=len(df_holes), by_face=codes)
+        else:
+            logger.warning("no_holes_detected", ref_id=ref_id,
+                           H_mm=round(H_mm, 1), W_mm=round(W_mm, 1))
+
         # End-face cuts
         try:
             web_cut = analyze_end_faces_web_and_flange(refined_shape, dstv_ax3)
             if not web_cut:
                 web_cut = {"start_web": 0.0, "end_web": 0.0, "start_flange": 0.0, "end_flange": 0.0}
+            logger.info("end_face_cuts", ref_id=ref_id, **{k: round(v, 2) for k, v in web_cut.items()})
         except Exception as e:
             web_cut = {"start_web": 0.0, "end_web": 0.0, "start_flange": 0.0, "end_flange": 0.0}
             logger.warning("end_face_analysis_failed", ref_id=ref_id, error=str(e))

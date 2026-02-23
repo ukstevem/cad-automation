@@ -1685,9 +1685,11 @@ export class AnalysisPage {
             ? `<a href="/api/v1/cnc-analysis/download-all/${enc}/nc1" class="parts-cnc-dl-btn" download>\u2193\u00a0NC1</a>`
             : '';
 
+        const hasAnyResults = Object.keys(this._cncAnalysisResults || {}).length > 0;
         const analyseBtn = this._cncAnalysing
             ? `<button class="parts-cnc-analyse-btn outline" disabled>Analysing\u2026</button>`
-            : `<button class="parts-cnc-analyse-btn outline">Analyse</button>`;
+            : `<button class="parts-cnc-analyse-btn outline">Analyse</button>`
+              + (hasAnyResults ? `<button class="parts-cnc-reanalyse-btn outline" title="Clear cache and re-run analysis">\u21ba\u00a0Re-analyse</button>` : '');
 
         let tbody = '';
         if (cncItems.length > 0) {
@@ -1754,7 +1756,11 @@ export class AnalysisPage {
         });
 
         panel.querySelector('.parts-cnc-analyse-btn')?.addEventListener('click', () => {
-            this._startCncAnalysis(cncItems);
+            this._startCncAnalysis(cncItems, false);
+        });
+
+        panel.querySelector('.parts-cnc-reanalyse-btn')?.addEventListener('click', () => {
+            this._startCncAnalysis(cncItems, true);
         });
 
         panel.querySelector('.parts-bom-dl-btn')?.addEventListener('click', () => {
@@ -2012,7 +2018,7 @@ export class AnalysisPage {
     /**
      * Show the settings dialog, then collect XCAF ref_ids and start the analysis.
      */
-    _startCncAnalysis(cncItems) {
+    _startCncAnalysis(cncItems, force = false) {
         if (this._cncAnalysing) return;
         const filename = this._currentFilename;
         if (!filename || cncItems.length === 0) return;
@@ -2050,7 +2056,12 @@ export class AnalysisPage {
             this._cncAnalysing = true;
             this._renderPartsList(this._consolidationGroups);
 
-            this.api.startCncAnalysis(filename, [...refIdSet], memberIds, parentNames, projectNumber, steelGrade)
+            // When force=true append ?force=1 to the URL so the router bypasses
+            // the cache even if api.js is an older cached version without the flag.
+            const _cncUrl = `/api/v1/cnc-analysis/analyse/${encodeURIComponent(filename)}${force ? '?force=1' : ''}`;
+            const _cncBody = { ref_ids: [...refIdSet], member_ids: memberIds, parent_names: parentNames, project_number: projectNumber, steel_grade: steelGrade, force: force };
+            const _cncPromise = fetch(_cncUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_cncBody) }).then(r => r.json());
+            _cncPromise
                 .then(resp => {
                     if (resp.cnc_task_id) {
                         this._pollCncAnalysis(resp.cnc_task_id);
