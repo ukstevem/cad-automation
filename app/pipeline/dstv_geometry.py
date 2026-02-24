@@ -95,6 +95,13 @@ def classify_and_project_holes_dstv(
         base = (t_leg or tw or 0.0)
         return max(1.0, 0.5*base + 1.0) if base else max(1.0, 0.03*max(width_mm, 1.0))
 
+    # Collect structural fillet radii to exclude (root & toe radii are not holes)
+    _fillet_radii = set()
+    for _key in ("root_radius", "toe_radius"):
+        _r = _as_float(dims.get(_key))
+        if _r and _r > 0:
+            _fillet_radii.add(round(_r, 2))
+
     cos_ok_web = 0.6
     cos_ok_fl  = 0.6
 
@@ -120,6 +127,13 @@ def classify_and_project_holes_dstv(
         if nrm == 0.0:
             continue
         axis_np /= nrm
+
+        # Skip structural fillet edges: radius matches root/toe AND axis
+        # is aligned with the member length (fillets run along L, holes don't)
+        if _fillet_radii and any(abs(radius - fr) < 0.15 for fr in _fillet_radii):
+            dotL = abs(float(np.dot(axis_np, L)))
+            if dotL > 0.85:          # axis ≈ parallel to length → fillet
+                continue
 
         v = center_np - origin_np
         y_along = float(np.dot(v, F))
