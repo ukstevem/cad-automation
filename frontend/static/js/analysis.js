@@ -1490,8 +1490,13 @@ export class AnalysisPage {
                     canonical.qty += item.qty;
                     canonical.mirroredCount += item.mirroredCount;
                     canonical.nodeIds.push(...item.nodeIds);
+                    if (!canonical._memberQtys) canonical._memberQtys = [canonical.qty - item.qty];
+                    canonical._memberQtys.push(item.qty);
                     for (const p of item.parentNames) {
                         if (!canonical.parentNames.includes(p)) canonical.parentNames.push(p);
+                    }
+                    for (const [p, c] of Object.entries(item.parentCounts || {})) {
+                        canonical.parentCounts[p] = (canonical.parentCounts[p] || 0) + c;
                     }
                     itemMap.delete(key);
                 }
@@ -1523,14 +1528,19 @@ export class AnalysisPage {
 
             const [canonicalKey, ...restKeys] = presentKeys;
             const canonical = itemMap.get(canonicalKey);
+            if (!canonical._memberQtys) canonical._memberQtys = [canonical.qty];
             for (const key of restKeys) {
                 const item = itemMap.get(key);
                 if (item) {
                     canonical.qty += item.qty;
                     canonical.mirroredCount += item.mirroredCount;
+                    canonical._memberQtys.push(item.qty);
                     canonical.nodeIds.push(...item.nodeIds);
                     for (const p of item.parentNames) {
                         if (!canonical.parentNames.includes(p)) canonical.parentNames.push(p);
+                    }
+                    for (const [p, c] of Object.entries(item.parentCounts || {})) {
+                        canonical.parentCounts[p] = (canonical.parentCounts[p] || 0) + c;
                     }
                     itemMap.delete(key);
                 }
@@ -1582,10 +1592,15 @@ export class AnalysisPage {
             item.qty++;
             if (isMirrored) item.mirroredCount++;
             item.nodeIds.push(nodeId);
-            if (parentName && !item.parentNames.includes(parentName)) {
-                item.parentNames.push(parentName);
+            if (parentName) {
+                if (!item.parentNames.includes(parentName)) {
+                    item.parentNames.push(parentName);
+                }
+                item.parentCounts[parentName] = (item.parentCounts[parentName] || 0) + 1;
             }
         } else {
+            const parentCounts = {};
+            if (parentName) parentCounts[parentName] = 1;
             itemMap.set(key, {
                 key,
                 name,
@@ -1593,6 +1608,7 @@ export class AnalysisPage {
                 qty: 1,
                 mirroredCount: isMirrored ? 1 : 0,
                 parentNames: parentName ? [parentName] : [],
+                parentCounts,
             });
         }
     }
@@ -1637,8 +1653,34 @@ export class AnalysisPage {
                             : '';
                         const mirrorNote = mirr > 0
                             ? ` <span class="parts-list-mirror">(+${mirr}M)</span>` : '';
+                        // Per-occurrence qty breakdown when items are consolidated
+                        let qtyBreakdown = '';
+                        if (members.length > 1) {
+                            // Collect per-member qtys; if a member was already
+                            // merged at the solid level it carries _memberQtys
+                            const memberQtys = members.map(m => m.qty);
+                            const allSame = memberQtys.every(q => q === memberQtys[0]);
+                            if (allSame) {
+                                qtyBreakdown = ` <span class="parts-list-qty-detail" title="${memberQtys[0]} per occurrence × ${members.length} occurrences">(${memberQtys[0]}×${members.length})</span>`;
+                            } else {
+                                qtyBreakdown = ` <span class="parts-list-qty-detail" title="Per occurrence: ${memberQtys.join(', ')}">(${memberQtys.join('+')})</span>`;
+                            }
+                        } else if (members.length === 1 && members[0]._memberQtys && members[0]._memberQtys.length > 1) {
+                            // Single group member but already merged at solid level
+                            qtyBreakdown = this._qtyBreakdownHtml(members[0]);
+                        }
+                        // Merge parentCounts across all members
+                        const mergedCounts = {};
+                        for (const m of members) {
+                            for (const [p, c] of Object.entries(m.parentCounts || {})) {
+                                mergedCounts[p] = (mergedCounts[p] || 0) + c;
+                            }
+                        }
                         const parentsCells = parents.length > 0
-                            ? parents.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
+                            ? parents.map(p => {
+                                const c = mergedCounts[p] || 1;
+                                return `<span class="used-in-item"><span class="parent-qty">${c}</span>${this._esc(p)}</span>`;
+                            }).join('')
                             : '<span class="used-in-item">—</span>';
                         // Use first group member's result for CNC badge
                         const cncHtml = isCnc && members[0]
@@ -1768,30 +1810,44 @@ export class AnalysisPage {
         });
     }
 
+    _parentCellsHtml(item) {
+        const names = item.parentNames || [];
+        if (names.length === 0) return '<span class="used-in-item">—</span>';
+        const counts = item.parentCounts || {};
+        return names.map(p => {
+            const c = counts[p] || 1;
+            return `<span class="used-in-item"><span class="parent-qty">${c}</span>${this._esc(p)}</span>`;
+        }).join('');
+    }
+
+    _qtyBreakdownHtml(item) {
+        const mq = item._memberQtys;
+        if (!mq || mq.length < 2) return '';
+        const allSame = mq.every(q => q === mq[0]);
+        if (allSame) {
+            return ` <span class="parts-list-qty-detail" title="${mq[0]} per occurrence × ${mq.length} occurrences">(${mq[0]}×${mq.length})</span>`;
+        }
+        return ` <span class="parts-list-qty-detail" title="Per occurrence: ${mq.join(', ')}">(${mq.join('+')})</span>`;
+    }
+
     _bomRow(item) {
         const mirrorNote = item.mirroredCount > 0
             ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
-        const parentsCells = item.parentNames.length > 0
-            ? item.parentNames.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
-            : '<span class="used-in-item">—</span>';
         return `<tr>
             <td>${this._esc(item.name)}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
-            <td class="parts-list-parents">${parentsCells}</td>
+            <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
         </tr>`;
     }
 
     _cncBomRow(item, filename) {
         const mirrorNote = item.mirroredCount > 0
             ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
-        const parentsCells = item.parentNames.length > 0
-            ? item.parentNames.map(p => `<span class="used-in-item">${this._esc(p)}</span>`).join('')
-            : '<span class="used-in-item">—</span>';
         const cncHtml = this._cncResultHtml(item, filename);
         return `<tr>
             <td>${this._esc(item.name)}${cncHtml ? ' ' + cncHtml : ''}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
-            <td class="parts-list-parents">${parentsCells}</td>
+            <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
         </tr>`;
     }
 
@@ -1919,12 +1975,16 @@ export class AnalysisPage {
                         const c = seen.get(g);
                         c.qty          += item.qty;
                         c.mirroredCount += item.mirroredCount;
+                        c._memberQtys.push(item.qty);
                         for (const p of item.parentNames) {
                             if (!c.parentNames.includes(p)) c.parentNames.push(p);
                         }
                     } else {
                         // First member: shallow-clone and apply canonical name
-                        const merged = Object.assign({}, item, { name: g.canonical_name });
+                        const merged = Object.assign({}, item, {
+                            name: g.canonical_name,
+                            _memberQtys: [item.qty],
+                        });
                         seen.set(g, merged);
                         out.push(merged);
                     }
@@ -1960,7 +2020,11 @@ export class AnalysisPage {
                 name:             item.name,
                 ref_id:           item.key,
                 qty:              item.qty,
-                parent_assemblies: item.parentNames,
+                qty_per_occurrence: item._memberQtys ?? null,
+                parent_assemblies: (item.parentNames || []).map(p => ({
+                    name: p,
+                    qty: (item.parentCounts || {})[p] || 1,
+                })),
                 type:             res?.type        ?? null,
                 category:         res?.category    ?? null,
                 designation:      res?.designation ?? null,
@@ -1981,7 +2045,11 @@ export class AnalysisPage {
         const bo_entries = mergedBo.map(item => ({
             name:             item.name,
             qty:              item.qty,
-            parent_assemblies: item.parentNames,
+            qty_per_occurrence: item._memberQtys ?? null,
+            parent_assemblies: (item.parentNames || []).map(p => ({
+                name: p,
+                qty: (item.parentCounts || {})[p] || 1,
+            })),
         }));
 
         const totalCncQty  = cnc_entries.reduce((s, e) => s + e.qty, 0);

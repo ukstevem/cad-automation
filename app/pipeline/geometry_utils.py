@@ -331,8 +331,8 @@ def plate_guard_faces(shape: TopoDS_Shape,
 
 def plate_guard_heuristics(shape: TopoDS_Shape,
                            face_ang_tol_deg: float = 10.0,
-                           dominant_min_frac: float = 0.55,
-                           second_max_frac: float = 0.30,
+                           dominant_min_frac: float = 0.40,
+                           second_max_frac: float = 0.40,
                            big_cluster_frac: float = 0.05,
                            min_planar_frac: float = 0.55):
     """Decide if we should even ATTEMPT plate handling."""
