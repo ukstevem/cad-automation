@@ -359,6 +359,91 @@ def plate_guard_heuristics(shape: TopoDS_Shape,
 # Sectioning helpers
 # ======================================================================================
 
+def _assemble_wire_sorted(edges_shape: TopoDS_Shape, tol: float = 1e-6):
+    """
+    Sort loose edges by endpoint connectivity and build a closed wire.
+
+    TopExp_Explorer returns edges in arbitrary order.  BRepBuilderAPI_MakeWire
+    processes them sequentially and drops edges whose endpoints don't touch the
+    current wire ends — for I-beam sections this silently loses the web edges,
+    producing a self-intersecting wire with inflated area.
+
+    This helper builds a point-adjacency graph, walks the chain in the correct
+    order, then feeds the sorted edges to MakeWire.
+    """
+    # Collect edges with their YZ endpoints (X is the section-plane normal)
+    edge_list = []   # [(edge, (y0,z0), (y1,z1)), ...]
+    exp = TopExp_Explorer(edges_shape, TopAbs_EDGE)
+    while exp.More():
+        e = TopoDS.Edge_s(exp.Current())
+        vexp = TopExp_Explorer(e, TopAbs_VERTEX)
+        pts = []
+        while vexp.More():
+            p = BRep_Tool.Pnt_s(TopoDS.Vertex_s(vexp.Current()))
+            pts.append((p.Y(), p.Z()))
+            vexp.Next()
+        if len(pts) >= 2:
+            edge_list.append((e, pts[0], pts[1]))
+        exp.Next()
+
+    if len(edge_list) < 3:
+        return None
+
+    # Build adjacency: for each edge, find neighbours by matching endpoints
+    n = len(edge_list)
+    match_tol = max(tol, 0.01)  # 0.01mm minimum for floating-point noise
+
+    def _pts_close(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1]) < match_tol
+
+    # Walk the chain starting from edge 0
+    used = [False] * n
+    order = [0]       # indices into edge_list
+    fwd   = [True]    # whether edge is traversed in its natural direction
+    used[0] = True
+    current_end = edge_list[0][2]  # start walking from end of first edge
+
+    for _ in range(n - 1):
+        found = False
+        for j in range(n):
+            if used[j]:
+                continue
+            _, p0, p1 = edge_list[j]
+            if _pts_close(p0, current_end):
+                order.append(j)
+                fwd.append(True)
+                used[j] = True
+                current_end = p1
+                found = True
+                break
+            elif _pts_close(p1, current_end):
+                order.append(j)
+                fwd.append(False)
+                used[j] = True
+                current_end = p0
+                found = True
+                break
+        if not found:
+            break
+
+    if len(order) < 3:
+        return None
+
+    # Check closure: does the chain end connect back to the start?
+    start_pt = edge_list[order[0]][1] if fwd[0] else edge_list[order[0]][2]
+    if not _pts_close(current_end, start_pt):
+        return None  # not a closed loop
+
+    # Build wire from sorted edges
+    mw = BRepBuilderAPI_MakeWire()
+    for idx in order:
+        mw.Add(edge_list[idx][0])
+    if not mw.IsDone():
+        return None
+
+    return mw.Wire()
+
+
 def _extract_outer_and_holes(edges_shape: TopoDS_Shape, plane: gp_Pln, tol: float = 1e-6):
     """
     From section edges return:
@@ -368,14 +453,22 @@ def _extract_outer_and_holes(edges_shape: TopoDS_Shape, plane: gp_Pln, tol: floa
     """
     fb = ShapeAnalysis_FreeBounds(edges_shape, tol, False, False)
     seq = fb.GetClosedWires()
-    if seq is None or not hasattr(seq, "Length") or seq.Length() == 0:
-        return None, [], 0.0
 
     wires = []
-    for i in range(1, seq.Length() + 1):
-        s = seq.Value(i)
-        if s.ShapeType() == TopAbs_WIRE:
-            wires.append(TopoDS.Wire_s(s))
+    if seq is not None and hasattr(seq, "Length"):
+        for i in range(1, seq.Length() + 1):
+            s = seq.Value(i)
+            if s.ShapeType() == TopAbs_WIRE:
+                wires.append(TopoDS.Wire_s(s))
+
+    # Fallback: if FreeBounds found no closed wires, sort edges by connectivity
+    # then feed to MakeWire.  Naive MakeWire (random edge order from TopExp_Explorer)
+    # drops disconnected edges, producing self-intersecting wires with wrong area.
+    if not wires:
+        sorted_wire = _assemble_wire_sorted(edges_shape, tol)
+        if sorted_wire is not None:
+            wires = [sorted_wire]
+
     if not wires:
         return None, [], 0.0
 
@@ -428,24 +521,28 @@ def get_volume_from_shape(shape: TopoDS_Shape) -> float:
 # Cross-sectional area (robust)
 # ======================================================================================
 
-def compute_section_area(solid: TopoDS_Shape,
+def compute_section_dims(solid: TopoDS_Shape,
                          axis_dir: gp_Dir = gp_Dir(1, 0, 0),
-                         sample_pos: Optional[float] = None,
-                         tol: float = 1e-6) -> float:
+                         tol: float = 1e-6) -> Dict[str, Any]:
     """
-    GROSS cross-sectional area (outer boundary only).
-    - If sample_pos is provided (offset from xmin), computes a single slice.
-    - Else: samples >=5 sections along length, clusters areas by similarity (3%),
-      and returns the median of the largest cluster (most common section).
+    Robust cross-section dimensions from the core region of a member.
+
+    Samples >=21 sections along the length (avoiding end chamfers/miters),
+    clusters by area similarity (3%), and returns the median area, H, and W
+    from the dominant cluster.
+
+    Returns {"area": float, "H": float, "W": float}.
+    Falls back to volume-based area and 0.0 for H/W if sectioning fails.
     """
     bbox = Bnd_Box()
     BRepBndLib.Add_s(solid, bbox)
     xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
     L = xmax - xmin
     if L <= 1e-12:
-        return 0.0
+        return {"area": 0.0, "H": 0.0, "W": 0.0}
 
-    def _gross_area_at_x(x0_abs: float) -> Optional[float]:
+    def _dims_at_x(x0_abs: float) -> Optional[tuple]:
+        """Return (area, H, W) from the section at x0_abs, or None."""
         eps = max(1e-3, 1e-4 * L)
         x0 = max(xmin + eps, min(xmax - eps, x0_abs))
         plane = gp_Pln(gp_Ax3(gp_Pnt(x0, 0, 0), axis_dir))
@@ -455,19 +552,24 @@ def compute_section_area(solid: TopoDS_Shape,
         sec.Build()
         if not sec.IsDone():
             return None
-        outer, _inners, area_outer = _extract_outer_and_holes(sec.Shape(), plane, tol=tol)
-        if outer is None:
+        sec_shape = sec.Shape()
+        # Get area from outer wire if possible
+        outer, _inners, area_outer = _extract_outer_and_holes(sec_shape, plane, tol=tol)
+        # Get H/W from the bounding box of ALL section edges — more robust
+        # than requiring a closed outer wire (FreeBounds can fail on some shapes)
+        sec_bbox = Bnd_Box()
+        BRepBndLib.Add_s(sec_shape, sec_bbox)
+        if sec_bbox.IsVoid():
             return None
-        return float(area_outer)
-
-    if sample_pos is not None:
-        x0_abs = xmin + float(sample_pos)
-        a = _gross_area_at_x(x0_abs)
-        if a is not None:
-            return a
-        gpv = GProp_GProps()
-        BRepGProp.VolumeProperties_s(solid, gpv)
-        return gpv.Mass() / max(L, 1e-9)
+        _, yw0, zw0, _, yw1, zw1 = sec_bbox.Get()
+        h_sec = float(yw1 - yw0)
+        w_sec = float(zw1 - zw0)
+        if h_sec < 1e-6 or w_sec < 1e-6:
+            return None
+        # Use outer wire area if available, else estimate from volume
+        if outer is not None and area_outer > 0:
+            return (float(area_outer), h_sec, w_sec)
+        return (None, h_sec, w_sec)  # area unknown, but H/W valid
 
     n_samples = max(5, 21)
     rel_end_margin = 0.06
@@ -479,52 +581,108 @@ def compute_section_area(solid: TopoDS_Shape,
         x_lo = xmin + 0.2 * L
         x_hi = xmax - 0.2 * L
 
-    vals: List[float] = []
+    samples: List[tuple] = []  # (area_or_None, H, W)
     xs: List[float] = []
     for i in range(n_samples):
         t = (i + 0.5) / n_samples
         x0_abs = x_lo + t * (x_hi - x_lo)
-        a = _gross_area_at_x(x0_abs)
-        if a is not None:
-            vals.append(a)
+        d = _dims_at_x(x0_abs)
+        if d is not None:
+            samples.append(d)
             xs.append(x0_abs)
 
-    if not vals:
+    if not samples:
         gpv = GProp_GProps()
         BRepGProp.VolumeProperties_s(solid, gpv)
-        return gpv.Mass() / max(L, 1e-9)
+        fallback_area = gpv.Mass() / max(L, 1e-9)
+        return {"area": fallback_area, "H": 0.0, "W": 0.0}
 
+    # Separate samples with valid area from those with H/W only
+    area_samples = [(i, s[0]) for i, s in enumerate(samples) if s[0] is not None]
+    all_hs = [s[1] for s in samples]
+    all_ws = [s[2] for s in samples]
+
+    # Cluster area samples (3% tolerance) if any
     area_rel_tol = 0.03
-    clusters: List[Dict[str, Any]] = []
-    for a in sorted(vals):
-        placed = False
-        for c in clusters:
-            ref = c['ref']
-            if abs(a - ref) <= area_rel_tol * max(ref, 1e-9):
-                c['vals'].append(a)
-                c['ref'] = statistics.median(c['vals'])
-                placed = True
-                break
-        if not placed:
-            clusters.append({'ref': a, 'vals': [a]})
-    clusters.sort(key=lambda c: len(c['vals']), reverse=True)
-    core = clusters[0]['vals'] if clusters else vals
-    med_core = float(statistics.median(core))
+    med_area = 0.0
+    if area_samples:
+        clusters: List[Dict[str, Any]] = []
+        for idx, a in sorted(area_samples, key=lambda x: x[1]):
+            placed = False
+            for c in clusters:
+                ref = c['ref']
+                if abs(a - ref) <= area_rel_tol * max(ref, 1e-9):
+                    c['indices'].append(idx)
+                    c['ref'] = statistics.median([samples[j][0] for j in c['indices']])
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({'ref': a, 'indices': [idx]})
+        clusters.sort(key=lambda c: len(c['indices']), reverse=True)
+        core_idx = clusters[0]['indices'] if clusters else [i for i, _ in area_samples]
+        core_areas = [samples[j][0] for j in core_idx]
+        med_area = float(statistics.median(core_areas))
+        # Use H/W from the area-clustered samples if possible
+        all_hs = [samples[j][1] for j in core_idx]
+        all_ws = [samples[j][2] for j in core_idx]
+    else:
+        # No valid areas — fallback to volume/length
+        gpv = GProp_GProps()
+        BRepGProp.VolumeProperties_s(solid, gpv)
+        med_area = gpv.Mass() / max(L, 1e-9)
+
+    med_h = float(statistics.median(all_hs)) if all_hs else 0.0
+    med_w = float(statistics.median(all_ws)) if all_ws else 0.0
 
     CSA_DIAG.clear()
     CSA_DIAG.update({
         "mode": "robust_cluster",
-        "n_total": len(vals),
-        "n_core": len(core),
-        "median_core": med_core,
-        "min_core": float(min(core)),
-        "max_core": float(max(core)),
-        "rel_spread_core": float((max(core) - min(core)) / max(med_core, 1e-9)),
+        "n_total": len(samples),
+        "n_with_area": len(area_samples),
+        "median_core": med_area,
         "positions": xs,
         "area_rel_tol": area_rel_tol,
+        "H_section": med_h,
+        "W_section": med_w,
     })
 
-    return med_core
+    return {"area": med_area, "H": med_h, "W": med_w}
+
+
+def compute_section_area(solid: TopoDS_Shape,
+                         axis_dir: gp_Dir = gp_Dir(1, 0, 0),
+                         sample_pos: Optional[float] = None,
+                         tol: float = 1e-6) -> float:
+    """
+    GROSS cross-sectional area (outer boundary only).
+    - If sample_pos is provided (offset from xmin), computes a single slice.
+    - Else: delegates to compute_section_dims() and returns just the area.
+    """
+    if sample_pos is None:
+        return compute_section_dims(solid, axis_dir=axis_dir, tol=tol)["area"]
+
+    bbox = Bnd_Box()
+    BRepBndLib.Add_s(solid, bbox)
+    xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+    L = xmax - xmin
+    if L <= 1e-12:
+        return 0.0
+
+    x0_abs = xmin + float(sample_pos)
+    eps = max(1e-3, 1e-4 * L)
+    x0 = max(xmin + eps, min(xmax - eps, x0_abs))
+    plane = gp_Pln(gp_Ax3(gp_Pnt(x0, 0, 0), axis_dir))
+    sec = BRepAlgoAPI_Section(solid, plane)
+    sec.ComputePCurveOn1(True)
+    sec.Approximation(True)
+    sec.Build()
+    if sec.IsDone():
+        outer, _inners, area_outer = _extract_outer_and_holes(sec.Shape(), plane, tol=tol)
+        if outer is not None:
+            return float(area_outer)
+    gpv = GProp_GProps()
+    BRepGProp.VolumeProperties_s(solid, gpv)
+    return gpv.Mass() / max(L, 1e-9)
 
 
 # ======================================================================================
@@ -610,6 +768,30 @@ def _rotX(shape, quarter_turns: int):
         return shape
     angle = k * (math.pi / 2.0)
     ax = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0))
+    tr = gp_Trsf()
+    tr.SetRotation(ax, angle)
+    return BRepBuilderAPI_Transform(shape, tr, True).Shape()
+
+
+def _rotY(shape, quarter_turns: int):
+    """Rotate about local Y axis through origin by k*90 degrees."""
+    k = quarter_turns % 4
+    if k == 0:
+        return shape
+    angle = k * (math.pi / 2.0)
+    ax = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0))
+    tr = gp_Trsf()
+    tr.SetRotation(ax, angle)
+    return BRepBuilderAPI_Transform(shape, tr, True).Shape()
+
+
+def _rotZ(shape, quarter_turns: int):
+    """Rotate about local Z axis through origin by k*90 degrees."""
+    k = quarter_turns % 4
+    if k == 0:
+        return shape
+    angle = k * (math.pi / 2.0)
+    ax = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
     tr = gp_Trsf()
     tr.SetRotation(ax, angle)
     return BRepBuilderAPI_Transform(shape, tr, True).Shape()

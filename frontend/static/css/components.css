@@ -726,6 +726,18 @@ details summary {
     border-bottom: none;
 }
 
+.parts-list-table tr[data-bom-node-id] {
+    cursor: pointer;
+}
+
+.parts-list-table tr[data-bom-node-id]:hover td {
+    background: #eff6ff;
+}
+
+.parts-list-table tr[data-bom-node-id].bom-row-active td {
+    background: #dbeafe;
+}
+
 .parts-list-qty {
     text-align: right;
     font-variant-numeric: tabular-nums;
@@ -814,6 +826,11 @@ details summary {
     position: sticky;
     top: 0;
     z-index: 1;
+}
+
+.parts-list-section-header.parts-list-section-unknown td {
+    background: #fef3c7;
+    color: #92400e;
 }
 
 .parts-list-section-header.parts-list-section-pp td {

@@ -291,13 +291,13 @@ class PartsConsolidator:
         #                      (including chirality).  Used for cross-ref groups
         #                      so that mirror-image solids from different
         #                      prototypes are NOT incorrectly merged.
-        #   intra_fp_bucket  — keyed by the first 8 components (NO chirality).
-        #                      Used for intra-part groups only.  For solids with
-        #                      degenerate (nearly equal) principal moments, OCC
-        #                      can return different eigenvector orientations and
-        #                      therefore different chirality values for two
-        #                      geometrically identical copies — dropping chirality
-        #                      from the key prevents this from causing a miss.
+        #   intra_fp_bucket  — keyed by the FULL 9-component fingerprint
+        #                      (including chirality).  Used for intra-part groups.
+        #                      Chirality is included so that opposite-hand solids
+        #                      (e.g. mirrored channels in a weldment) are kept
+        #                      separate.  Within the same compound, OCC produces
+        #                      consistent eigenvectors for identical copies, so
+        #                      chirality is reliable here.
         solid_fp_bucket: Dict[Tuple, List[Dict]] = {}
         intra_fp_bucket: Dict[Tuple, List[Dict]] = {}
         for ref_id, info in self._parts_by_ref.items():
@@ -319,9 +319,7 @@ class PartsConsolidator:
                 solid_fp_bucket.setdefault(fp, []).append(
                     {"ref_id": ref_id, "solid_index": solid_index}
                 )
-                # fp[:-1] strips the chirality component for lenient intra-part
-                # matching (chirality can vary for degenerate principal moments).
-                intra_fp_bucket.setdefault(fp[:-1], []).append(
+                intra_fp_bucket.setdefault(fp, []).append(
                     {"ref_id": ref_id, "solid_index": solid_index}
                 )
 
@@ -336,8 +334,8 @@ class PartsConsolidator:
                 )
 
         # Intra-part solid groups: ≥ 2 solids from the SAME ref_id share the
-        # same fingerprint (without chirality).  Deduplicate solid_indices in
-        # case two entries map to the same solid under the relaxed key.
+        # same fingerprint (including chirality).  Opposite-hand solids stay
+        # separate.  Deduplicate solid_indices just in case.
         intra_solid_groups: List[Dict[str, Any]] = []
         for fp_key, members in intra_fp_bucket.items():
             unique_refs = {m["ref_id"] for m in members}

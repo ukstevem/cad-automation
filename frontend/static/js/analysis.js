@@ -728,6 +728,43 @@ export class AnalysisPage {
         this._loadInViewer(url);
     }
 
+    /**
+     * Select a tree node and scroll it into view (used by BOM row clicks).
+     * Expands collapsed ancestor nodes so the target is visible.
+     */
+    _selectAndScrollToNode(nodeId) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        if (!treeEl) return;
+
+        // Find the tree node <li> for this nodeId
+        const targetLi = treeEl.querySelector(`.tree-node[data-node-id="${nodeId}"]`);
+        if (!targetLi) return;
+
+        // Expand any collapsed ancestor <ul> elements so the node is visible
+        let el = targetLi.parentElement;
+        while (el && el !== treeEl) {
+            if (el.tagName === 'UL' && el.hidden) {
+                el.hidden = false;
+                // Update the toggle button on the parent <li>
+                const parentLi = el.closest('.tree-node');
+                if (parentLi) {
+                    const toggle = parentLi.querySelector(':scope > .tree-node-row .tree-toggle');
+                    if (toggle) toggle.classList.add('expanded');
+                }
+            }
+            el = el.parentElement;
+        }
+
+        // Select the node (loads preview + highlights)
+        this._selectNodeForPreview(nodeId);
+
+        // Scroll the tree node row into view
+        const row = targetLi.querySelector('.tree-node-row');
+        if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    }
+
     _loadInViewer(url) {
         const panel = this.container.querySelector('#stl-viewer-panel');
         if (!panel) return;
@@ -1063,6 +1100,7 @@ export class AnalysisPage {
         const parentDepth = parseInt(li.dataset.depth) || 0;
 
         const parentRefId = li.dataset.refId;
+        const parentNodeId = li.dataset.nodeId;
         const parentName = li.dataset.nodeName || null;
 
         for (const child of childrenInfo) {
@@ -1092,10 +1130,12 @@ export class AnalysisPage {
 
             // Register in parent/node maps so BOM walk can display solid body rows.
             // _solidParentRefId lets _buildBOMItems look up the correct instance qty.
+            // _solidParentNodeId lets BOM inherit the parent's classification.
             this._parentMap.set(child.nodeId, {
                 name: child.name,
                 parentName,
                 _solidParentRefId: parentRefId,
+                _solidParentNodeId: parentNodeId,
             });
             this._nodeRefMap.set(child.nodeId, child.nodeId);
         }
@@ -1430,23 +1470,43 @@ export class AnalysisPage {
         // (e.g. solids 0,1,3,4 of a weldment are four identical plates)
         this._mergeIntraSolidGroups(itemMap);
 
-        const cncItems = [];
-        const boItems  = [];
+        const cncItems     = [];
+        const boItems      = [];
+        const unknownItems = [];
 
         for (const item of itemMap.values()) {
             const classifiedId = item.nodeIds.find(nid => this.classifications.has(nid));
-            const action = classifiedId ? this.classifications.get(classifiedId) : null;
-            if (action === 'postprocess') cncItems.push(item);
+            let action = classifiedId ? this.classifications.get(classifiedId) : null;
+
+            // Inherit classification from parent multi-solid for exploded solid children
+            if (!action) {
+                const parentInfo = this._parentMap.get(item.key);
+                if (parentInfo?._solidParentNodeId) {
+                    action = this.classifications.get(parentInfo._solidParentNodeId) || null;
+                }
+            }
+
+            if (action === 'postprocess') {
+                // Check CNC analysis result — separate unknowns from resolved items
+                const info = this._cncResultForItem(item);
+                const rType = info?.result?.type;
+                if (rType === 'unknown') {
+                    unknownItems.push(item);
+                } else {
+                    cncItems.push(item);
+                }
+            }
             else if (action === 'bought-out') boItems.push(item);
             // unclassified → skip
         }
 
         // Sort each section: by name
         const byName = (a, b) => a.name.localeCompare(b.name);
+        unknownItems.sort(byName);
         cncItems.sort(byName);
         boItems.sort(byName);
 
-        return { cncItems, boItems };
+        return { cncItems, boItems, unknownItems };
     }
 
     /**
@@ -1617,8 +1677,8 @@ export class AnalysisPage {
         const panel = this.container.querySelector('#parts-list-panel');
         if (!panel) return;
 
-        const { cncItems, boItems } = this._buildBOMItems();
-        const totalClassified = cncItems.length + boItems.length;
+        const { cncItems, boItems, unknownItems } = this._buildBOMItems();
+        const totalClassified = cncItems.length + boItems.length + unknownItems.length;
 
         // Build a ref_id → consolidation group lookup for merged display
         const refToGroup = new Map();
@@ -1685,7 +1745,8 @@ export class AnalysisPage {
                         // Use first group member's result for CNC badge
                         const cncHtml = isCnc && members[0]
                             ? this._cncResultHtml(members[0], filename) : '';
-                        merged.push(`<tr>
+                        const grpNid = members[0]?.nodeIds?.[0] || '';
+                        merged.push(`<tr data-bom-node-id="${grpNid}">
                             <td>${this._esc(g.canonical_name)}${mergeTag}${cncHtml ? ' ' + cncHtml : ''}</td>
                             <td class="parts-list-qty">${qty}${mirrorNote}</td>
                             <td class="parts-list-parents">${parentsCells}</td>
@@ -1734,6 +1795,12 @@ export class AnalysisPage {
               + (hasAnyResults ? `<button class="parts-cnc-reanalyse-btn outline" title="Clear cache and re-run analysis">\u21ba\u00a0Re-analyse</button>` : '');
 
         let tbody = '';
+        if (unknownItems.length > 0) {
+            tbody += `<tr class="parts-list-section-header parts-list-section-unknown">
+                <td colspan="3">Unknown &middot; ${unknownItems.length}</td>
+            </tr>`;
+            tbody += renderRows(unknownItems, true);
+        }
         if (cncItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-pp">
                 <td colspan="2">Post Process &middot; ${cncItems.length}</td>
@@ -1797,16 +1864,31 @@ export class AnalysisPage {
             this._startConsolidation();
         });
 
+        const allCncItems = [...unknownItems, ...cncItems];
         panel.querySelector('.parts-cnc-analyse-btn')?.addEventListener('click', () => {
-            this._startCncAnalysis(cncItems, false);
+            this._startCncAnalysis(allCncItems, false);
         });
 
         panel.querySelector('.parts-cnc-reanalyse-btn')?.addEventListener('click', () => {
-            this._startCncAnalysis(cncItems, true);
+            this._startCncAnalysis(allCncItems, true);
         });
 
         panel.querySelector('.parts-bom-dl-btn')?.addEventListener('click', () => {
-            this._downloadBOM(cncItems, boItems);
+            this._downloadBOM(allCncItems, boItems, unknownItems);
+        });
+
+        // Click a BOM row → select + scroll to the first occurrence in the tree
+        panel.querySelector('.parts-list-table tbody')?.addEventListener('click', (e) => {
+            const tr = e.target.closest('tr[data-bom-node-id]');
+            if (!tr) return;
+            const nodeId = tr.dataset.bomNodeId;
+            if (!nodeId) return;
+            // Highlight the active BOM row
+            for (const r of panel.querySelectorAll('.bom-row-active')) {
+                r.classList.remove('bom-row-active');
+            }
+            tr.classList.add('bom-row-active');
+            this._selectAndScrollToNode(nodeId);
         });
     }
 
@@ -1833,7 +1915,8 @@ export class AnalysisPage {
     _bomRow(item) {
         const mirrorNote = item.mirroredCount > 0
             ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
-        return `<tr>
+        const nid = item.nodeIds?.[0] || '';
+        return `<tr data-bom-node-id="${nid}">
             <td>${this._esc(item.name)}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
             <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
@@ -1844,7 +1927,8 @@ export class AnalysisPage {
         const mirrorNote = item.mirroredCount > 0
             ? ` <span class="parts-list-mirror">(+${item.mirroredCount}M)</span>` : '';
         const cncHtml = this._cncResultHtml(item, filename);
-        return `<tr>
+        const nid = item.nodeIds?.[0] || '';
+        return `<tr data-bom-node-id="${nid}">
             <td>${this._esc(item.name)}${cncHtml ? ' ' + cncHtml : ''}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
             <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
@@ -1948,7 +2032,7 @@ export class AnalysisPage {
      * Generate and download a BOM JSON file with full ordering information.
      * Includes CNC items with dims, weight, qty, filenames; and bought-out items.
      */
-    _downloadBOM(cncItems, boItems) {
+    _downloadBOM(cncItems, boItems, unknownItems = []) {
         const DENSITY = 7.85e-6; // kg/mm³ (steel)
         const r3 = v => (v != null && isFinite(v)) ? Math.round(v * 1000) / 1000 : null;
         const r1 = v => (v != null && isFinite(v)) ? Math.round(v * 10)   / 10   : null;
@@ -1995,10 +2079,11 @@ export class AnalysisPage {
             return out;
         };
 
-        const mergedCnc = _consolidate(cncItems);
-        const mergedBo  = _consolidate(boItems);
+        const mergedCnc     = _consolidate(cncItems);
+        const mergedBo      = _consolidate(boItems);
+        const mergedUnknown = _consolidate(unknownItems);
 
-        const cnc_entries = mergedCnc.map(item => {
+        const _cncEntry = (item) => {
             const info = this._cncResultForItem(item);
             const res  = info?.result ?? null;
 
@@ -2040,7 +2125,10 @@ export class AnalysisPage {
                 match_score:      res?.match_score ?? null,
                 analysed_at:      res?.analysed_at ?? null,
             };
-        });
+        };
+
+        const cnc_entries     = mergedCnc.map(_cncEntry);
+        const unknown_entries = mergedUnknown.map(_cncEntry);
 
         const bo_entries = mergedBo.map(item => ({
             name:             item.name,
@@ -2052,18 +2140,22 @@ export class AnalysisPage {
             })),
         }));
 
-        const totalCncQty  = cnc_entries.reduce((s, e) => s + e.qty, 0);
-        const totalWeight  = cnc_entries.reduce((s, e) => s + (e.total_weight_kg ?? 0), 0);
-        const totalBoQty   = bo_entries.reduce((s, e) => s + e.qty, 0);
+        const totalCncQty     = cnc_entries.reduce((s, e) => s + e.qty, 0);
+        const totalWeight     = cnc_entries.reduce((s, e) => s + (e.total_weight_kg ?? 0), 0);
+        const totalBoQty      = bo_entries.reduce((s, e) => s + e.qty, 0);
+        const totalUnknownQty = unknown_entries.reduce((s, e) => s + e.qty, 0);
 
         const bom = {
             project_number:  this._lastProjectNumber  || null,
             steel_grade:     this._lastSteelGrade     || null,
             step_file:       this._currentFilename    || null,
             generated_at:    new Date().toISOString(),
+            unknown_items:   unknown_entries,
             cnc_items:       cnc_entries,
             bought_out_items: bo_entries,
             summary: {
+                total_unknown_types:       unknown_entries.length,
+                total_unknown_qty:         totalUnknownQty,
                 total_cnc_types:           cnc_entries.length,
                 total_cnc_qty:             totalCncQty,
                 total_estimated_weight_kg: r1(totalWeight),

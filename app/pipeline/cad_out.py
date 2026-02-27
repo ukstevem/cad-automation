@@ -70,14 +70,27 @@ def _ordered_uv_polyline(face, wire, project_uv, sampling_dist=1.0, samples_per_
     """
     Return an ordered list of (u,v) along 'wire' so that successive points are contiguous.
     """
-    pts_uv = []
-    prev = None
-
+    # ---- Phase 1: collect all edges with 3D endpoints ----
+    edges_info = []
     wx = BRepTools_WireExplorer(wire, face)
     while wx.More():
         edge = wx.Current()
         c = BRepAdaptor_Curve(edge)
+        p0 = c.Value(c.FirstParameter())
+        p1 = c.Value(c.LastParameter())
+        edges_info.append({
+            'curve': c,
+            'start_3d': np.array([p0.X(), p0.Y(), p0.Z()], dtype=float),
+            'end_3d':   np.array([p1.X(), p1.Y(), p1.Z()], dtype=float),
+        })
+        wx.Next()
 
+    # ---- Phase 2: build UV polyline ----
+    pts_uv = []
+    prev = None
+
+    for idx, ei in enumerate(edges_info):
+        c = ei['curve']
         ts = None
         try:
             disc = GCPnts_UniformAbscissa(c, float(sampling_dist))
@@ -100,7 +113,6 @@ def _ordered_uv_polyline(face, wire, project_uv, sampling_dist=1.0, samples_per_
             edge_uv.append(project_uv(P3))
 
         if not edge_uv:
-            wx.Next()
             continue
 
         if prev is not None:
@@ -111,10 +123,26 @@ def _ordered_uv_polyline(face, wire, project_uv, sampling_dist=1.0, samples_per_
 
             if hypot(edge_uv[0][0] - prev[0], edge_uv[0][1] - prev[1]) < 1e-8:
                 edge_uv = edge_uv[1:]
+        elif len(edges_info) > 1:
+            # First edge: determine direction by checking which end connects
+            # to the next edge (no prev available yet).
+            next_ei = edges_info[1]
+            ns, ne = next_ei['start_3d'], next_ei['end_3d']
+            # Distance from this edge's end to next edge's nearest endpoint
+            min_from_end = min(
+                float(np.linalg.norm(ei['end_3d'] - ns)),
+                float(np.linalg.norm(ei['end_3d'] - ne)),
+            )
+            # Distance from this edge's start to next edge's nearest endpoint
+            min_from_start = min(
+                float(np.linalg.norm(ei['start_3d'] - ns)),
+                float(np.linalg.norm(ei['start_3d'] - ne)),
+            )
+            if min_from_start < min_from_end:
+                edge_uv.reverse()
 
         pts_uv.extend(edge_uv)
         prev = pts_uv[-1]
-        wx.Next()
 
     if pts_uv:
         if hypot(pts_uv[0][0] - pts_uv[-1][0], pts_uv[0][1] - pts_uv[-1][1]) >= 1e-8:

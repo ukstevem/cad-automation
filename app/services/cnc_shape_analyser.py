@@ -39,12 +39,15 @@ from app.pipeline.geom_alignment import align_by_longest_straight_edge
 from app.pipeline.geometry_utils import (
     compute_obb_geometry,
     compute_section_area,
+    compute_section_dims,
     compute_dstv_pose,
     compute_dstv_origin,
     align_obb_to_dstv_frame,
     swap_width_and_height_if_required,
     count_solids_in_shape,
     get_volume_from_shape,
+    _rotY,
+    _rotZ,
 )
 from app.pipeline.classification import classify_profile
 from app.pipeline.plate_wrangling import align_plate_to_xy_plane
@@ -293,16 +296,20 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
 
     L, H, W = obb["aligned_extents"]
 
-    # Step 3: cross-section area
+    # Step 3: cross-section dims (area + H/W from core region, avoiding end chamfers)
     try:
-        section_area = compute_section_area(aligned)
+        section_dims = compute_section_dims(aligned)
+        section_area = section_dims["area"]
+        H_cs = section_dims.get("H") or H   # fallback to OBB
+        W_cs = section_dims.get("W") or W
     except Exception as e:
         section_area = 0.0
-        logger.warning("section_area_failed", ref_id=ref_id, error=str(e))
+        H_cs, W_cs = H, W
+        logger.warning("section_dims_failed", ref_id=ref_id, error=str(e))
 
     cs = {
-        "span_web":    H,
-        "span_flange": W,
+        "span_web":    H_cs,
+        "span_flange": W_cs,
         "area":        section_area,
         "length":      L,
     }
@@ -325,6 +332,49 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
     logger.info("no_section_match", ref_id=ref_id,
                 L=round(L, 1), H=round(H, 1), W=round(W, 1),
                 section_area=round(section_area, 1))
+
+    # Step 4b: axis-retry — try Y-as-X and Z-as-X before giving up
+    # For short items the longest straight edge may be the web height, not the
+    # extrusion length.  Rotating so a different OBB axis becomes X lets the
+    # existing X-hardcoded pipeline re-attempt classification.
+    axis_retry_candidates = []
+    for rot_label, rot_fn, rot_args in [
+        ("Y-as-X", _rotZ, 1),   # +90 deg about Z: old Y becomes new X
+        ("Z-as-X", _rotY, 3),   # +270 deg about Y: old Z becomes new X
+    ]:
+        try:
+            rotated = rot_fn(aligned, rot_args)
+            obb_r = compute_obb_geometry(rotated)
+            L_r, H_r, W_r = obb_r["aligned_extents"]
+            if L_r < 20.0:
+                continue
+            sd_r = compute_section_dims(rotated)
+            area_r = sd_r["area"]
+            H_cs_r = sd_r.get("H") or H_r
+            W_cs_r = sd_r.get("W") or W_r
+            cs_r = {"span_web": H_cs_r, "span_flange": W_cs_r,
+                     "area": area_r, "length": L_r}
+            match_r = classify_profile(cs_r, str(_SECTION_LIBRARY))
+            if match_r:
+                logger.info("axis_retry_match", ref_id=ref_id, axis=rot_label,
+                            designation=match_r.get("Designation"),
+                            score=match_r.get("Match_score"))
+                match_r.setdefault("Diagnostics", {})["axis_retry"] = rot_label
+                axis_retry_candidates.append((match_r, rotated, obb_r))
+        except Exception as e:
+            logger.debug("axis_retry_error", ref_id=ref_id, axis=rot_label,
+                         error=str(e))
+
+    if axis_retry_candidates:
+        axis_retry_candidates.sort(
+            key=lambda t: t[0].get("Match_score", float("inf")))
+        best_match, best_shape, best_obb = axis_retry_candidates[0]
+        logger.info("axis_retry_selected", ref_id=ref_id,
+                     designation=best_match.get("Designation"),
+                     score=best_match.get("Match_score"))
+        return _process_section(best_shape, best_obb, best_match, ref_id,
+                                member_id, solid_idx, file_path, out_dir,
+                                parent_name, project_number, steel_grade)
 
     # Step 5: try plate path
     try:
