@@ -75,7 +75,9 @@ def _safe_name(name: Optional[str]) -> str:
     """Sanitise a name for use in a filename: keep alphanumerics and hyphens only."""
     if not name:
         return "unknown"
-    s = re.sub(r'[^\w\-]', '_', name).strip('_')
+    # Strip common CAD export suffixes (e.g. "_Default<As Machined>")
+    s = re.sub(r'_Default(?:<[^>]*>)?$', '', name)
+    s = re.sub(r'[^\w\-]', '_', s).strip('_')
     return s[:64] or "unknown"
 
 
@@ -480,8 +482,8 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
 
         has_end_cuts = any(abs(v) > 0.01 for v in web_cut.values())
 
-        # NC1 filename: {project_number}-{parent_name}-{occurrence}.nc1
-        nc1_name = f"{proj_num}-{_safe_name(parent_name)}-{solid_idx + 1}"
+        # NC1 filename: {project_number}-{member_id}-{occurrence}.nc1
+        nc1_name = f"{proj_num}-{_safe_name(member_id)}-{solid_idx + 1}"
         nc1_dir = out_dir / "nc1"
 
         header_data = assemble_dstv_header_data(
@@ -530,9 +532,9 @@ def _process_plate(aligned_plate, ax3, T: float, plate_L: float, plate_W: float,
                    parent_name: Optional[str] = None) -> Dict[str, Any]:
     """Run the plate pipeline: export DXF profile."""
     try:
-        # Filename: {thickness_mm}-{parent_name}-{occurrence}.dxf
+        # Filename: {thickness_mm}-{member_id}-{occurrence}.dxf
         thickness_mm = int(round(T))
-        dxf_stem = f"{thickness_mm}-{_safe_name(parent_name)}-{solid_idx + 1}"
+        dxf_stem = f"{thickness_mm}-{_safe_name(member_id)}-{solid_idx + 1}"
         dxf_dir = out_dir / "plates"
         dxf_dir.mkdir(parents=True, exist_ok=True)
         dxf_path = dxf_dir / f"{dxf_stem}.dxf"

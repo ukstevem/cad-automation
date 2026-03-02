@@ -1,5 +1,10 @@
 /**
  * Three.js STL viewer component - reusable 3D preview that fills its container
+ *
+ * Supports:
+ *   - Single STL loading (loadSTL) for backward compatibility
+ *   - Multi-mesh scenes (loadScene) with per-mesh color/opacity
+ *   - Line geometry overlay (addLines) for weld path highlighting
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -10,7 +15,6 @@ export class STLViewer {
         this.container = containerEl;
         this._disposed = false;
 
-        // Read actual container size (must have explicit CSS dimensions)
         const rect = containerEl.getBoundingClientRect();
         this.width = rect.width || 400;
         this.height = rect.height || 400;
@@ -46,22 +50,27 @@ export class STLViewer {
         backLight.position.set(-1, -0.5, -1);
         this.scene.add(backLight);
 
+        // Single-mesh state (backward compat)
         this._mesh = null;
         this._edges = null;
-        this._animId = null;
-        this._loadGen = 0;  // incremented on each loadSTL call; used to cancel stale loads
 
-        // Resize observer to keep renderer matched to container
+        // Multi-mesh state
+        this._meshes = [];      // [{mesh, edges, material}]
+        this._lines = [];       // [THREE.LineSegments]
+        this._sceneCenter = new THREE.Vector3();
+
+        this._animId = null;
+        this._loadGen = 0;
+
         this._resizeObserver = new ResizeObserver(() => this._onResize());
         this._resizeObserver.observe(containerEl);
 
         this._animate();
     }
 
+    // ── Single-mesh loading (backward compat) ────────────────────────
+
     async loadSTL(url) {
-        // Each call gets a unique generation number.  If the viewer is disposed
-        // or a newer load starts before this one completes, we reject rather than
-        // silently hanging (which leaves the panel stuck in "loading" state).
         const gen = ++this._loadGen;
         const loader = new STLLoader();
 
@@ -74,17 +83,8 @@ export class STLViewer {
                         return;
                     }
                     try {
-                        // Remove previous mesh and edges
-                        if (this._mesh) {
-                            this.scene.remove(this._mesh);
-                            this._mesh.geometry.dispose();
-                            this._mesh.material.dispose();
-                        }
-                        if (this._edges) {
-                            this.scene.remove(this._edges);
-                            this._edges.geometry.dispose();
-                            this._edges.material.dispose();
-                        }
+                        this._clearSingle();
+                        this._clearMulti();
 
                         const material = new THREE.MeshPhongMaterial({
                             color: 0x4a90d9,
@@ -98,7 +98,6 @@ export class STLViewer {
                         this._mesh = mesh;
                         this.scene.add(mesh);
 
-                        // Edge lines — drawn at face boundaries above 15° dihedral angle
                         const edgesGeo = new THREE.EdgesGeometry(geometry, 15);
                         const edgesMat = new THREE.LineBasicMaterial({ color: 0x0d1f33 });
                         this._edges = new THREE.LineSegments(edgesGeo, edgesMat);
@@ -116,6 +115,158 @@ export class STLViewer {
         });
     }
 
+    // ── Multi-mesh scene loading ─────────────────────────────────────
+
+    /**
+     * Load multiple STL files into the scene.
+     *
+     * @param {Array<{url: string, color?: number, opacity?: number, label?: string}>} items
+     * @returns {Promise<void>} resolves when all meshes are loaded
+     */
+    async loadScene(items) {
+        const gen = ++this._loadGen;
+        this._clearSingle();
+        this._clearMulti();
+
+        const loader = new STLLoader();
+        const combinedBox = new THREE.Box3();
+        let loadedCount = 0;
+
+        const loadOne = (item, index) => new Promise((resolve, reject) => {
+            loader.load(
+                item.url,
+                (geometry) => {
+                    if (this._disposed || this._loadGen !== gen) {
+                        reject(new Error('load cancelled'));
+                        return;
+                    }
+                    try {
+                        geometry.computeVertexNormals();
+                        geometry.computeBoundingBox();
+                        combinedBox.union(geometry.boundingBox);
+
+                        const color = item.color != null ? item.color : 0xaaaaaa;
+                        const opacity = item.opacity != null ? item.opacity : 1.0;
+
+                        const material = new THREE.MeshPhongMaterial({
+                            color,
+                            specular: 0x222222,
+                            shininess: 40,
+                            flatShading: false,
+                            transparent: opacity < 1.0,
+                            opacity,
+                        });
+
+                        const mesh = new THREE.Mesh(geometry, material);
+                        this.scene.add(mesh);
+
+                        const edgesGeo = new THREE.EdgesGeometry(geometry, 15);
+                        const edgesMat = new THREE.LineBasicMaterial({
+                            color: 0x333333,
+                            transparent: opacity < 1.0,
+                            opacity: Math.min(opacity + 0.1, 1.0),
+                        });
+                        const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+                        this.scene.add(edges);
+
+                        this._meshes[index] = { mesh, edges, material, edgesMat };
+                        loadedCount++;
+                        resolve();
+                    } catch (err) {
+                        reject(err);
+                    }
+                },
+                undefined,
+                (err) => reject(err),
+            );
+        });
+
+        // Load all in parallel
+        await Promise.all(items.map((item, i) => loadOne(item, i)));
+
+        if (this._disposed || this._loadGen !== gen) return;
+
+        // Center all meshes
+        const center = new THREE.Vector3();
+        combinedBox.getCenter(center);
+        this._sceneCenter.copy(center);
+
+        for (const entry of this._meshes) {
+            if (!entry) continue;
+            entry.mesh.position.sub(center);
+            entry.edges.position.sub(center);
+        }
+
+        // Fit camera
+        this._fitCameraToBox(combinedBox, center);
+    }
+
+    /**
+     * Change the color/opacity of a specific mesh by index.
+     *
+     * @param {number} index
+     * @param {number} color  hex color
+     * @param {number} [opacity=1.0]
+     */
+    setMeshColor(index, color, opacity = 1.0) {
+        const entry = this._meshes[index];
+        if (!entry) return;
+        entry.material.color.setHex(color);
+        entry.material.transparent = opacity < 1.0;
+        entry.material.opacity = opacity;
+        entry.material.needsUpdate = true;
+    }
+
+    // ── Line geometry overlay ────────────────────────────────────────
+
+    /**
+     * Draw polylines as bright line segments in the scene.
+     *
+     * @param {Array<Array<[number,number,number]>>} polylines
+     *   Each polyline is an array of [x,y,z] points.
+     * @param {number} [color=0xff3333]
+     */
+    addLines(polylines, color = 0xff3333) {
+        if (!polylines || polylines.length === 0) return;
+
+        const positions = [];
+        for (const pts of polylines) {
+            for (let i = 0; i < pts.length - 1; i++) {
+                const a = pts[i], b = pts[i + 1];
+                // Shift by scene center to match mesh positions
+                positions.push(
+                    a[0] - this._sceneCenter.x, a[1] - this._sceneCenter.y, a[2] - this._sceneCenter.z,
+                    b[0] - this._sceneCenter.x, b[1] - this._sceneCenter.y, b[2] - this._sceneCenter.z,
+                );
+            }
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+        const material = new THREE.LineBasicMaterial({
+            color,
+            linewidth: 2,      // Note: linewidth > 1 only works with Line2 on some backends
+            depthTest: false,   // Draw on top of meshes
+        });
+
+        const lines = new THREE.LineSegments(geometry, material);
+        lines.renderOrder = 999;  // render last (on top)
+        this.scene.add(lines);
+        this._lines.push(lines);
+    }
+
+    clearLines() {
+        for (const line of this._lines) {
+            this.scene.remove(line);
+            line.geometry.dispose();
+            line.material.dispose();
+        }
+        this._lines = [];
+    }
+
+    // ── Camera fitting ───────────────────────────────────────────────
+
     _fitCamera(geometry) {
         geometry.computeBoundingBox();
         const box = geometry.boundingBox;
@@ -126,11 +277,9 @@ export class STLViewer {
         box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z);
 
-        // Center geometry (apply same offset to edge lines)
         this._mesh.position.sub(center);
         if (this._edges) this._edges.position.sub(center);
 
-        // Position camera
         const fov = this.camera.fov * (Math.PI / 180);
         const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.5;
 
@@ -142,6 +291,56 @@ export class STLViewer {
         this.controls.target.set(0, 0, 0);
         this.controls.update();
     }
+
+    _fitCameraToBox(box, center) {
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+
+        const fov = this.camera.fov * (Math.PI / 180);
+        const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.5;
+
+        this.camera.position.set(dist * 0.7, dist * 0.5, dist);
+        this.camera.near = dist / 100;
+        this.camera.far = dist * 10;
+        this.camera.updateProjectionMatrix();
+
+        this.controls.target.set(0, 0, 0);
+        this.controls.update();
+    }
+
+    // ── Cleanup helpers ──────────────────────────────────────────────
+
+    _clearSingle() {
+        if (this._mesh) {
+            this.scene.remove(this._mesh);
+            this._mesh.geometry.dispose();
+            this._mesh.material.dispose();
+            this._mesh = null;
+        }
+        if (this._edges) {
+            this.scene.remove(this._edges);
+            this._edges.geometry.dispose();
+            this._edges.material.dispose();
+            this._edges = null;
+        }
+    }
+
+    _clearMulti() {
+        for (const entry of this._meshes) {
+            if (!entry) continue;
+            this.scene.remove(entry.mesh);
+            entry.mesh.geometry.dispose();
+            entry.material.dispose();
+            this.scene.remove(entry.edges);
+            entry.edges.geometry.dispose();
+            entry.edgesMat.dispose();
+        }
+        this._meshes = [];
+        this.clearLines();
+    }
+
+    // ── Resize / animate / dispose ───────────────────────────────────
 
     _onResize() {
         if (this._disposed) return;
@@ -166,16 +365,8 @@ export class STLViewer {
         this._disposed = true;
         if (this._resizeObserver) this._resizeObserver.disconnect();
         if (this._animId) cancelAnimationFrame(this._animId);
-        if (this._mesh) {
-            this.scene.remove(this._mesh);
-            this._mesh.geometry.dispose();
-            this._mesh.material.dispose();
-        }
-        if (this._edges) {
-            this.scene.remove(this._edges);
-            this._edges.geometry.dispose();
-            this._edges.material.dispose();
-        }
+        this._clearSingle();
+        this._clearMulti();
         this.controls.dispose();
         this.renderer.dispose();
         if (this.renderer.domElement.parentNode) {

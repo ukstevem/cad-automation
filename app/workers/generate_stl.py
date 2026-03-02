@@ -53,7 +53,7 @@ def main() -> None:
     output_dir = sys.argv[3]
     node_id = sys.argv[4] if len(sys.argv) > 4 else None
 
-    if mode in ("children", "solids") and not node_id:
+    if mode in ("children", "solids", "solids_world", "solids_world_batch") and not node_id:
         print(f"node_id is required for mode '{mode}'", file=sys.stderr)
         sys.exit(1)
 
@@ -77,6 +77,12 @@ def main() -> None:
                 result_holder[0] = gen.generate_children(node_id)
             elif mode == "solids":
                 result_holder[0] = gen.generate_solids(node_id)
+            elif mode == "solids_world":
+                result_holder[0] = gen.generate_solids_world(node_id)
+            elif mode == "solids_world_batch":
+                # node_id is a comma-separated list of node_ids
+                node_ids = [n.strip() for n in node_id.split(",") if n.strip()]
+                result_holder[0] = gen.generate_solids_world_batch(node_ids)
             else:
                 raise ValueError(f"Unknown mode: {mode!r}")
         except Exception as exc:

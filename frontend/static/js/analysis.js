@@ -668,10 +668,11 @@ export class AnalysisPage {
                 explodeBtn.hidden = !hasStl || isExploded;
             }
 
-            // BO button: visible when has STL and not exploded; active when currently BO
+            // BO button: visible when has STL; stays visible even when exploded
+            // so the user can mark exploded items as bought-out
             const boughtOutBtn = row.querySelector('.btn-bought-out');
             if (boughtOutBtn) {
-                boughtOutBtn.hidden = !hasStl || isExploded;
+                boughtOutBtn.hidden = !hasStl;
                 boughtOutBtn.classList.toggle('btn-active', isClassified && currentAction === 'bought-out');
             }
 
@@ -682,10 +683,10 @@ export class AnalysisPage {
                 ppBtn.classList.toggle('btn-active', isClassified && currentAction === 'postprocess');
             }
 
-            // Unclassify button: only visible when classified and not exploded
+            // Unclassify button: visible when classified (even if exploded, to undo BO)
             const unclassifyBtn = row.querySelector('.btn-unclassify');
             if (unclassifyBtn) {
-                unclassifyBtn.hidden = !isClassified || isExploded;
+                unclassifyBtn.hidden = !isClassified;
             }
 
             row.classList.toggle('node-selected', this._selectedNodeId === nodeId);

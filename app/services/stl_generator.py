@@ -28,6 +28,7 @@ from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_SOLID
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.StlAPI import StlAPI_Writer
+from OCP.TopLoc import TopLoc_Location
 
 from app.config import settings
 from app.exceptions import STLGenerationError
@@ -375,6 +376,212 @@ class STLGenerator:
             generated=len([r for r in results if r.get("stl_file")]),
         )
         return results
+
+    def generate_solids_world(
+        self, node_id: str, progress_callback: Callable = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate individual STL files for each solid in a part, in world coordinates.
+
+        Unlike generate_solids() which resolves to the prototype shape,
+        this method uses the instance shape directly so that the STL
+        geometry is in world space — matching weld path coordinates from
+        the connection detector.
+
+        Args:
+            node_id: XCAF label entry string of the instance node
+            progress_callback: Called as (completed, total, current_name)
+
+        Returns:
+            List of dicts with name, stl_file, node_id (synthetic: <node_id>:s<N>), size_bytes
+        """
+        logger.info(
+            "stl_solids_world_generation_starting",
+            file_path=str(self.file_path),
+            node_id=node_id,
+        )
+
+        doc, shape_tool = self._read_xcaf()
+
+        # Find the label from its entry string
+        label = TDF_Label()
+        TDF_Tool.Label_s(doc.GetData(), TCollection_AsciiString(node_id), label)
+
+        if label.IsNull():
+            raise STLGenerationError(
+                f"Node not found in document: {node_id}",
+                details={"node_id": node_id},
+            )
+
+        # Get the instance shape, then strip the node's own world placement
+        # so that solids are in the assembly-prototype frame.  The connection
+        # detector extracts leaf shapes from prototype child labels which do
+        # NOT carry the instance placement — stripping it here keeps the STL
+        # and weld-path coordinate systems aligned.
+        shape = XCAFDoc_ShapeTool.GetShape_s(label)
+        if shape is None or shape.IsNull():
+            raise STLGenerationError(
+                f"No shape for node: {node_id}",
+                details={"node_id": node_id},
+            )
+        shape = shape.Located(TopLoc_Location())
+
+        # Get the part name — try instance label first, then resolved ref
+        part_name = self._get_label_name(label)
+        if not part_name and XCAFDoc_ShapeTool.IsReference_s(label):
+            ref_label = TDF_Label()
+            XCAFDoc_ShapeTool.GetReferredShape_s(label, ref_label)
+            part_name = self._get_label_name(ref_label)
+        part_name = part_name or "Part"
+
+        # Extract individual solids from the world-space compound
+        explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+        solids = []
+        idx = 0
+        while explorer.More():
+            solids.append({
+                "solid": explorer.Current(),
+                "name": f"{part_name} - Solid {idx + 1}",
+                "node_id": f"{node_id}:s{idx}",
+            })
+            explorer.Next()
+            idx += 1
+
+        if not solids:
+            return []
+
+        # Connection-preview STLs go in a subdirectory to avoid colliding
+        # with prototype-coord STLs from generate_solids() (analysis tab).
+        world_dir = self.output_dir / "connpreview"
+        world_dir.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        total = len(solids)
+
+        for i, item in enumerate(solids):
+            solid_name = item["name"]
+            if progress_callback:
+                progress_callback(i, total, solid_name)
+
+            try:
+                stl_path = world_dir / f"{_safe_filename(solid_name)}.stl"
+                self._generate_stl(item["solid"], stl_path)
+                size_bytes = stl_path.stat().st_size
+                results.append({
+                    "name": solid_name,
+                    "stl_file": stl_path.name,
+                    "node_id": item["node_id"],
+                    "size_bytes": size_bytes,
+                })
+                logger.info("stl_solid_world_generated", name=solid_name, size_bytes=size_bytes)
+            except Exception as e:
+                logger.error("stl_solid_world_failed", name=solid_name, error=str(e))
+                results.append({
+                    "name": solid_name,
+                    "stl_file": None,
+                    "node_id": item["node_id"],
+                    "error": str(e),
+                })
+
+        if progress_callback:
+            progress_callback(total, total, "")
+
+        logger.info(
+            "stl_solids_world_generation_complete",
+            node_id=node_id,
+            total=total,
+            generated=len([r for r in results if r.get("stl_file")]),
+        )
+        return results
+
+    def generate_solids_world_batch(
+        self, node_ids: List[str], progress_callback: Callable = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate world-coordinate STLs for multiple nodes in a single STEP parse.
+
+        This is much faster than calling generate_solids_world() N times because
+        the STEP file (often 50-100 MB) is only parsed once.
+        """
+        logger.info(
+            "stl_solids_world_batch_starting",
+            file_path=str(self.file_path),
+            node_count=len(node_ids),
+        )
+
+        doc, shape_tool = self._read_xcaf()
+
+        world_dir = self.output_dir / "connpreview"
+        world_dir.mkdir(parents=True, exist_ok=True)
+
+        all_results = []
+        total_nodes = len(node_ids)
+
+        for ni, nid in enumerate(node_ids):
+            # Find the label from its entry string
+            label = TDF_Label()
+            TDF_Tool.Label_s(doc.GetData(), TCollection_AsciiString(nid), label)
+
+            if label.IsNull():
+                logger.warning("stl_batch_node_not_found", node_id=nid)
+                continue
+
+            shape = XCAFDoc_ShapeTool.GetShape_s(label)
+            if shape is None or shape.IsNull():
+                logger.warning("stl_batch_node_no_shape", node_id=nid)
+                continue
+            shape = shape.Located(TopLoc_Location())
+
+            # Get part name
+            part_name = self._get_label_name(label)
+            if not part_name and XCAFDoc_ShapeTool.IsReference_s(label):
+                ref_label = TDF_Label()
+                XCAFDoc_ShapeTool.GetReferredShape_s(label, ref_label)
+                part_name = self._get_label_name(ref_label)
+            part_name = part_name or "Part"
+
+            # Extract solids
+            from OCP.TopExp import TopExp_Explorer
+            from OCP.TopAbs import TopAbs_SOLID
+            explorer = TopExp_Explorer(shape, TopAbs_SOLID)
+            idx = 0
+            while explorer.More():
+                solid = explorer.Current()
+                solid_name = f"{part_name} - Solid {idx + 1}"
+                solid_node_id = f"{nid}:s{idx}"
+
+                if progress_callback:
+                    progress_callback(
+                        len(all_results), -1,
+                        f"Node {ni + 1}/{total_nodes}: {solid_name}",
+                    )
+
+                try:
+                    stl_path = world_dir / f"{_safe_filename(solid_name)}.stl"
+                    if not stl_path.exists():
+                        self._generate_stl(solid, stl_path)
+                    size_bytes = stl_path.stat().st_size
+                    all_results.append({
+                        "name": solid_name,
+                        "stl_file": stl_path.name,
+                        "node_id": solid_node_id,
+                        "size_bytes": size_bytes,
+                    })
+                except Exception as e:
+                    logger.error(
+                        "stl_batch_solid_failed",
+                        node_id=nid, solid=solid_name, error=str(e),
+                    )
+
+                explorer.Next()
+                idx += 1
+
+        logger.info(
+            "stl_solids_world_batch_complete",
+            node_count=total_nodes,
+            total_stls=len(all_results),
+        )
+        return all_results
 
     def _read_xcaf(self):
         """Create an XCAF document and populate it from the STEP file."""

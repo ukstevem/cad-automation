@@ -142,6 +142,79 @@ export class ApiClient {
         return this._get(`/api/v1/cnc-analysis/status/${encodeURIComponent(taskId)}`);
     }
 
+    // ── Connection detection ──────────────────────────────────────
+
+    async startConnectionDetection(filename, nodeId = null, scope = 'all') {
+        const body = {};
+        if (nodeId) body.node_id = nodeId;
+        if (scope !== 'all') body.scope = scope;
+        return this._postJson(
+            `/api/v1/connections/detect/${encodeURIComponent(filename)}`,
+            body,
+        );
+    }
+
+    async getConnectionStatus(taskId) {
+        return this._get(`/api/v1/connections/status/${encodeURIComponent(taskId)}`);
+    }
+
+    async getConnectionResult(filename, nodeId = null, scope = null) {
+        let url = `/api/v1/connections/result/${encodeURIComponent(filename)}`;
+        const params = [];
+        if (nodeId != null) params.push(`node_id=${encodeURIComponent(nodeId)}`);
+        if (scope != null) params.push(`scope=${encodeURIComponent(scope)}`);
+        if (params.length) url += '?' + params.join('&');
+        return this._get(url);
+    }
+
+    async verifyConnection(filename, connectionId, action, newType = null) {
+        const body = { connection_id: connectionId, action };
+        if (newType) body.new_type = newType;
+        return this._put(
+            `/api/v1/connections/verify/${encodeURIComponent(filename)}`,
+            body,
+        );
+    }
+
+    getConnectionExportUrl(filename) {
+        return `${this.baseUrl}/api/v1/connections/export/${encodeURIComponent(filename)}`;
+    }
+
+    async startBatchDetection(filename, { force = false, nodeId = null, maxUnits = 200 } = {}) {
+        const body = { force, max_units: maxUnits };
+        if (nodeId) body.node_id = nodeId;
+        return this._postJson(
+            `/api/v1/connections/detect-all/${encodeURIComponent(filename)}`,
+            body,
+        );
+    }
+
+    async getBatchDetectionStatus(taskId) {
+        return this._get(`/api/v1/connections/detect-all-status/${encodeURIComponent(taskId)}`);
+    }
+
+    async getConnectionTreeStatus(filename) {
+        return this._get(`/api/v1/connections/tree-status/${encodeURIComponent(filename)}`);
+    }
+
+    async startConnectionPreview(filename, nodeId) {
+        return this._postJson(
+            `/api/v1/connections/preview/${encodeURIComponent(filename)}`,
+            { node_id: nodeId },
+        );
+    }
+
+    async startConnectionPreviewBatch(filename, nodeIds) {
+        return this._postJson(
+            `/api/v1/connections/preview-batch/${encodeURIComponent(filename)}`,
+            { node_ids: nodeIds },
+        );
+    }
+
+    async getConnectionPreviewStatus(taskId) {
+        return this._get(`/api/v1/connections/preview-status/${encodeURIComponent(taskId)}`);
+    }
+
     async _get(path) {
         const res = await fetch(`${this.baseUrl}${path}`);
         if (!res.ok) throw await this._handleError(res);
