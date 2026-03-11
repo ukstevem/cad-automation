@@ -570,21 +570,25 @@ export class AnalysisPage {
             case 'assembly':
                 btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Explode</button>');
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
                 btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_multi_solid':
                 btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Solids</button>');
                 btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>');
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
                 btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_single_solid':
                 btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>');
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
                 btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_no_solid':
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
+                btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
                 btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
         }
@@ -674,6 +678,13 @@ export class AnalysisPage {
             if (boughtOutBtn) {
                 boughtOutBtn.hidden = !hasStl;
                 boughtOutBtn.classList.toggle('btn-active', isClassified && currentAction === 'bought-out');
+            }
+
+            // EXC button: visible when has STL; stays visible even when exploded
+            const excludeBtn = row.querySelector('.btn-exclude');
+            if (excludeBtn) {
+                excludeBtn.hidden = !hasStl;
+                excludeBtn.classList.toggle('btn-active', isClassified && currentAction === 'exclude');
             }
 
             // CNC button: visible when has STL and not exploded; active when currently CNC
@@ -1123,6 +1134,7 @@ export class AnalysisPage {
                     <span class="node-actions">
                         <button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>
                         <button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>
+                        <button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>
                         <button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>
                     </span>
                 </div>
@@ -1190,6 +1202,45 @@ export class AnalysisPage {
         this._updateTreeSelectability();
         this._updateProgress();
         this._debouncedSave();
+
+        // Auto-advance: select next unclassified sibling with an STL
+        this._selectNextUnclassified(li);
+    }
+
+    /**
+     * Find the next visible, unclassified tree node after `currentLi` and select it.
+     * Walks forward through all tree-node elements in DOM order.
+     */
+    _selectNextUnclassified(currentLi) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        if (!treeEl) return;
+
+        const allNodes = [...treeEl.querySelectorAll('.tree-node')];
+        const currentIdx = allNodes.indexOf(currentLi);
+        if (currentIdx < 0) return;
+
+        // Search forward from current position, then wrap around
+        for (let offset = 1; offset < allNodes.length; offset++) {
+            const candidate = allNodes[(currentIdx + offset) % allNodes.length];
+            const candidateId = candidate.dataset.nodeId;
+
+            // Skip already-classified nodes
+            if (this.classifications.has(candidateId)) continue;
+
+            // Skip nodes without STL (not selectable)
+            if (!this.stlMap.has(candidateId)) continue;
+
+            // Skip exploded nodes (their children are the actionable items)
+            if (this.explodedNodes.has(candidateId)) continue;
+
+            // Found the next unclassified item — select and scroll to it
+            this._selectNodeForPreview(candidateId);
+            const row = candidate.querySelector(':scope > .tree-node-row');
+            if (row) {
+                row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+            return;
+        }
     }
 
     _unclassifyNode(li, nodeId) {
@@ -1345,15 +1396,17 @@ export class AnalysisPage {
             refIdCl.set(refId, action);
         }
 
-        let cnc = 0, bo = 0;
+        let cnc = 0, bo = 0, exc = 0;
         for (const action of refIdCl.values()) {
             if (action === 'postprocess') cnc++;
             else if (action === 'bought-out') bo++;
+            else if (action === 'exclude') exc++;
         }
 
         const parts = [];
         if (cnc > 0) parts.push(`<span class="prog-cnc">${cnc} CNC</span>`);
         if (bo > 0)  parts.push(`<span class="prog-bo">${bo} BO</span>`);
+        if (exc > 0) parts.push(`<span class="prog-exc">${exc} EXC</span>`);
         progressEl.innerHTML = parts.length
             ? parts.join(' <span class="prog-sep">·</span> ')
             : '';
@@ -1471,9 +1524,10 @@ export class AnalysisPage {
         // (e.g. solids 0,1,3,4 of a weldment are four identical plates)
         this._mergeIntraSolidGroups(itemMap);
 
-        const cncItems     = [];
-        const boItems      = [];
-        const unknownItems = [];
+        const cncItems      = [];
+        const boItems       = [];
+        const unknownItems  = [];
+        const excludedItems = [];
 
         for (const item of itemMap.values()) {
             const classifiedId = item.nodeIds.find(nid => this.classifications.has(nid));
@@ -1498,6 +1552,7 @@ export class AnalysisPage {
                 }
             }
             else if (action === 'bought-out') boItems.push(item);
+            else if (action === 'exclude') excludedItems.push(item);
             // unclassified → skip
         }
 
@@ -1506,8 +1561,9 @@ export class AnalysisPage {
         unknownItems.sort(byName);
         cncItems.sort(byName);
         boItems.sort(byName);
+        excludedItems.sort(byName);
 
-        return { cncItems, boItems, unknownItems };
+        return { cncItems, boItems, unknownItems, excludedItems };
     }
 
     /**
@@ -1678,8 +1734,8 @@ export class AnalysisPage {
         const panel = this.container.querySelector('#parts-list-panel');
         if (!panel) return;
 
-        const { cncItems, boItems, unknownItems } = this._buildBOMItems();
-        const totalClassified = cncItems.length + boItems.length + unknownItems.length;
+        const { cncItems, boItems, unknownItems, excludedItems } = this._buildBOMItems();
+        const totalClassified = cncItems.length + boItems.length + unknownItems.length + excludedItems.length;
 
         // Build a ref_id → consolidation group lookup for merged display
         const refToGroup = new Map();
@@ -1766,6 +1822,7 @@ export class AnalysisPage {
         const CL_BADGE = {
             postprocess: '<span class="parts-list-cl-badge postprocess">CNC</span>',
             'bought-out': '<span class="parts-list-cl-badge bought-out">BO</span>',
+            exclude: '<span class="parts-list-cl-badge exclude">EXC</span>',
         };
 
         const filename = this._currentFilename;
@@ -1798,7 +1855,7 @@ export class AnalysisPage {
         let tbody = '';
         if (unknownItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-unknown">
-                <td colspan="3">Unknown &middot; ${unknownItems.length}</td>
+                <td colspan="3">\u26a0 Unmatched Sections &middot; ${unknownItems.length} — profile not in library</td>
             </tr>`;
             tbody += renderRows(unknownItems, true);
         }
@@ -1815,8 +1872,14 @@ export class AnalysisPage {
             </tr>`;
             tbody += renderRows(boItems, false);
         }
+        if (excludedItems.length > 0) {
+            tbody += `<tr class="parts-list-section-header parts-list-section-exc">
+                <td colspan="3">Excluded &middot; ${excludedItems.length}</td>
+            </tr>`;
+            tbody += renderRows(excludedItems, false);
+        }
         if (totalClassified === 0) {
-            tbody = `<tr><td colspan="3" class="parts-list-empty-msg">No items classified yet — use CNC / BO buttons in the tree.</td></tr>`;
+            tbody = `<tr><td colspan="3" class="parts-list-empty-msg">No items classified yet — use CNC / BO / EXC buttons in the tree.</td></tr>`;
         }
 
         const consolidateBtn = this._consolidating
@@ -1826,7 +1889,8 @@ export class AnalysisPage {
                 : `<button class="parts-consolidate-btn">Consolidate</button>`);
 
         const bomDlBtn = totalClassified > 0
-            ? `<button class="parts-bom-dl-btn outline">\u2193\u00a0BOM</button>`
+            ? `<button class="parts-bom-xlsx-btn outline" title="Download BOM as Excel with thumbnails">\u2193\u00a0BOM (.xlsx)</button>`
+            + `<button class="parts-bom-dl-btn outline" title="Download BOM as JSON">\u2193\u00a0JSON</button>`
             : '';
 
         panel.innerHTML = `
@@ -1875,7 +1939,11 @@ export class AnalysisPage {
         });
 
         panel.querySelector('.parts-bom-dl-btn')?.addEventListener('click', () => {
-            this._downloadBOM(allCncItems, boItems, unknownItems);
+            this._downloadBOM(allCncItems, boItems, unknownItems, excludedItems);
+        });
+
+        panel.querySelector('.parts-bom-xlsx-btn')?.addEventListener('click', () => {
+            this._downloadBOMXlsx();
         });
 
         // Click a BOM row → select + scroll to the first occurrence in the tree
@@ -1989,13 +2057,19 @@ export class AnalysisPage {
             ? `${baseSafeRef}-s${solidIdx}`
             : baseSafeRef;
 
+        // Confidence pill helper
+        const confLevel = result.confidence || '';
+        const confBadge = confLevel
+            ? ` <span class="cnc-confidence cnc-confidence-${confLevel.toLowerCase()}">${confLevel}</span>`
+            : '';
+
         switch (result.type) {
             case 'plate': {
                 const { L, W, T } = result.dims || {};
                 const dimStr = (L && W && T)
                     ? ` ${Math.round(L)}\u00d7${Math.round(W)}\u00d7${Math.round(T)}`
                     : '';
-                badge = `<span class="cnc-badge cnc-badge-plate">PLATE${this._esc(dimStr)}</span>`;
+                badge = `<span class="cnc-badge cnc-badge-plate">PLATE${this._esc(dimStr)}</span>${confBadge}`;
                 if (filename) {
                     const url = `/api/v1/cnc-analysis/download/${encodeURIComponent(filename)}/${encodeURIComponent(safeRef)}/dxf`;
                     downloadLink = `<a href="${url}" class="cnc-download" download>\u2193DXF</a>`;
@@ -2006,7 +2080,7 @@ export class AnalysisPage {
                 const label = result.designation
                     ? `${result.category || ''} ${result.designation}`.trim()
                     : result.category || 'SECTION';
-                badge = `<span class="cnc-badge cnc-badge-section">${this._esc(label)}</span>`;
+                badge = `<span class="cnc-badge cnc-badge-section">${this._esc(label)}</span>${confBadge}`;
                 if (filename && result.nc1_path) {
                     const url = `/api/v1/cnc-analysis/download/${encodeURIComponent(filename)}/${encodeURIComponent(safeRef)}/nc1`;
                     downloadLink = `<a href="${url}" class="cnc-download" download>\u2193NC1</a>`;
@@ -2018,7 +2092,15 @@ export class AnalysisPage {
                 break;
             case 'unknown': {
                 const msg = result.message ? this._esc(result.message) : '';
-                badge = `<span class="cnc-badge cnc-badge-unknown">UNKNOWN</span>`
+                const dims = result.dims;
+                const csa = result.section_area;
+                let detail = '';
+                if (dims) {
+                    detail += `L=${dims.L} H=${dims.H} W=${dims.W}`;
+                    if (csa) detail += ` CSA=${csa}`;
+                }
+                badge = `<span class="cnc-badge cnc-badge-unknown">UNMATCHED SECTION</span>`
+                      + (detail ? `<span class="cnc-unknown-dims">${detail} mm</span>` : '')
                       + (msg ? `<span class="cnc-unknown-msg" title="${msg}">${msg}</span>` : '');
                 break;
             }
@@ -2030,10 +2112,52 @@ export class AnalysisPage {
     }
 
     /**
+     * Download BOM as Excel (.xlsx) with embedded STL thumbnails from the server.
+     */
+    async _downloadBOMXlsx() {
+        const filename = this._currentFilename;
+        if (!filename) return;
+
+        const btn = document.querySelector('.parts-bom-xlsx-btn');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = 'Generating\u2026';
+        }
+
+        try {
+            const resp = await fetch(`/api/v1/cnc-analysis/bom-xlsx/${encodeURIComponent(filename)}`);
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.detail?.error || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            // Extract filename from Content-Disposition or use default
+            const cd = resp.headers.get('Content-Disposition') || '';
+            const match = cd.match(/filename="?([^"]+)"?/);
+            a.download = match ? match[1] : `${this._lastProjectNumber || 'project'}-BOM.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        } catch (e) {
+            console.error('BOM XLSX download failed:', e);
+            alert(`BOM Excel download failed: ${e.message}`);
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '\u2193\u00a0BOM (.xlsx)';
+            }
+        }
+    }
+
+    /**
      * Generate and download a BOM JSON file with full ordering information.
      * Includes CNC items with dims, weight, qty, filenames; and bought-out items.
      */
-    _downloadBOM(cncItems, boItems, unknownItems = []) {
+    _downloadBOM(cncItems, boItems, unknownItems = [], excludedItems = []) {
         const DENSITY = 7.85e-6; // kg/mm³ (steel)
         const r3 = v => (v != null && isFinite(v)) ? Math.round(v * 1000) / 1000 : null;
         const r1 = v => (v != null && isFinite(v)) ? Math.round(v * 10)   / 10   : null;
@@ -2080,9 +2204,10 @@ export class AnalysisPage {
             return out;
         };
 
-        const mergedCnc     = _consolidate(cncItems);
-        const mergedBo      = _consolidate(boItems);
-        const mergedUnknown = _consolidate(unknownItems);
+        const mergedCnc      = _consolidate(cncItems);
+        const mergedBo       = _consolidate(boItems);
+        const mergedUnknown  = _consolidate(unknownItems);
+        const mergedExcluded = _consolidate(excludedItems);
 
         const _cncEntry = (item) => {
             const info = this._cncResultForItem(item);
@@ -2131,7 +2256,7 @@ export class AnalysisPage {
         const cnc_entries     = mergedCnc.map(_cncEntry);
         const unknown_entries = mergedUnknown.map(_cncEntry);
 
-        const bo_entries = mergedBo.map(item => ({
+        const _simpleEntry = (item) => ({
             name:             item.name,
             qty:              item.qty,
             qty_per_occurrence: item._memberQtys ?? null,
@@ -2139,12 +2264,16 @@ export class AnalysisPage {
                 name: p,
                 qty: (item.parentCounts || {})[p] || 1,
             })),
-        }));
+        });
 
-        const totalCncQty     = cnc_entries.reduce((s, e) => s + e.qty, 0);
-        const totalWeight     = cnc_entries.reduce((s, e) => s + (e.total_weight_kg ?? 0), 0);
-        const totalBoQty      = bo_entries.reduce((s, e) => s + e.qty, 0);
-        const totalUnknownQty = unknown_entries.reduce((s, e) => s + e.qty, 0);
+        const bo_entries       = mergedBo.map(_simpleEntry);
+        const excluded_entries = mergedExcluded.map(_simpleEntry);
+
+        const totalCncQty      = cnc_entries.reduce((s, e) => s + e.qty, 0);
+        const totalWeight      = cnc_entries.reduce((s, e) => s + (e.total_weight_kg ?? 0), 0);
+        const totalBoQty       = bo_entries.reduce((s, e) => s + e.qty, 0);
+        const totalUnknownQty  = unknown_entries.reduce((s, e) => s + e.qty, 0);
+        const totalExcludedQty = excluded_entries.reduce((s, e) => s + e.qty, 0);
 
         const bom = {
             project_number:  this._lastProjectNumber  || null,
@@ -2154,6 +2283,7 @@ export class AnalysisPage {
             unknown_items:   unknown_entries,
             cnc_items:       cnc_entries,
             bought_out_items: bo_entries,
+            excluded_items:  excluded_entries,
             summary: {
                 total_unknown_types:       unknown_entries.length,
                 total_unknown_qty:         totalUnknownQty,
@@ -2162,6 +2292,8 @@ export class AnalysisPage {
                 total_estimated_weight_kg: r1(totalWeight),
                 total_bought_out_types:    bo_entries.length,
                 total_bought_out_qty:      totalBoQty,
+                total_excluded_types:      excluded_entries.length,
+                total_excluded_qty:        totalExcludedQty,
             },
         };
 
@@ -2273,11 +2405,12 @@ export class AnalysisPage {
                            autocomplete="off">
                 </div>
                 <div class="cnc-settings-field">
-                    <label for="cnc-steel-grade">Steel Grade</label>
+                    <label for="cnc-steel-grade">Material Grade</label>
                     <input type="text" id="cnc-steel-grade"
-                           placeholder="e.g. S275"
+                           placeholder="e.g. S275, 6061-T6"
                            value="${this._esc(this._lastSteelGrade)}"
                            autocomplete="off">
+                    <small class="cnc-settings-hint">Aluminium grades (6061, 6082 etc.) use the AL section library</small>
                 </div>
                 <div class="cnc-settings-actions">
                     <button type="button" id="cnc-settings-cancel" class="outline">Cancel</button>

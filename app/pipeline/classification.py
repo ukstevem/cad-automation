@@ -149,5 +149,31 @@ def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):
             cand.setdefault("Diagnostics", {})["angle_bias"] = True
             return cand
 
+    # ---- PASS 4: dimension-priority fallback (relaxed dims, tight area) ----
+    # When alignment fails the cross-section dims are unreliable, but CSA
+    # (from volume / length) is still accurate.  Match on area with a tight
+    # tolerance to avoid false positives from plates with similar CSA.
+    tol_area_dim = 0.10   # 10% area tolerance — tight enough to reject plates
+    tol_dim_dim  = max(2.0, tol_dim * 2.0)
+
+    original, score1 = _try_match(H_meas, W_meas, tol_dim_dim, tol_area_dim)
+    swapped,  score2 = _try_match(W_meas, H_meas, tol_dim_dim, tol_area_dim)
+
+    best_match = None
+    if original and (not swapped or score1 <= score2):
+        original["Requires_rotation"] = False
+        best_match = original
+    elif swapped:
+        swapped["Requires_rotation"] = True
+        best_match = swapped
+
+    if best_match:
+        if best_match.get("Profile_type") == "L":
+            wt = best_match["JSON"]["web_thickness"]
+            best_match["JSON"]["flange_thickness"] = wt
+            best_match["STEP"]["flange_thickness"] = wt
+        best_match.setdefault("Diagnostics", {})["dim_priority"] = True
+        return best_match
+
     # Nothing found; return None so main can try the plate path.
     return None

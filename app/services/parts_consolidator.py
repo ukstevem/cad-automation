@@ -238,7 +238,17 @@ class PartsConsolidator:
                 fp_groups[_singleton_key] = [ref_id]
                 _singleton_key += 1
             else:
-                fp_groups.setdefault(fp, []).append(ref_id)
+                # Group by the first 8 components only (exclude chirality).
+                # Chirality depends on the CoM-to-BboxCenter offset direction
+                # relative to the principal axes.  For shapes embedded at
+                # different world-space orientations (common in DXF-converted
+                # mesh files), this offset direction can flip even for
+                # identical geometry that is merely rotated — e.g. a channel
+                # placed toes-up vs toes-down.  Mirror detection for instances
+                # is already handled by the ``is_mirrored`` flag on the
+                # assembly tree, so excluding chirality here is safe.
+                group_key = fp[:8]
+                fp_groups.setdefault(group_key, []).append(ref_id)
 
         part_groups: List[Dict[str, Any]] = []
         for fp_key, ref_ids in fp_groups.items():

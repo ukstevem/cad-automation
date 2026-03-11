@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     """Application settings"""
     
     # File upload settings
-    MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
+    MAX_UPLOAD_SIZE: int = 200 * 1024 * 1024  # 200MB
     UPLOAD_DIR: str = "/uploads"
     ALLOWED_EXTENSIONS: Set[str] = {".step", ".stp"}
     

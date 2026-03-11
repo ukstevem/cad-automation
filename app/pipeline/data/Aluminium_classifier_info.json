@@ -1,0 +1,496 @@
+{
+  "AL_PFC": {
+    "101x51x6.3x7.9": {
+      "mass": 3.66,
+      "height": 101.0,
+      "width": 51.0,
+      "csa": 1350.0,
+      "web_thickness": 6.3,
+      "flange_thickness": 7.9,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "127x50.8x6.35x7.93": {
+      "mass": 4.10,
+      "height": 127.0,
+      "width": 50.8,
+      "csa": 1511.0,
+      "web_thickness": 6.35,
+      "flange_thickness": 7.93,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "127x63.5x6.4x9.5": {
+      "mass": 5.14,
+      "height": 127.0,
+      "width": 63.5,
+      "csa": 1898.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 9.5,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "152x76x6.3x9.5": {
+      "mass": 6.18,
+      "height": 152.0,
+      "width": 76.0,
+      "csa": 2282.0,
+      "web_thickness": 6.3,
+      "flange_thickness": 9.5,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "178x76.2x9.5x12.7": {
+      "mass": 9.17,
+      "height": 177.8,
+      "width": 76.2,
+      "csa": 3383.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 12.7,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    }
+  },
+  "AL_UEA": {
+    "152x76x9.5": {
+      "mass": 5.64,
+      "height": 152.0,
+      "width": 76.0,
+      "csa": 2082.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 9.5,
+      "root_radius": 9.5,
+      "toe_radius": 3.2,
+      "code_profile": "L"
+    }
+  },
+  "AL_EA": {
+    "101x101x6.3": {
+      "mass": 3.34,
+      "height": 101.0,
+      "width": 101.0,
+      "csa": 1233.0,
+      "web_thickness": 6.3,
+      "flange_thickness": 6.3,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "76x76x6.3": {
+      "mass": 2.49,
+      "height": 76.0,
+      "width": 76.0,
+      "csa": 918.0,
+      "web_thickness": 6.3,
+      "flange_thickness": 6.3,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "51x51x6.3": {
+      "mass": 1.63,
+      "height": 51.0,
+      "width": 51.0,
+      "csa": 603.0,
+      "web_thickness": 6.3,
+      "flange_thickness": 6.3,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    }
+  },
+  "AA_CS": {
+    "CS 2x0.577": {
+      "mass": 0.86,
+      "height": 50.8,
+      "width": 25.4,
+      "csa": 316.0,
+      "web_thickness": 3.3,
+      "flange_thickness": 3.3,
+      "root_radius": 3.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 2x1.07": {
+      "mass": 1.59,
+      "height": 50.8,
+      "width": 31.8,
+      "csa": 588.0,
+      "web_thickness": 4.3,
+      "flange_thickness": 6.6,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 3x1.14": {
+      "mass": 1.69,
+      "height": 76.2,
+      "width": 38.1,
+      "csa": 623.0,
+      "web_thickness": 3.3,
+      "flange_thickness": 5.1,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 3x1.60": {
+      "mass": 2.38,
+      "height": 76.2,
+      "width": 44.4,
+      "csa": 877.0,
+      "web_thickness": 4.3,
+      "flange_thickness": 6.6,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 4x1.74": {
+      "mass": 2.59,
+      "height": 101.6,
+      "width": 50.8,
+      "csa": 955.0,
+      "web_thickness": 3.8,
+      "flange_thickness": 5.8,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 4x2.33": {
+      "mass": 3.46,
+      "height": 101.6,
+      "width": 57.1,
+      "csa": 1277.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 7.4,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 5x2.21": {
+      "mass": 3.29,
+      "height": 127.0,
+      "width": 57.1,
+      "csa": 1213.0,
+      "web_thickness": 3.8,
+      "flange_thickness": 6.6,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 5x3.09": {
+      "mass": 4.60,
+      "height": 127.0,
+      "width": 69.8,
+      "csa": 1697.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 8.1,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 6x2.83": {
+      "mass": 4.21,
+      "height": 152.4,
+      "width": 63.5,
+      "csa": 1555.0,
+      "web_thickness": 4.3,
+      "flange_thickness": 7.4,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 6x4.03": {
+      "mass": 6.00,
+      "height": 152.4,
+      "width": 82.5,
+      "csa": 2213.0,
+      "web_thickness": 5.3,
+      "flange_thickness": 8.9,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 7x3.21": {
+      "mass": 4.77,
+      "height": 177.8,
+      "width": 69.8,
+      "csa": 1761.0,
+      "web_thickness": 4.3,
+      "flange_thickness": 7.4,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 7x4.72": {
+      "mass": 7.01,
+      "height": 177.8,
+      "width": 88.9,
+      "csa": 2587.0,
+      "web_thickness": 5.3,
+      "flange_thickness": 9.7,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 8x4.15": {
+      "mass": 6.17,
+      "height": 203.2,
+      "width": 76.2,
+      "csa": 2277.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 8.9,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 8x5.79": {
+      "mass": 8.60,
+      "height": 203.2,
+      "width": 95.2,
+      "csa": 3174.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 10.4,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 9x4.98": {
+      "mass": 7.41,
+      "height": 228.6,
+      "width": 82.5,
+      "csa": 2735.0,
+      "web_thickness": 5.8,
+      "flange_thickness": 8.9,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 9x6.97": {
+      "mass": 10.37,
+      "height": 228.6,
+      "width": 101.6,
+      "csa": 3826.0,
+      "web_thickness": 7.4,
+      "flange_thickness": 11.2,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 10x6.14": {
+      "mass": 9.13,
+      "height": 254.0,
+      "width": 88.9,
+      "csa": 3368.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 10.4,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 10x8.36": {
+      "mass": 12.43,
+      "height": 254.0,
+      "width": 107.9,
+      "csa": 4587.0,
+      "web_thickness": 7.9,
+      "flange_thickness": 12.7,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 12x8.27": {
+      "mass": 12.31,
+      "height": 304.8,
+      "width": 101.6,
+      "csa": 4542.0,
+      "web_thickness": 7.4,
+      "flange_thickness": 11.9,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 12x11.8": {
+      "mass": 17.66,
+      "height": 304.8,
+      "width": 127.0,
+      "csa": 6516.0,
+      "web_thickness": 8.9,
+      "flange_thickness": 15.7,
+      "root_radius": 12.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    },
+    "CS 14x13.9": {
+      "mass": 20.63,
+      "height": 355.6,
+      "width": 152.4,
+      "csa": 7613.0,
+      "web_thickness": 8.1,
+      "flange_thickness": 16.3,
+      "root_radius": 12.0,
+      "toe_radius": 0.0,
+      "code_profile": "U"
+    }
+  },
+  "AA_EA": {
+    "50.8x50.8x3.2": {
+      "mass": 0.86,
+      "height": 50.8,
+      "width": 50.8,
+      "csa": 317.0,
+      "web_thickness": 3.2,
+      "flange_thickness": 3.2,
+      "root_radius": 3.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "50.8x50.8x4.8": {
+      "mass": 1.26,
+      "height": 50.8,
+      "width": 50.8,
+      "csa": 465.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 4.8,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "50.8x50.8x6.4": {
+      "mass": 1.65,
+      "height": 50.8,
+      "width": 50.8,
+      "csa": 609.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 6.4,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "63.5x63.5x4.8": {
+      "mass": 1.59,
+      "height": 63.5,
+      "width": 63.5,
+      "csa": 586.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 4.8,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "63.5x63.5x6.4": {
+      "mass": 2.09,
+      "height": 63.5,
+      "width": 63.5,
+      "csa": 770.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 6.4,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "76.2x76.2x4.8": {
+      "mass": 1.90,
+      "height": 76.2,
+      "width": 76.2,
+      "csa": 699.0,
+      "web_thickness": 4.8,
+      "flange_thickness": 4.8,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "76.2x76.2x6.4": {
+      "mass": 2.50,
+      "height": 76.2,
+      "width": 76.2,
+      "csa": 924.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 6.4,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "76.2x76.2x9.5": {
+      "mass": 3.68,
+      "height": 76.2,
+      "width": 76.2,
+      "csa": 1357.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 9.5,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "88.9x88.9x6.4": {
+      "mass": 2.96,
+      "height": 88.9,
+      "width": 88.9,
+      "csa": 1091.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 6.4,
+      "root_radius": 5.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "101.6x101.6x6.4": {
+      "mass": 3.39,
+      "height": 101.6,
+      "width": 101.6,
+      "csa": 1252.0,
+      "web_thickness": 6.4,
+      "flange_thickness": 6.4,
+      "root_radius": 6.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "101.6x101.6x9.5": {
+      "mass": 5.01,
+      "height": 101.6,
+      "width": 101.6,
+      "csa": 1847.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 9.5,
+      "root_radius": 8.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "127.0x127.0x9.5": {
+      "mass": 6.30,
+      "height": 127.0,
+      "width": 127.0,
+      "csa": 2325.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 9.5,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "152.4x152.4x9.5": {
+      "mass": 7.61,
+      "height": 152.4,
+      "width": 152.4,
+      "csa": 2808.0,
+      "web_thickness": 9.5,
+      "flange_thickness": 9.5,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    },
+    "152.4x152.4x12.7": {
+      "mass": 10.04,
+      "height": 152.4,
+      "width": 152.4,
+      "csa": 3705.0,
+      "web_thickness": 12.7,
+      "flange_thickness": 12.7,
+      "root_radius": 10.0,
+      "toe_radius": 0.0,
+      "code_profile": "L"
+    }
+  }
+}

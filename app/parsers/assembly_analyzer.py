@@ -54,7 +54,8 @@ class AssemblyAnalyzer:
         for i in range(roots.Length()):
             label = roots.Value(i + 1)  # 1-based
             node = self._walk_tree(label, shape_tool, depth=0, totals=totals)
-            tree.append(node)
+            if node is not None:
+                tree.append(node)
 
         result = {
             "assembly_tree": tree,
@@ -165,7 +166,29 @@ class AssemblyAnalyzer:
             for i in range(components.Length()):
                 child_label = components.Value(i + 1)
                 child_node = self._walk_tree(child_label, shape_tool, depth + 1, totals)
-                node["children"].append(child_node)
+                if child_node is not None:
+                    node["children"].append(child_node)
+
+            # Prune empty shell assemblies: assemblies whose children are all
+            # zero-solid parts (typically from mesh-converted STEP files where
+            # disconnected shells get treated as sub-components).  These add
+            # noise to the tree and BOM without contributing real geometry.
+            if node["children"] and all(
+                c.get("solid_count", 0) == 0
+                and c.get("node_type") != "assembly"
+                for c in node["children"]
+            ):
+                # Undo the totals we accumulated for these phantom children
+                for c in node["children"]:
+                    totals["parts"] -= 1
+                totals["assemblies"] -= 1  # this node itself
+
+                logger.debug(
+                    "pruning_empty_shell_assembly",
+                    name=display_name,
+                    shell_count=len(node["children"]),
+                )
+                return None  # signal caller to skip this node
 
         return node
 

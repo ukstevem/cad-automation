@@ -547,3 +547,38 @@ async def download_cnc_file(
         media_type=media_type,
         filename=file_path.name,
     )
+
+
+@router.get("/cnc-analysis/bom-xlsx/{filename}")
+async def download_bom_xlsx(filename: str) -> Response:
+    """
+    Download an Excel (.xlsx) BOM workbook with embedded STL thumbnails.
+
+    Sheets: CNC Items, Unknown Items, Bought Out, Excluded, Summary.
+    """
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "File not found", "filename": filename},
+        )
+
+    from app.services.bom_excel import generate_bom_xlsx
+
+    xlsx_bytes = generate_bom_xlsx(filename)
+    if xlsx_bytes is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "No CNC analysis data available for BOM export",
+                    "filename": filename},
+        )
+
+    cache = _load_cache(filename) or {}
+    project_number = cache.get("cnc_project_number", "")
+    stem = project_number or Path(filename).stem[:8]
+
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{stem}-BOM.xlsx"'},
+    )

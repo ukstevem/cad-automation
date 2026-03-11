@@ -4,7 +4,7 @@
 import { createCheckRow, createResultCard, createVerdictBanner } from './components.js';
 import { formatFileSize } from './utils.js';
 
-const MAX_SIZE = 100 * 1024 * 1024;
+const MAX_SIZE = 200 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = ['.step', '.stp'];
 
 export class UploadPage {

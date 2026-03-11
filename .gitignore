@@ -63,3 +63,12 @@ nul
 # Local tooling
 .claude/
 *.old
+
+# cad
+
+*.dwg
+*.dwl
+*.dwl2
+*.dxf
+*.csv
+*.json

@@ -221,6 +221,7 @@
 
 .prog-cnc  { color: var(--cad-primary); font-weight: 600; }
 .prog-bo   { color: #15803d;            font-weight: 600; }
+.prog-exc  { color: #a855f7;            font-weight: 600; }
 .prog-sep  { color: var(--cad-muted); }
 
 /* ===== Assembly tree ===== */
@@ -401,12 +402,15 @@
 .node-actions button.btn-postprocess:hover { background: #eff6ff; }
 .node-actions button.btn-bought-out  { border-color: #15803d; color: #15803d; }
 .node-actions button.btn-bought-out:hover  { background: #dcfce7; }
+.node-actions button.btn-exclude     { border-color: #a855f7; color: #a855f7; }
+.node-actions button.btn-exclude:hover     { background: #f3e8ff; }
 .node-actions button.btn-explode     { border-color: var(--cad-warning); color: var(--cad-warning); }
 .node-actions button.btn-explode:hover     { background: var(--cad-warning-bg); }
 
 /* Active (currently classified) state — filled background to indicate current choice */
 .node-actions button.btn-active.btn-postprocess { background: #eff6ff; font-weight: 600; }
 .node-actions button.btn-active.btn-bought-out  { background: #dcfce7; font-weight: 600; }
+.node-actions button.btn-active.btn-exclude     { background: #f3e8ff; font-weight: 600; }
 
 /* Unclassify button — neutral until hovered, then red-tinted */
 .node-actions button.btn-unclassify {
@@ -441,6 +445,11 @@
 .node-classified[data-classification="bought-out"] .tree-node-name::after {
     content: "BO";
     color: #15803d;
+}
+
+.node-classified[data-classification="exclude"] .tree-node-name::after {
+    content: "EXC";
+    color: #a855f7;
 }
 
 .node-classified[data-classification="exploded"] .tree-node-name::after {
@@ -798,6 +807,11 @@ details summary {
     color: #15803d;
 }
 
+.parts-list-cl-badge.exclude {
+    background: #f3e8ff;
+    color: #7e22ce;
+}
+
 .parts-list-cl-actions {
     display: flex;
     gap: 0.3rem;
@@ -841,6 +855,11 @@ details summary {
 .parts-list-section-header.parts-list-section-bo td {
     background: #f0fdf4;
     color: #15803d;
+}
+
+.parts-list-section-header.parts-list-section-exc td {
+    background: #faf5ff;
+    color: #7e22ce;
 }
 
 .parts-list-empty-msg {
@@ -897,6 +916,47 @@ details summary {
     background: #fef3c7;
     color: #92400e;
     border: 1px solid #fcd34d;
+}
+
+.cnc-unknown-dims {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #92400e;
+    background: #fef9c3;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    margin-left: 0.3rem;
+    vertical-align: middle;
+    font-family: monospace;
+}
+
+/* Confidence level pills */
+.cnc-confidence {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    margin-left: 0.3rem;
+    vertical-align: middle;
+    letter-spacing: 0.02em;
+}
+.cnc-confidence-excellent {
+    color: #006100;
+    background: #c6efce;
+}
+.cnc-confidence-good {
+    color: #1f4e79;
+    background: #d6eefa;
+}
+.cnc-confidence-marginal {
+    color: #9c6500;
+    background: #ffeb9c;
+}
+.cnc-confidence-review {
+    color: #9c0006;
+    background: #ffc7ce;
 }
 
 .cnc-unknown-msg {
@@ -1000,6 +1060,13 @@ details summary {
 .cnc-settings-field input {
     width: 100%;
     margin-bottom: 0;
+}
+
+.cnc-settings-hint {
+    display: block;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: var(--cad-muted);
 }
 
 .cnc-settings-actions {
