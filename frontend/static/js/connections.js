@@ -133,7 +133,7 @@ export class ConnectionsPage {
                     </select>
                     <button id="conn-detect-btn" disabled style="padding:2px 8px; font-size:0.78rem;" title="Shift+click to force re-detection">Detect</button>
                     <button id="conn-detect-all-btn" disabled style="padding:2px 8px; font-size:0.78rem; background:var(--pico-primary-background, #3b82f6);color:#fff;" title="Shift+click to force re-detection">Detect All</button>
-                    <button id="conn-export-btn" disabled style="padding:2px 8px; font-size:0.78rem; background:var(--pico-secondary-background, #e2e8f0);color:var(--pico-secondary-color, #374151);">CSV</button>
+                    <button id="conn-export-btn" disabled style="padding:2px 8px; font-size:0.78rem; background:var(--pico-secondary-background, #e2e8f0);color:var(--pico-secondary-color, #374151);">Export XLS</button>
                     <span id="conn-scope-label" style="font-size:0.75rem; color:#6b7280;"></span>
                 </div>
 
@@ -206,8 +206,8 @@ export class ConnectionsPage {
 
         scopeSelect.addEventListener('change', () => {
             this._scope = scopeSelect.value;
-            // Reload cached results for the new scope
-            if (this._currentFilename && this._selectedNodeId) {
+            // Reload cached results for the new scope (null = no node selected; "" = all parts)
+            if (this._currentFilename && this._selectedNodeId !== null) {
                 this._loadCached(this._currentFilename, this._selectedNodeId, this._scope);
             }
         });
@@ -220,8 +220,12 @@ export class ConnectionsPage {
         const exportBtn = this.container.querySelector('#conn-export-btn');
         exportBtn.addEventListener('click', () => {
             if (this._currentFilename) {
-                const url = this.api.getConnectionExportUrl(this._currentFilename);
-                window.open(url, '_blank');
+                const url = this.api.getConnectionExportXlsxUrl(
+                    this._currentFilename,
+                    this._selectedNodeId || null,
+                    this._scope,
+                );
+                window.location.href = url;
             }
         });
     }
@@ -265,7 +269,23 @@ export class ConnectionsPage {
                 panel.innerHTML = '<em>No assembly tree found — analyse the file first.</em>';
                 return;
             }
+            // If there's no single root assembly (multiple top-level nodes or
+            // a single leaf), prepend a synthetic root so the user can scope
+            // detection to the whole file.
+            const singleRoot = nodes.length === 1 && nodes[0].children?.length > 0;
+            const totalSolids = nodes.reduce((s, n) => s + (n.solid_count || 1), 0);
+            const rootHtml = singleRoot ? '' : `
+                <li style="margin:0 0 2px 0;">
+                    <div class="conn-tree-row" data-node-id="" data-node-name="(All parts)"
+                         data-solid-count="${totalSolids}" data-has-children="false"
+                         style="padding:1px 3px; border-radius:3px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.3; font-style:italic; border-bottom:1px solid var(--pico-muted-border-color,#e2e8f0);"
+                         title="Run detection on all parts in this file">
+                        <span style="display:inline-block;width:0.8em;"></span>
+                        (All parts) <span style="color:#6b7280;font-size:0.65rem;">(${totalSolids} solids)</span>
+                    </div>
+                </li>`;
             panel.innerHTML = '<ul style="list-style:none;padding:0;margin:0;">'
+                + rootHtml
                 + nodes.map(n => this._renderTreeNode(n)).join('')
                 + '</ul>';
             this._bindTreeEvents(panel);
@@ -337,6 +357,10 @@ export class ConnectionsPage {
             this._updateScopeLabel();
             this.container.querySelector('#conn-detect-btn').disabled = false;
 
+            // Clear previous results immediately so the detect guard doesn't
+            // block a new run while _loadCached is still pending
+            this._hideResults();
+
             // Clean up any in-progress detection from a previous node
             if (this._pollTimer) {
                 clearInterval(this._pollTimer);
@@ -355,8 +379,9 @@ export class ConnectionsPage {
 
     _updateScopeLabel() {
         const label = this.container.querySelector('#conn-scope-label');
-        if (this._selectedNodeId) {
-            label.textContent = `Scope: ${this._selectedNodeName} (${this._selectedNodeId})`;
+        if (this._selectedNodeName) {
+            const idPart = this._selectedNodeId ? ` (${this._selectedNodeId})` : '';
+            label.textContent = `Scope: ${this._selectedNodeName}${idPart}`;
         } else {
             label.textContent = '';
         }
@@ -418,9 +443,18 @@ export class ConnectionsPage {
         this._setViewerOverlay('Loading solid meshes...');
 
         try {
-            const resp = await this.api.startConnectionPreview(
-                this._currentFilename, nodeId,
-            );
+            // Empty nodeId = whole-file scope: batch preview all top-level nodes
+            let resp;
+            if (!nodeId) {
+                const allIds = this._treeNodes.map(n => n.id).filter(Boolean);
+                resp = await this.api.startConnectionPreviewBatch(
+                    this._currentFilename, allIds,
+                );
+            } else {
+                resp = await this.api.startConnectionPreview(
+                    this._currentFilename, nodeId,
+                );
+            }
 
             // Fast path: files returned directly (cached on disk)
             if (resp.status === 'completed' && resp.files) {
@@ -571,13 +605,15 @@ export class ConnectionsPage {
             this._viewer.setMeshColor(i, 0xaaaaaa, 0.25);
         }
 
-        // Use the tree-based child→compound mapping to find the mesh indices
-        const idxA = this._childToCompoundIdx.get(solidKeyA);
+        // Use the tree-based child→compound mapping to find the mesh indices.
+        // Fall back to _solidIndexMap for the "(All parts)" case where the
+        // compound map is not built (no single selected node).
+        const idxA = this._childToCompoundIdx.get(solidKeyA) ?? this._solidIndexMap.get(solidKeyA);
         if (idxA != null) {
             this._viewer.setMeshColor(idxA, 0x4a90d9, 1.0);  // blue
         }
 
-        const idxB = this._childToCompoundIdx.get(solidKeyB);
+        const idxB = this._childToCompoundIdx.get(solidKeyB) ?? this._solidIndexMap.get(solidKeyB);
         if (idxB != null) {
             this._viewer.setMeshColor(idxB, 0xe8860c, 1.0);  // orange
         }
@@ -595,6 +631,7 @@ export class ConnectionsPage {
 
     async _loadCached(filename, nodeId = null, scope = null) {
         try {
+            // Pass nodeId as-is: null = no node selected (fetch latest), "" = whole-file scope
             const data = await this.api.getConnectionResult(filename, nodeId, scope);
             // Only render if results match the current selection
             if (nodeId && data.node_id && data.node_id !== nodeId) {

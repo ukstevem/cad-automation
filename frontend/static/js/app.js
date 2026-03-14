@@ -5,6 +5,7 @@ import { ApiClient } from './api.js';
 import { UploadPage } from './upload.js';
 import { AnalysisPage } from './analysis.js';
 import { ConnectionsPage } from './connections.js';
+import { ProjectsPage } from './projects.js';
 
 const api = new ApiClient();
 
@@ -12,6 +13,7 @@ const pages = {
     upload: new UploadPage(api),
     analysis: new AnalysisPage(api),
     connections: new ConnectionsPage(api),
+    projects: new ProjectsPage(api),
 };
 
 class App {

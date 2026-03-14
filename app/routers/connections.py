@@ -43,6 +43,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
 from fastapi import APIRouter, Body, HTTPException, status
 from fastapi.responses import StreamingResponse
 import structlog
@@ -457,6 +461,157 @@ async def export_connections_csv(filename: str):
         io.BytesIO(buf.getvalue().encode("utf-8")),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{csv_filename}"'},
+    )
+
+
+@router.get("/connections/export-xlsx/{filename}")
+async def export_connections_xlsx(
+    filename: str,
+    node_id: Optional[str] = None,
+    scope: Optional[str] = None,
+) -> StreamingResponse:
+    """Export connection results as an Excel (.xlsx) file."""
+    cache = _load_cache(filename)
+    if not cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "No connection results — run detection first"},
+        )
+
+    # Resolve the right result set (same logic as get_connection_result)
+    data = None
+    if node_id is not None:
+        store = cache.get("connections_store", {})
+        key = f"{node_id}|{scope or 'all'}"
+        data = store.get(key)
+        if data is None:
+            for entry in store.values():
+                if entry.get("node_id") == node_id:
+                    data = entry
+                    break
+    if data is None:
+        data = cache.get("connections")
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "No connection results — run detection first"},
+        )
+
+    _inject_ids_and_verifications(data)
+    connections = data.get("connections", [])
+    summary = data.get("summary", {})
+    detected_at = data.get("detected_at", "")
+
+    # ── Build workbook ────────────────────────────────────────────────────
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Connections"
+
+    # Styles
+    hdr_font = Font(bold=True, color="FFFFFF")
+    hdr_fill = PatternFill("solid", fgColor="1F4E79")
+    verified_fill = PatternFill("solid", fgColor="D6F4E0")   # green tint
+    reclass_fill = PatternFill("solid", fgColor="DBEAFE")    # blue tint
+    centre = Alignment(horizontal="center")
+
+    # ── Summary block (rows 1–3) ──────────────────────────────────────────
+    stem = Path(filename).stem
+    ws.append([f"Connections — {stem}"])
+    ws["A1"].font = Font(bold=True, size=12)
+    ws.append([
+        f"Detected: {detected_at[:19].replace('T', ' ') if detected_at else '—'}",
+        "",
+        f"Welded: {summary.get('welded_connections', 0)}",
+        f"Bolted: {summary.get('bolted_connections', 0)}",
+        f"Contacts: {summary.get('unclassified_contacts', 0)}",
+        f"Weld length: {summary.get('total_weld_length_mm', 0):.1f} mm",
+    ])
+    ws.append([])  # blank row
+
+    # ── Header row ────────────────────────────────────────────────────────
+    headers = [
+        "#", "Part A", "Part B", "Type",
+        "Weld Length (mm)", "Bolt Count", "Bolt Ø (mm)",
+        "Min Gap (mm)", "Contact Subtype", "Auto", "Verified", "Notes",
+    ]
+    ws.append(headers)
+    hdr_row = ws.max_row
+    for col, _ in enumerate(headers, 1):
+        cell = ws.cell(hdr_row, col)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = centre
+
+    # ── Data rows ─────────────────────────────────────────────────────────
+    for i, c in enumerate(connections, 1):
+        a = c.get("solid_a", {})
+        b = c.get("solid_b", {})
+        v = c.get("verification", {}) or {}
+
+        eff_type = c.get("type", "")
+        if v.get("action") == "reclassify" and v.get("new_type"):
+            eff_type = v["new_type"]
+
+        name_a = a.get("name", "")
+        if a.get("solid_index", 0):
+            name_a += f" [s{a['solid_index']}]"
+        name_b = b.get("name", "")
+        if b.get("solid_index", 0):
+            name_b += f" [s{b['solid_index']}]"
+
+        notes = ""
+        if v.get("action") == "reclassify" and v.get("new_type") != c.get("type"):
+            notes = f"Reclassified from {c.get('type', '')}"
+        elif v.get("action") == "accept":
+            notes = "Accepted"
+
+        row = [
+            i,
+            name_a,
+            name_b,
+            eff_type.capitalize() if eff_type else "",
+            c.get("weld_length_mm") or "",
+            c.get("bolt_count") or "",
+            c.get("bolt_diameter_mm") or "",
+            c.get("min_distance_mm") if c.get("min_distance_mm") is not None else "",
+            c.get("contact_subtype") or "",
+            "Yes" if c.get("auto_classified") else "",
+            v.get("action", "").capitalize() if v.get("action") else "",
+            notes,
+        ]
+        ws.append(row)
+        data_row = ws.max_row
+
+        # Row background based on verification state
+        if v.get("action") == "reclassify":
+            fill = reclass_fill
+        elif v.get("action"):
+            fill = verified_fill
+        else:
+            fill = None
+
+        if fill:
+            for col in range(1, len(headers) + 1):
+                ws.cell(data_row, col).fill = fill
+
+    # ── Column widths ─────────────────────────────────────────────────────
+    col_widths = [5, 32, 32, 12, 18, 12, 12, 14, 18, 8, 12, 28]
+    for col, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    # Freeze header row
+    ws.freeze_panes = f"A{hdr_row + 1}"
+
+    # ── Stream response ───────────────────────────────────────────────────
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    xlsx_filename = f"{stem}_connections.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{xlsx_filename}"'},
     )
 
 

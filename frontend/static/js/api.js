@@ -142,6 +142,42 @@ export class ApiClient {
         return this._get(`/api/v1/cnc-analysis/status/${encodeURIComponent(taskId)}`);
     }
 
+    // ── Projects ───────────────────────────────────────────────────
+
+    async listProjects() {
+        return this._get('/api/v1/projects/');
+    }
+
+    async createProject(projectNumber) {
+        return this._postJson('/api/v1/projects/', { project_number: projectNumber });
+    }
+
+    async getProject(projectNumber) {
+        return this._get(`/api/v1/projects/${encodeURIComponent(projectNumber)}`);
+    }
+
+    async updateProjectAnalyses(projectNumber, analyses) {
+        return this._put(
+            `/api/v1/projects/${encodeURIComponent(projectNumber)}/analyses`,
+            { analyses },
+        );
+    }
+
+    async deleteProject(projectNumber) {
+        return this._delete(`/api/v1/projects/${encodeURIComponent(projectNumber)}`);
+    }
+
+    async getProjectNestingItems(projectNumber) {
+        return this._get(`/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-items`);
+    }
+
+    async updateProjectNestingTask(projectNumber, nestingTaskId, nestingStartedAt) {
+        return this._put(
+            `/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-task`,
+            { nesting_task_id: nestingTaskId, nesting_started_at: nestingStartedAt },
+        );
+    }
+
     // ── Connection detection ──────────────────────────────────────
 
     async startConnectionDetection(filename, nodeId = null, scope = 'all') {
@@ -156,6 +192,15 @@ export class ApiClient {
 
     async getConnectionStatus(taskId) {
         return this._get(`/api/v1/connections/status/${encodeURIComponent(taskId)}`);
+    }
+
+    getConnectionExportXlsxUrl(filename, nodeId = null, scope = null) {
+        let url = `/api/v1/connections/export-xlsx/${encodeURIComponent(filename)}`;
+        const params = [];
+        if (nodeId != null) params.push(`node_id=${encodeURIComponent(nodeId)}`);
+        if (scope != null) params.push(`scope=${encodeURIComponent(scope)}`);
+        if (params.length) url += '?' + params.join('&');
+        return url;
     }
 
     async getConnectionResult(filename, nodeId = null, scope = null) {
@@ -233,6 +278,12 @@ export class ApiClient {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
+        if (!res.ok) throw await this._handleError(res);
+        return res.json();
+    }
+
+    async _delete(path) {
+        const res = await fetch(`${this.baseUrl}${path}`, { method: 'DELETE' });
         if (!res.ok) throw await this._handleError(res);
         return res.json();
     }

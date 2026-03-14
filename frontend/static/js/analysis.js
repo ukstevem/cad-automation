@@ -90,6 +90,24 @@ export class AnalysisPage {
 
         /** @type {string} last steel grade entered by user */
         this._lastSteelGrade = 'S275';
+
+        // ── Nesting state ──
+        /** @type {string|null} nesting task id from the nesting service */
+        this._nestingTaskId = null;
+        /** @type {number|null} nesting poll timer */
+        this._nestingPollTimer = null;
+        /** @type {boolean} true while a nesting job is running */
+        this._nestingRunning = false;
+        /** @type {Object|null} nesting result from the service */
+        this._nestingResult = null;
+        /** @type {Object|null} cutting list from the service */
+        this._nestingCuttingList = null;
+        /** @type {number} default stock length in mm */
+        this._nestingDefaultStockLength = 6000;
+        /** @type {number} default stock qty */
+        this._nestingDefaultStockQty = 20;
+        /** @type {number} kerf in mm */
+        this._nestingKerf = 3;
     }
 
     render(container) {
@@ -133,6 +151,14 @@ export class AnalysisPage {
             clearInterval(this._cncPollTimer);
             this._cncPollTimer = null;
         }
+        if (this._nestingPollTimer) {
+            clearInterval(this._nestingPollTimer);
+            this._nestingPollTimer = null;
+        }
+        this._nestingTaskId = null;
+        this._nestingRunning = false;
+        this._nestingResult = null;
+        this._nestingCuttingList = null;
         this.stlMap.clear();
         this.explodedNodes.clear();
         this.classifications.clear();
@@ -1893,6 +1919,14 @@ export class AnalysisPage {
             + `<button class="parts-bom-dl-btn outline" title="Download BOM as JSON">\u2193\u00a0JSON</button>`
             : '';
 
+        // Nesting button — only show when we have CNC section results
+        const hasNestableSections = this._hasNestableSections(cncItems, unknownItems);
+        const nestingBtn = hasNestableSections
+            ? (this._nestingRunning
+                ? `<button class="parts-nesting-btn outline" disabled>Nesting\u2026</button>`
+                : `<button class="parts-nesting-btn outline">\u2702 Nesting</button>`)
+            : '';
+
         panel.innerHTML = `
             <div class="parts-list-card">
                 <div class="parts-list-header">
@@ -1900,6 +1934,7 @@ export class AnalysisPage {
                     <div class="parts-list-header-actions">
                         ${consolidateBtn}
                         ${bomDlBtn}
+                        ${nestingBtn}
                         <button id="parts-list-close-btn" class="outline parts-list-close">&#x2715;</button>
                     </div>
                 </div>
@@ -1915,6 +1950,7 @@ export class AnalysisPage {
                         <tbody>${tbody}</tbody>
                     </table>
                 </div>
+                <div id="nesting-results-panel" class="nesting-results-panel" ${this._nestingCuttingList ? '' : 'hidden'}></div>
             </div>
         `;
         panel.hidden = false;
@@ -1945,6 +1981,16 @@ export class AnalysisPage {
         panel.querySelector('.parts-bom-xlsx-btn')?.addEventListener('click', () => {
             this._downloadBOMXlsx();
         });
+
+        const allNestableItems = [...cncItems, ...unknownItems];
+        panel.querySelector('.parts-nesting-btn')?.addEventListener('click', () => {
+            this._showNestingSettingsDialog(allNestableItems);
+        });
+
+        // Render existing cutting list if we have one
+        if (this._nestingCuttingList) {
+            this._renderCuttingList();
+        }
 
         // Click a BOM row → select + scroll to the first occurrence in the tree
         panel.querySelector('.parts-list-table tbody')?.addEventListener('click', (e) => {
@@ -2593,6 +2639,431 @@ export class AnalysisPage {
         this._updateTreeSelectability();
         this._updateProgress();
         this._debouncedSave();
+    }
+
+    // ---------------------------------------------------------------
+    // Nesting integration
+    // ---------------------------------------------------------------
+
+    /**
+     * Check whether there are any CNC section items suitable for nesting.
+     * Only type=section results have a designation and length for nesting.
+     */
+    _hasNestableSections(cncItems, unknownItems) {
+        const allItems = [...cncItems, ...unknownItems];
+        for (const item of allItems) {
+            const info = this._cncResultForItem(item);
+            if (info?.result?.type === 'section' && info.result.designation && info.result.dims?.L) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Build the nesting request items array from CNC-analysed BOM items.
+     * Expands each BOM row by its instance count so nesting gets one item per piece.
+     */
+    _buildNestingItems(bomItems) {
+        const items = [];
+        let idx = 0;
+
+        for (const item of bomItems) {
+            const info = this._cncResultForItem(item);
+            if (!info?.result) continue;
+            const r = info.result;
+            if (r.type !== 'section' || !r.designation || !r.dims?.L) continue;
+
+            const section = r.designation;
+            const length = Math.round(r.dims.L);
+            const parentName = item.parentNames?.[0] || '';
+
+            // Expand by qty — one nesting item per physical piece
+            for (let i = 0; i < item.qty; i++) {
+                items.push({
+                    item_index: idx++,
+                    ref_id: item.key,
+                    section,
+                    length,
+                    parent: parentName,
+                    member_name: item.name,
+                });
+            }
+        }
+
+        return items;
+    }
+
+    /**
+     * Show the nesting settings dialog — stock length, qty, kerf, per-section overrides.
+     */
+    _showNestingSettingsDialog(bomItems) {
+        const nestingItems = this._buildNestingItems(bomItems);
+        if (nestingItems.length === 0) {
+            alert('No section items available for nesting. Run CNC analysis first.');
+            return;
+        }
+
+        // Collect unique sections and their max item length
+        const sectionInfo = new Map();
+        for (const it of nestingItems) {
+            const existing = sectionInfo.get(it.section);
+            if (!existing) {
+                sectionInfo.set(it.section, { count: 1, maxLen: it.length });
+            } else {
+                existing.count++;
+                existing.maxLen = Math.max(existing.maxLen, it.length);
+            }
+        }
+
+        const existing = document.getElementById('nesting-settings-dialog');
+        if (existing) existing.remove();
+
+        const sectionRows = [...sectionInfo.entries()]
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([sec, info]) => `
+                <tr class="nesting-section-row" data-section="${this._esc(sec)}">
+                    <td class="nesting-section-name">${this._esc(sec)}</td>
+                    <td class="nesting-section-count">${info.count} pcs</td>
+                    <td class="nesting-section-maxlen">${info.maxLen} mm</td>
+                    <td><input type="number" class="nesting-stock-len" min="100" step="100" placeholder="default" title="Stock length override for this section"></td>
+                    <td><input type="number" class="nesting-stock-qty" min="1" step="1" placeholder="default" title="Stock qty override for this section"></td>
+                </tr>
+            `).join('');
+
+        const dialog = document.createElement('dialog');
+        dialog.id = 'nesting-settings-dialog';
+        dialog.className = 'nesting-settings-dialog';
+        dialog.innerHTML = `
+            <form method="dialog" class="nesting-settings-form">
+                <h3 class="nesting-settings-title">\u2702 Nesting Settings</h3>
+                <p class="nesting-settings-summary">${nestingItems.length} section pieces across ${sectionInfo.size} profile(s)</p>
+
+                <div class="nesting-settings-defaults">
+                    <div class="nesting-settings-field">
+                        <label for="nesting-stock-length">Default Stock Length (mm)</label>
+                        <input type="number" id="nesting-stock-length" min="100" step="100"
+                               value="${this._nestingDefaultStockLength}">
+                    </div>
+                    <div class="nesting-settings-field">
+                        <label for="nesting-stock-qty">Default Stock Qty</label>
+                        <input type="number" id="nesting-stock-qty" min="1" step="1"
+                               value="${this._nestingDefaultStockQty}">
+                    </div>
+                    <div class="nesting-settings-field">
+                        <label for="nesting-kerf">Kerf / Blade Width (mm)</label>
+                        <input type="number" id="nesting-kerf" min="0" step="1"
+                               value="${this._nestingKerf}">
+                    </div>
+                </div>
+
+                ${sectionInfo.size > 1 ? `
+                <details class="nesting-overrides-details">
+                    <summary>Per-section stock overrides</summary>
+                    <table class="nesting-overrides-table">
+                        <thead>
+                            <tr><th>Section</th><th>Items</th><th>Max Len</th><th>Stock Len</th><th>Stock Qty</th></tr>
+                        </thead>
+                        <tbody>${sectionRows}</tbody>
+                    </table>
+                </details>` : ''}
+
+                <div class="nesting-settings-actions">
+                    <button type="button" id="nesting-cancel" class="outline">Cancel</button>
+                    <button type="submit">Run Nesting</button>
+                </div>
+            </form>
+        `;
+
+        document.body.appendChild(dialog);
+        dialog.showModal();
+        dialog.querySelector('#nesting-stock-length')?.focus();
+
+        dialog.querySelector('#nesting-cancel').addEventListener('click', () => {
+            dialog.close();
+            dialog.remove();
+        });
+
+        dialog.querySelector('form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const stockLen = parseInt(dialog.querySelector('#nesting-stock-length').value) || 6000;
+            const stockQty = parseInt(dialog.querySelector('#nesting-stock-qty').value) || 20;
+            const kerf = parseInt(dialog.querySelector('#nesting-kerf').value) || 3;
+
+            this._nestingDefaultStockLength = stockLen;
+            this._nestingDefaultStockQty = stockQty;
+            this._nestingKerf = kerf;
+
+            // Collect per-section overrides
+            const stockPerSection = [];
+            for (const row of dialog.querySelectorAll('.nesting-section-row')) {
+                const sec = row.dataset.section;
+                const lenInput = row.querySelector('.nesting-stock-len');
+                const qtyInput = row.querySelector('.nesting-stock-qty');
+                const len = parseInt(lenInput?.value);
+                const qty = parseInt(qtyInput?.value);
+                if (len > 0 && qty > 0) {
+                    stockPerSection.push({ section: sec, stock: [{ length: len, qty }] });
+                }
+            }
+
+            dialog.close();
+            dialog.remove();
+            this._submitNesting(nestingItems, stockPerSection, stockLen, stockQty, kerf);
+        });
+
+        dialog.addEventListener('cancel', () => { dialog.remove(); });
+    }
+
+    /**
+     * Submit the nesting job to the nesting service.
+     */
+    _submitNesting(items, stockPerSection, defaultLen, defaultQty, kerf) {
+        this._nestingRunning = true;
+        this._nestingResult = null;
+        this._nestingCuttingList = null;
+        this._renderPartsList(this._consolidationGroups);
+
+        const body = {
+            job_label: this._lastProjectNumber || this._currentFilename || 'nesting',
+            items,
+            stock_per_section: stockPerSection,
+            default_stock: [{ length: defaultLen, qty: defaultQty }],
+            kerf,
+            time_limit: 300.0,
+        };
+
+        const NESTING_BASE = 'http://localhost:8001';
+
+        fetch(`${NESTING_BASE}/api/v1/nesting/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+        .then(r => {
+            if (!r.ok) return r.json().then(e => { throw new Error(e.detail || `HTTP ${r.status}`); });
+            return r.json();
+        })
+        .then(resp => {
+            if (resp.task_id) {
+                this._nestingTaskId = resp.task_id;
+                this._pollNesting(resp.task_id);
+            } else {
+                this._nestingRunning = false;
+                this._renderPartsList(this._consolidationGroups);
+            }
+        })
+        .catch(err => {
+            console.error('Failed to start nesting:', err);
+            this._nestingRunning = false;
+            alert(`Nesting failed to start: ${err.message}`);
+            this._renderPartsList(this._consolidationGroups);
+        });
+    }
+
+    /**
+     * Poll the nesting service for task completion.
+     */
+    _pollNesting(taskId) {
+        if (this._nestingPollTimer) clearInterval(this._nestingPollTimer);
+
+        const NESTING_BASE = 'http://localhost:8001';
+
+        // Show initial progress
+        this._renderNestingProgress({ phase: 0, description: 'Starting nesting solver\u2026' });
+
+        this._nestingPollTimer = setInterval(() => {
+            fetch(`${NESTING_BASE}/api/v1/nesting/status/${encodeURIComponent(taskId)}`)
+                .then(r => r.json())
+                .then(resp => {
+                    if (resp.status === 'completed') {
+                        clearInterval(this._nestingPollTimer);
+                        this._nestingPollTimer = null;
+                        this._nestingRunning = false;
+
+                        // Fetch the cutting list
+                        fetch(`${NESTING_BASE}/api/v1/nesting/cutting-list/${encodeURIComponent(taskId)}`)
+                            .then(r => r.json())
+                            .then(cl => {
+                                this._nestingCuttingList = cl;
+                                this._nestingResult = resp.result || null;
+                                this._renderPartsList(this._consolidationGroups);
+                            })
+                            .catch(err => {
+                                console.error('Failed to fetch cutting list:', err);
+                                this._renderPartsList(this._consolidationGroups);
+                            });
+
+                    } else if (resp.status === 'failed') {
+                        clearInterval(this._nestingPollTimer);
+                        this._nestingPollTimer = null;
+                        this._nestingRunning = false;
+                        console.error('Nesting failed:', resp.error);
+                        alert(`Nesting failed: ${resp.error || 'unknown error'}`);
+                        this._renderPartsList(this._consolidationGroups);
+
+                    } else {
+                        // running/pending — update progress
+                        this._renderNestingProgress(resp.progress || {});
+                    }
+                })
+                .catch(() => { /* network hiccup — keep polling */ });
+        }, 2000);
+    }
+
+    /**
+     * Render inline progress indicator while nesting is running.
+     */
+    _renderNestingProgress(progress) {
+        const panel = this.container?.querySelector('#nesting-results-panel');
+        if (!panel) return;
+        panel.hidden = false;
+
+        const phase = progress.phase || 0;
+        const desc = progress.description || 'Working\u2026';
+        const pct = progress.percent || 0;
+        const secInfo = (progress.section_index && progress.section_count)
+            ? ` (section ${progress.section_index}/${progress.section_count}: ${progress.section || ''})`
+            : '';
+
+        panel.innerHTML = `
+            <div class="nesting-progress">
+                <p class="nesting-progress-text" aria-busy="true">
+                    ${this._esc(desc)}${secInfo}
+                </p>
+                ${pct > 0 ? `<progress value="${pct}" max="100"></progress>` : '<progress></progress>'}
+            </div>
+        `;
+    }
+
+    /**
+     * Render the cutting list results inside the nesting panel.
+     */
+    _renderCuttingList() {
+        const panel = this.container?.querySelector('#nesting-results-panel');
+        if (!panel || !this._nestingCuttingList) return;
+        panel.hidden = false;
+
+        const cl = this._nestingCuttingList;
+        const totals = cl.totals || {};
+        const sections = cl.sections || [];
+
+        let html = `
+            <div class="nesting-results-header">
+                <span class="nesting-results-title">Cutting List</span>
+                <div class="nesting-results-actions">
+                    <button class="nesting-csv-btn outline">\u2193 CSV</button>
+                    <button class="nesting-close-btn outline">\u2715</button>
+                </div>
+            </div>
+            <div class="nesting-totals">
+                <span>Placed: <strong>${totals.total_items_placed ?? '?'}</strong></span>
+                <span>Unassigned: <strong>${totals.total_items_unassigned ?? 0}</strong></span>
+                <span>Stocks used: <strong>${totals.total_stocks_used ?? '?'}</strong></span>
+                <span>Total waste: <strong>${totals.total_waste_mm != null ? (totals.total_waste_mm / 1000).toFixed(1) + ' m' : '?'}</strong></span>
+            </div>
+        `;
+
+        for (const section of sections) {
+            const summ = section.summary || {};
+            const statusBadge = section.phase1_status === 'optimal'
+                ? '<span class="nesting-status-badge nesting-status-optimal">optimal</span>'
+                : section.phase1_status === 'feasible'
+                    ? '<span class="nesting-status-badge nesting-status-feasible">feasible</span>'
+                    : `<span class="nesting-status-badge nesting-status-other">${this._esc(section.phase1_status || '?')}</span>`;
+
+            html += `
+                <details class="nesting-section-details" open>
+                    <summary class="nesting-section-summary">
+                        <strong>${this._esc(section.designation)}</strong>
+                        \u2014 ${summ.items_placed ?? '?'} placed, ${summ.stocks_used ?? '?'} bars
+                        ${statusBadge}
+                    </summary>
+                    <div class="nesting-bars-container">
+            `;
+
+            for (const bar of (section.bars || [])) {
+                const usePct = bar.stock_length_mm > 0
+                    ? Math.round((bar.used_length_mm / bar.stock_length_mm) * 100)
+                    : 0;
+
+                html += `
+                    <div class="nesting-bar">
+                        <div class="nesting-bar-header">
+                            <span class="nesting-bar-label">${this._esc(bar.bar_label)}</span>
+                            <span class="nesting-bar-stock">${bar.stock_length_mm} mm</span>
+                            <span class="nesting-bar-usage">${usePct}% used</span>
+                            <span class="nesting-bar-waste">waste: ${bar.waste_mm} mm</span>
+                        </div>
+                        <div class="nesting-bar-visual" title="${bar.used_length_mm} / ${bar.stock_length_mm} mm">
+                `;
+
+                // Visual representation of cuts on the bar
+                for (const cut of (bar.cuts || [])) {
+                    const widthPct = bar.stock_length_mm > 0
+                        ? (cut.length_mm / bar.stock_length_mm) * 100
+                        : 0;
+                    const label = cut.member || cut.ref_id || `Cut ${cut.cut_no}`;
+                    html += `<div class="nesting-cut-block" style="width:${widthPct.toFixed(1)}%" title="${this._esc(label)}: ${cut.length_mm} mm${cut.parent ? ' (' + this._esc(cut.parent) + ')' : ''}">${cut.length_mm}</div>`;
+                }
+
+                // Waste block
+                if (bar.waste_mm > 0 && bar.stock_length_mm > 0) {
+                    const wastePct = (bar.waste_mm / bar.stock_length_mm) * 100;
+                    html += `<div class="nesting-waste-block" style="width:${wastePct.toFixed(1)}%">${bar.waste_mm}</div>`;
+                }
+
+                html += `
+                        </div>
+                        <table class="nesting-cuts-table">
+                            <thead><tr><th>#</th><th>Member</th><th>Parent</th><th>Length</th></tr></thead>
+                            <tbody>
+                `;
+
+                for (const cut of (bar.cuts || [])) {
+                    html += `<tr>
+                        <td>${cut.cut_no}</td>
+                        <td>${this._esc(cut.member || cut.ref_id || '—')}</td>
+                        <td>${this._esc(cut.parent || '—')}</td>
+                        <td>${cut.length_mm} mm</td>
+                    </tr>`;
+                }
+
+                html += `</tbody></table></div>`;
+            }
+
+            // Unassigned items
+            if (section.unassigned && section.unassigned.length > 0) {
+                html += `<div class="nesting-unassigned">
+                    <strong>\u26a0 Unassigned (${section.unassigned.length})</strong>
+                    <ul>`;
+                for (const u of section.unassigned) {
+                    html += `<li>${this._esc(u.member_name || u.ref_id || '?')} \u2014 ${u.length} mm</li>`;
+                }
+                html += `</ul></div>`;
+            }
+
+            html += `</div></details>`;
+        }
+
+        panel.innerHTML = html;
+
+        // CSV download
+        panel.querySelector('.nesting-csv-btn')?.addEventListener('click', () => {
+            if (!this._nestingTaskId) return;
+            const NESTING_BASE = 'http://localhost:8001';
+            const a = document.createElement('a');
+            a.href = `${NESTING_BASE}/api/v1/nesting/cutting-list/${encodeURIComponent(this._nestingTaskId)}/csv`;
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+
+        // Close button
+        panel.querySelector('.nesting-close-btn')?.addEventListener('click', () => {
+            panel.hidden = true;
+        });
     }
 
     // ---------------------------------------------------------------

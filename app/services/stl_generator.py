@@ -127,6 +127,7 @@ class STLGenerator:
 
         results = []
         total = len(items)
+        seen_stl_names: set = set()
 
         for i, item in enumerate(items):
             name = item["name"]
@@ -134,7 +135,7 @@ class STLGenerator:
                 progress_callback(i, total, name)
 
             try:
-                stl_path = self.output_dir / f"{_safe_filename(name)}.stl"
+                stl_path = self._unique_stl_path(self.output_dir, name, item["node_id"], seen_stl_names)
                 self._generate_stl(item["shape"], stl_path)
                 size_bytes = stl_path.stat().st_size
                 results.append({
@@ -223,6 +224,7 @@ class STLGenerator:
 
         results = []
         total = len(items)
+        seen_stl_names: set = set()
 
         for i, item in enumerate(items):
             name = item["name"]
@@ -230,7 +232,7 @@ class STLGenerator:
                 progress_callback(i, total, name)
 
             try:
-                stl_path = self.output_dir / f"{_safe_filename(name)}.stl"
+                stl_path = self._unique_stl_path(self.output_dir, name, item["node_id"], seen_stl_names)
                 self._generate_stl(item["shape"], stl_path)
                 size_bytes = stl_path.stat().st_size
                 results.append({
@@ -339,6 +341,7 @@ class STLGenerator:
 
         results = []
         total = len(solids)
+        seen_stl_names: set = set()
 
         for i, item in enumerate(solids):
             solid_name = item["name"]
@@ -346,7 +349,7 @@ class STLGenerator:
                 progress_callback(i, total, solid_name)
 
             try:
-                stl_path = self.output_dir / f"{_safe_filename(solid_name)}.stl"
+                stl_path = self._unique_stl_path(self.output_dir, solid_name, item["node_id"], seen_stl_names)
                 self._generate_stl(item["solid"], stl_path)
                 size_bytes = stl_path.stat().st_size
                 results.append({
@@ -457,6 +460,7 @@ class STLGenerator:
 
         results = []
         total = len(solids)
+        seen_stl_names: set = set()
 
         for i, item in enumerate(solids):
             solid_name = item["name"]
@@ -464,7 +468,7 @@ class STLGenerator:
                 progress_callback(i, total, solid_name)
 
             try:
-                stl_path = world_dir / f"{_safe_filename(solid_name)}.stl"
+                stl_path = self._unique_stl_path(world_dir, solid_name, item["node_id"], seen_stl_names)
                 self._generate_stl(item["solid"], stl_path)
                 size_bytes = stl_path.stat().st_size
                 results.append({
@@ -516,6 +520,7 @@ class STLGenerator:
 
         all_results = []
         total_nodes = len(node_ids)
+        seen_stl_names: set = set()
 
         for ni, nid in enumerate(node_ids):
             # Find the label from its entry string
@@ -557,7 +562,7 @@ class STLGenerator:
                     )
 
                 try:
-                    stl_path = world_dir / f"{_safe_filename(solid_name)}.stl"
+                    stl_path = self._unique_stl_path(world_dir, solid_name, solid_node_id, seen_stl_names)
                     if not stl_path.exists():
                         self._generate_stl(solid, stl_path)
                     size_bytes = stl_path.stat().st_size
@@ -582,6 +587,18 @@ class STLGenerator:
             total_stls=len(all_results),
         )
         return all_results
+
+    @staticmethod
+    def _unique_stl_path(directory: Path, name: str, node_id: str, seen: set) -> Path:
+        """Return a unique STL path in *directory* for *name*, appending the node_id when the
+        base filename has already been used in this generation run."""
+        base = _safe_filename(name) or "part"
+        candidate = f"{base}.stl"
+        if candidate in seen:
+            node_safe = _safe_filename(node_id.replace(":", "-"))
+            candidate = f"{base}_{node_safe}.stl"
+        seen.add(candidate)
+        return directory / candidate
 
     def _read_xcaf(self):
         """Create an XCAF document and populate it from the STEP file."""

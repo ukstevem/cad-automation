@@ -322,6 +322,72 @@ def _measure_edge_length(shape) -> float:
     return total
 
 
+# ── Helper: outer-boundary measurement (handles triangulated geometry) ────
+
+def _outer_boundary_measure(
+    overlaps: List,
+) -> Tuple[float, List[List[List[float]]]]:
+    """Return the outer-boundary perimeter and weld-path polylines for a
+    collection of coplanar overlap shapes.
+
+    For normally-modelled geometry (one face per contact zone) this is
+    identical to summing individual perimeters.  For triangulated geometry
+    (DXF imports), adjacent triangles share diagonal edges that appear in
+    exactly two overlap shapes.  By keeping only edges that appear an *odd*
+    number of times we cancel out those internal diagonals and measure only
+    the true outer perimeter.
+    """
+    ROUND_DP = 1  # 0.1 mm tolerance for edge-endpoint deduplication
+
+    # Map  frozenset{pt0, pt1}  →  list of (edge, length) tuples
+    edge_map: Dict[Any, list] = {}
+
+    for shape in overlaps:
+        exp = TopExp_Explorer(shape, TopAbs_EDGE)
+        while exp.More():
+            edge = TopoDS.Edge_s(exp.Current())
+            exp.Next()
+            try:
+                curve = BRepAdaptor_Curve(edge)
+                p0 = curve.Value(curve.FirstParameter())
+                p1 = curve.Value(curve.LastParameter())
+                key = frozenset([
+                    (round(p0.X(), ROUND_DP), round(p0.Y(), ROUND_DP), round(p0.Z(), ROUND_DP)),
+                    (round(p1.X(), ROUND_DP), round(p1.Y(), ROUND_DP), round(p1.Z(), ROUND_DP)),
+                ])
+                props = GProp_GProps()
+                BRepGProp.LinearProperties_s(edge, props)
+                edge_map.setdefault(key, []).append((edge, abs(props.Mass())))
+            except Exception:
+                continue
+
+    # Outer boundary = edges appearing an odd number of times.
+    # Shared/internal edges (diagonals in triangulated meshes) appear twice
+    # and cancel out.
+    total = 0.0
+    paths: List[List[List[float]]] = []
+    n_samples = 20
+    for entries in edge_map.values():
+        if len(entries) % 2 == 0:
+            continue  # internal / shared edge — skip
+        edge, length = entries[0]
+        total += length
+        try:
+            curve = BRepAdaptor_Curve(edge)
+            u0, u1 = curve.FirstParameter(), curve.LastParameter()
+            if abs(u1 - u0) > 1e-12:
+                pts = []
+                for k in range(n_samples + 1):
+                    u = u0 + (u1 - u0) * k / n_samples
+                    p = curve.Value(u)
+                    pts.append([round(p.X(), 2), round(p.Y(), 2), round(p.Z(), 2)])
+                paths.append(pts)
+        except Exception:
+            pass
+
+    return total, paths
+
+
 # ── Helper: weld path polyline extraction ─────────────────────────────────
 
 def _extract_edge_polylines(shape, n_samples: int = 20) -> List[List[List[float]]]:
@@ -494,9 +560,8 @@ def _detect_weld_contact(solidA, solidB) -> Optional[Dict[str, Any]]:
         return None
 
     cos_limit = -math.cos(math.radians(COPLANAR_ANGLE_DEG))
-    total_weld = 0.0
     n_contacts = 0
-    all_weld_paths: List[List[List[float]]] = []
+    overlaps: List[Any] = []
 
     for fa, na, ptA in faces_a:
         for fb, nb, ptB in faces_b:
@@ -518,17 +583,21 @@ def _detect_weld_contact(solidA, solidB) -> Optional[Dict[str, Any]]:
                 if not common.IsDone():
                     continue
                 overlap = common.Shape()
-                perimeter = _measure_edge_length(overlap)
-                if perimeter > MIN_WELD_PERIMETER:
-                    total_weld += perimeter
+                if _measure_edge_length(overlap) > MIN_WELD_PERIMETER:
                     n_contacts += 1
-                    # Extract weld path polylines
-                    paths = _extract_edge_polylines(overlap)
-                    all_weld_paths.extend(paths)
+                    overlaps.append(overlap)
             except Exception:
                 continue
 
     if n_contacts == 0:
+        return None
+
+    # Fuse overlaps: edges shared between adjacent triangular faces (from
+    # triangulated/DXF geometry) appear twice and cancel out, leaving only
+    # the true outer boundary perimeter and clean weld-path lines.
+    total_weld, all_weld_paths = _outer_boundary_measure(overlaps)
+
+    if total_weld <= MIN_WELD_PERIMETER:
         return None
 
     return {
