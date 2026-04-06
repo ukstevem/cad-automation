@@ -39,15 +39,19 @@ transformations but sensitive to mass distribution, so two shapes with the same
 volume/area/bbox but holes at different positions still get different fingerprints.
 
 ``chirality`` is +1 or −1: the determinant of the canonical principal-axis
-frame, where each axis direction is chosen so that the CoM–BboxCenter offset
-projects *positively* onto it.  For a shape and its mirror image the canonical
-frames have opposite determinants, so this correctly distinguishes left-hand
-from right-hand parts.
+frame, where each axis direction is chosen so that the **third-order moment**
+(skewness) of the BRep vertex distribution projected onto that axis is
+positive.  Third-order moments are fully rotation-invariant — they depend
+only on intrinsic geometry relative to the centre of mass, not on the
+world-space orientation or axis-aligned bounding box.  For a shape and its
+mirror image the canonical frames have opposite determinants, correctly
+distinguishing left-hand from right-hand parts regardless of how they are
+oriented in the STEP file.
 
-For nearly-symmetric shapes (CoM within _CHIRALITY_THR of the bbox centre along
-all three principal axes) a lexicographic tiebreaker is used; both a symmetric
-part and its mirror image receive the same chirality value (+1 or −1) since
-second-order moments cannot distinguish them.
+For nearly-symmetric shapes (normalised skewness below ``_CHIRALITY_SKEW_THR``
+along all three principal axes) a lexicographic tiebreaker is used; both a
+symmetric part and its mirror image receive the same chirality value (+1 or
+−1) since second-order moments cannot distinguish them.
 
 Face count is excluded: STEP files can represent identical geometry with
 different face counts depending on how edges/faces are split during export.
@@ -76,7 +80,9 @@ from OCP.GProp import GProp_GProps
 from OCP.Bnd import Bnd_Box
 from OCP.BRepBndLib import BRepBndLib
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopAbs import TopAbs_SOLID, TopAbs_VERTEX
+from OCP.BRep import BRep_Tool
+from OCP.TopoDS import TopoDS
 
 from app.exceptions import STEPParseError
 
@@ -88,26 +94,34 @@ _ROUND_DP = 1  # 0.1 mm / mm² / mm³ resolution
 # Parts with |volume| below this threshold are treated as zero-volume
 _MIN_VOLUME = 0.001  # mm³
 
-# Chirality: minimum CoM–BboxCenter projection (mm) onto a principal axis
-# before using the signed projection to set that axis's canonical direction.
-# Below this the axis is considered locally symmetric and a lexicographic
-# tiebreaker is used instead.  Value is compared against the raw projection
-# distance; 0.01 mm is above floating-point noise but well below any real
-# geometric asymmetry that would make a part chiral.
-_CHIRALITY_THR = 0.01  # mm
+# Chirality: minimum normalised third-moment ratio (dimensionless) along a
+# principal axis before using it to set the canonical axis direction.
+# The ratio is |sum(proj^3)| / sum(|proj|^3) — essentially a skewness
+# coefficient in [0, 1].  Below this the axis is considered locally symmetric
+# and a lexicographic tiebreaker is used instead.  0.01 (1%) is above
+# floating-point noise but catches genuinely asymmetric profiles (channels,
+# angles, etc. typically show 30-50% skewness on their asymmetric axis).
+_CHIRALITY_SKEW_THR = 0.01
 
 
-def _canonical_chirality(vol_props, pp, xmin, ymin, zmin, xmax, ymax, zmax) -> int:
+def _canonical_chirality(shape, vol_props, pp) -> int:
     """
     Return +1 or −1: the handedness of the canonical principal-axis frame.
 
-    Each principal axis is given a canonical direction so that the CoM–BboxCenter
-    offset projects positively onto it (or, when the projection is below the
-    noise threshold, so that the largest-magnitude component is positive).
+    Each principal axis is given a canonical direction using the **third-order
+    moment** (skewness) of the BRep vertex distribution projected onto that
+    axis, relative to the centre of mass.
 
-    The determinant of the 3×3 matrix whose rows are these canonical unit
-    vectors is ±1.  Under a geometric reflection it flips sign, so two shapes
-    that are mirror images receive opposite chirality values.
+    Unlike the previous AABB-centre approach, third-order moments are fully
+    invariant under rigid-body rotation — they depend only on the intrinsic
+    geometry of the shape relative to its centre of mass.  Under geometric
+    reflection the third moment along the reflected axis flips sign, so the
+    determinant of the canonical frame changes sign, correctly distinguishing
+    left-hand from right-hand parts.
+
+    For axes where the normalised third moment is below ``_CHIRALITY_SKEW_THR``
+    (shape is nearly symmetric along that axis), a lexicographic tiebreaker on
+    the eigenvector components is used.
 
     Returns +1 on any failure so that chirality detection degrades gracefully
     to the pre-chirality behaviour (all parts treated as +1, i.e. matched by
@@ -115,25 +129,41 @@ def _canonical_chirality(vol_props, pp, xmin, ymin, zmin, xmax, ymax, zmax) -> i
     """
     try:
         com = vol_props.CentreOfMass()
-        delta = (
-            com.X() - (xmin + xmax) / 2.0,
-            com.Y() - (ymin + ymax) / 2.0,
-            com.Z() - (zmin + zmax) / 2.0,
-        )
+        cx, cy, cz = com.X(), com.Y(), com.Z()
 
-        axes = (
+        axes_raw = (
             pp.FirstAxisOfInertia(),
             pp.SecondAxisOfInertia(),
             pp.ThirdAxisOfInertia(),
         )
+        axis_vecs = [(float(a.X()), float(a.Y()), float(a.Z())) for a in axes_raw]
+
+        # Collect BRep vertices relative to CoM.
+        # Duplicates (same vertex shared by multiple edges) are harmless —
+        # they add weight but cannot change the sign of the third moment.
+        verts = []
+        exp = TopExp_Explorer(shape, TopAbs_VERTEX)
+        while exp.More():
+            pnt = BRep_Tool.Pnt_s(TopoDS.Vertex_s(exp.Current()))
+            verts.append((pnt.X() - cx, pnt.Y() - cy, pnt.Z() - cz))
+            exp.Next()
+
+        if len(verts) < 4:
+            return 1  # degenerate shape — not enough vertices
 
         rows = []
-        for ax in axes:
-            v = (float(ax.X()), float(ax.Y()), float(ax.Z()))
-            proj = delta[0] * v[0] + delta[1] * v[1] + delta[2] * v[2]
-            if abs(proj) > _CHIRALITY_THR:
-                # Asymmetric axis: canonical direction aligns with the offset.
-                s = 1.0 if proj > 0.0 else -1.0
+        for v in axis_vecs:
+            # Project every vertex onto this principal axis
+            projs = [dx * v[0] + dy * v[1] + dz * v[2] for dx, dy, dz in verts]
+
+            # Third moment (sum of cubes) and normaliser (sum of |cubes|)
+            m3 = sum(p * p * p for p in projs)
+            m3_abs = sum(abs(p) ** 3 for p in projs)
+
+            if m3_abs > 0.0 and abs(m3) / m3_abs > _CHIRALITY_SKEW_THR:
+                # Genuinely asymmetric axis: canonical direction aligns with
+                # the positive skew.
+                s = 1.0 if m3 > 0.0 else -1.0
             else:
                 # Nearly-symmetric axis: lexicographic tiebreaker — flip so
                 # the component with the largest absolute value is positive.
@@ -238,16 +268,12 @@ class PartsConsolidator:
                 fp_groups[_singleton_key] = [ref_id]
                 _singleton_key += 1
             else:
-                # Group by the first 8 components only (exclude chirality).
-                # Chirality depends on the CoM-to-BboxCenter offset direction
-                # relative to the principal axes.  For shapes embedded at
-                # different world-space orientations (common in DXF-converted
-                # mesh files), this offset direction can flip even for
-                # identical geometry that is merely rotated — e.g. a channel
-                # placed toes-up vs toes-down.  Mirror detection for instances
-                # is already handled by the ``is_mirrored`` flag on the
-                # assembly tree, so excluding chirality here is safe.
-                group_key = fp[:8]
+                # Group by the full 9-component fingerprint including chirality.
+                # The third-moment-based chirality computation is rotation-
+                # invariant (unlike the previous AABB-centre approach), so
+                # mirror-image parts reliably get opposite chirality values
+                # and are kept in separate consolidation groups.
+                group_key = fp
                 fp_groups.setdefault(group_key, []).append(ref_id)
 
         part_groups: List[Dict[str, Any]] = []
@@ -493,9 +519,7 @@ class PartsConsolidator:
             pp = vol_props.PrincipalProperties()
             moments = tuple(sorted(round(v, -3) for v in pp.Moments()))
 
-            chirality = _canonical_chirality(
-                vol_props, pp, xmin, ymin, zmin, xmax, ymax, zmax
-            )
+            chirality = _canonical_chirality(shape, vol_props, pp)
 
             return (volume, surface, *dims, *moments, chirality)
 
@@ -520,6 +544,13 @@ class PartsConsolidator:
             shape = XCAFDoc_ShapeTool.GetShape_s(label)
             if shape is None or shape.IsNull():
                 return None
+
+            # Strip any accumulated location so the shape is always
+            # fingerprinted in its prototype's local coordinate system.
+            # Without this, shapes stored at different world-space
+            # orientations can produce inconsistent bounding boxes and
+            # chirality values.
+            shape = shape.Located(TopLoc_Location())
 
             return self._fingerprint_shape(shape)
 
