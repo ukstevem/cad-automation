@@ -120,7 +120,9 @@ export class STLViewer {
     /**
      * Load multiple STL files into the scene.
      *
-     * @param {Array<{url: string, color?: number, opacity?: number, label?: string}>} items
+     * @param {Array<{url: string, color?: number, opacity?: number, label?: string, placement?: number[]}>} items
+     *   placement is an optional 4x4 column-major matrix (16 floats) for positioning
+     *   the mesh in the parent assembly's coordinate frame.
      * @returns {Promise<void>} resolves when all meshes are loaded
      */
     async loadScene(items) {
@@ -142,8 +144,6 @@ export class STLViewer {
                     }
                     try {
                         geometry.computeVertexNormals();
-                        geometry.computeBoundingBox();
-                        combinedBox.union(geometry.boundingBox);
 
                         const color = item.color != null ? item.color : 0xaaaaaa;
                         const opacity = item.opacity != null ? item.opacity : 1.0;
@@ -158,7 +158,23 @@ export class STLViewer {
                         });
 
                         const mesh = new THREE.Mesh(geometry, material);
+
+                        // Apply instance placement transform if provided
+                        if (item.placement && item.placement.length === 16) {
+                            const m4 = new THREE.Matrix4();
+                            m4.fromArray(item.placement);
+                            mesh.applyMatrix4(m4);
+                        }
+
                         this.scene.add(mesh);
+
+                        // Recompute bounding box after transform
+                        geometry.computeBoundingBox();
+                        const meshBox = geometry.boundingBox.clone();
+                        if (item.placement && item.placement.length === 16) {
+                            meshBox.applyMatrix4(mesh.matrix);
+                        }
+                        combinedBox.union(meshBox);
 
                         const edgesGeo = new THREE.EdgesGeometry(geometry, 15);
                         const edgesMat = new THREE.LineBasicMaterial({
@@ -167,6 +183,11 @@ export class STLViewer {
                             opacity: Math.min(opacity + 0.1, 1.0),
                         });
                         const edges = new THREE.LineSegments(edgesGeo, edgesMat);
+                        if (item.placement && item.placement.length === 16) {
+                            const m4 = new THREE.Matrix4();
+                            m4.fromArray(item.placement);
+                            edges.applyMatrix4(m4);
+                        }
                         this.scene.add(edges);
 
                         this._meshes[index] = { mesh, edges, material, edgesMat };
@@ -215,6 +236,13 @@ export class STLViewer {
         entry.material.transparent = opacity < 1.0;
         entry.material.opacity = opacity;
         entry.material.needsUpdate = true;
+
+        // Match edge visibility to mesh opacity
+        if (entry.edgesMat) {
+            entry.edgesMat.transparent = opacity < 1.0;
+            entry.edgesMat.opacity = Math.min(opacity + 0.1, 1.0);
+            entry.edgesMat.needsUpdate = true;
+        }
     }
 
     // ── Line geometry overlay ────────────────────────────────────────

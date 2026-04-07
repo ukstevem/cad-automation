@@ -151,12 +151,16 @@ class AssemblyAnalyzer:
         # Chirality: detect if this instance has a mirror transformation (det = -1).
         is_mirrored = self._is_mirrored(label)
 
+        # Instance placement (4x4 column-major matrix for Three.js)
+        placement = self._extract_placement(label)
+
         node: Dict[str, Any] = {
             "id": entry_str,
             "name": display_name,
             "instance_ref": instance_name,
             "ref_id": ref_id,
             "is_mirrored": is_mirrored,
+            "placement": placement,
             "node_type": node_type,
             "solid_count": num_solids,
             "children": [],
@@ -244,6 +248,39 @@ class AssemblyAnalyzer:
             return loc.IsNegative()
         except Exception:
             return False
+
+    @staticmethod
+    def _extract_placement(label) -> Optional[list]:
+        """
+        Extract the instance placement as a 4x4 column-major matrix (for Three.js).
+
+        Returns None for identity transforms (no placement needed).
+        Uses the same safe BRep-level approach as _is_mirrored.
+        """
+        try:
+            shape = XCAFDoc_ShapeTool.GetShape_s(label)
+            if shape.IsNull():
+                return None
+            loc = shape.Location()
+            if loc.IsIdentity():
+                return None
+            trsf = loc.Transformation()
+            sf = trsf.ScaleFactor()
+            # Build 4x4 in column-major order (Three.js Matrix4.fromArray convention)
+            # trsf.Value(row, col) is 1-based, rows 1-3, cols 1-4
+            m = [0.0] * 16
+            for col in range(3):
+                for row in range(3):
+                    m[col * 4 + row] = sf * trsf.Value(row + 1, col + 1)
+            # Translation in column 3
+            t = trsf.TranslationPart()
+            m[12] = t.X()
+            m[13] = t.Y()
+            m[14] = t.Z()
+            m[15] = 1.0
+            return m
+        except Exception:
+            return None
 
     @staticmethod
     def _classify_node(is_assembly: bool, num_solids: int) -> str:

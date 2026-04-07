@@ -40,6 +40,16 @@ export class AnalysisPage {
         /** @type {string|null} currently selected node shown in viewer */
         this._selectedNodeId = null;
 
+        /** @type {Map<string, number>|null} nodeId -> mesh index when multi-solid scene is loaded */
+        this._multiSolidMeshMap = null;
+        /** @type {string|null} nodeId of the parent multi-solid currently loaded as scene */
+        this._multiSolidParentId = null;
+        /** @type {Array<number>|null} default colors for each mesh in the current scene */
+        this._multiSolidDefaultColors = null;
+
+        /** @type {Map<string, number[]>} nodeId -> 4x4 column-major placement matrix */
+        this._placements = new Map();
+
         /** @type {STLViewer|null} single viewer instance */
         this._viewer = null;
 
@@ -139,6 +149,9 @@ export class AnalysisPage {
             this._viewer.dispose();
             this._viewer = null;
         }
+        this._multiSolidMeshMap = null;
+        this._multiSolidParentId = null;
+        this._multiSolidDefaultColors = null;
         if (this._saveTimer) {
             clearTimeout(this._saveTimer);
             this._saveTimer = null;
@@ -501,6 +514,7 @@ export class AnalysisPage {
         treeEl.innerHTML = '<ul>' + nodes.map(n => this._renderNode(n, 0)).join('') + '</ul>';
 
         this._buildParentMap(nodes, null);
+        this._extractPlacements(nodes);
         this._bindTreeEvents(treeEl);
 
         // Show the "All Parts" button once the tree is available
@@ -590,6 +604,18 @@ export class AnalysisPage {
         }
     }
 
+    /** Walk tree data and store any non-identity placement matrices by nodeId. */
+    _extractPlacements(nodes) {
+        for (const node of nodes) {
+            if (node.placement) {
+                this._placements.set(node.id, node.placement);
+            }
+            if (node.children && node.children.length > 0) {
+                this._extractPlacements(node.children);
+            }
+        }
+    }
+
     _actionsHtml(node) {
         const btns = [];
         switch (node.node_type) {
@@ -669,6 +695,32 @@ export class AnalysisPage {
                 const nodeId = li.dataset.nodeId;
                 this._selectNodeForPreview(nodeId);
             }
+        });
+
+        // Hover highlighting for children in multi-solid / assembly scene
+        treeEl.addEventListener('mouseover', (e) => {
+            const row = e.target.closest('.tree-node-row');
+            if (!row || row._hoverActive) return;
+            if (!this._multiSolidMeshMap) return;
+            const li = row.closest('.tree-node');
+            if (!li) return;
+            const nodeId = li.dataset.nodeId;
+            if (!this._multiSolidMeshMap.has(nodeId)) return;
+
+            row._hoverActive = true;
+            row.classList.add('node-hover-highlight');
+            this._highlightMesh(nodeId);
+        });
+
+        treeEl.addEventListener('mouseout', (e) => {
+            const row = e.target.closest('.tree-node-row');
+            if (!row || !row._hoverActive) return;
+            // Only unhighlight if actually leaving the row, not entering a child element
+            if (row.contains(e.relatedTarget)) return;
+
+            row._hoverActive = false;
+            row.classList.remove('node-hover-highlight');
+            this._unhighlightAllMeshes();
         });
     }
 
@@ -751,13 +803,45 @@ export class AnalysisPage {
     _selectNodeForPreview(nodeId) {
         if (this._selectedNodeId === nodeId) return;
 
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const targetLi = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(nodeId)}"]`);
+
+        // Case 1: exploded parent (multi-solid or assembly) -> load all children as a scene
+        if (targetLi
+            && this.explodedNodes.has(nodeId)
+            && (targetLi.dataset.nodeType === 'part_multi_solid'
+                || targetLi.dataset.nodeType === 'assembly')) {
+            this._selectedNodeId = nodeId;
+            for (const row of treeEl.querySelectorAll('.tree-node-row')) {
+                const li = row.closest('.tree-node');
+                row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
+            }
+            this._loadMultiSolidScene(nodeId);
+            return;
+        }
+
+        // Case 2: child whose parent scene is already loaded -> highlight in-place
+        if (targetLi
+            && this._multiSolidMeshMap
+            && this._multiSolidMeshMap.has(nodeId)) {
+            this._selectedNodeId = nodeId;
+            this._highlightMesh(nodeId);
+            for (const row of treeEl.querySelectorAll('.tree-node-row')) {
+                const li = row.closest('.tree-node');
+                row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
+            }
+            return;
+        }
+
+        // Case 3: normal single-STL path
         const url = this.stlMap.get(nodeId);
         if (!url) return;
 
         this._selectedNodeId = nodeId;
+        this._multiSolidMeshMap = null;
+        this._multiSolidParentId = null;
+        this._multiSolidDefaultColors = null;
 
-        // Update tree highlighting
-        const treeEl = this.container.querySelector('#assembly-tree-container');
         for (const row of treeEl.querySelectorAll('.tree-node-row')) {
             const li = row.closest('.tree-node');
             row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
@@ -803,7 +887,102 @@ export class AnalysisPage {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Multi-solid scene (hover-to-highlight)
+    // ---------------------------------------------------------------
+
+    /** Scene colours for multi-solid / assembly hover-to-highlight */
+    static _DEFAULT_COLOR = 0x4a90d9;   // blue — everything when no hover
+    static _HIGHLIGHT_COLOR = 0x4a90d9; // blue — hovered item stays blue
+    static _DIM_COLOR = 0x888888;       // grey — non-hovered items
+    static _DEFAULT_OPACITY = 1.0;
+    static _DIM_OPACITY = 0.18;         // smoked glass
+
+    async _loadMultiSolidScene(parentNodeId) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const parentLi = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(parentNodeId)}"]`);
+        if (!parentLi) return;
+
+        // Gather children — from cache (multi-solid) or from DOM (assembly)
+        let children;
+        if (parentLi.dataset.nodeType === 'part_multi_solid') {
+            const chiralKey = parentLi.dataset.chiralKey;
+            children = this._solidChildrenCache.get(chiralKey);
+        } else {
+            // Assembly: direct child <li> nodes from the DOM
+            const childUl = parentLi.querySelector(':scope > ul');
+            if (childUl) {
+                children = Array.from(childUl.querySelectorAll(':scope > .tree-node'))
+                    .map(li => ({ nodeId: li.dataset.nodeId, name: li.dataset.nodeName || li.dataset.nodeId }));
+            }
+        }
+        if (!children || children.length === 0) return;
+
+        const items = [];
+        const meshMap = new Map();
+        const defaultColors = [];
+
+        const DC = AnalysisPage._DEFAULT_COLOR;
+        for (let i = 0; i < children.length; i++) {
+            const url = this.stlMap.get(children[i].nodeId);
+            if (!url) continue;
+            const placement = this._placements.get(children[i].nodeId) || null;
+            items.push({ url, color: DC, opacity: AnalysisPage._DEFAULT_OPACITY, label: children[i].name, placement });
+            meshMap.set(children[i].nodeId, items.length - 1);
+            defaultColors.push(DC);
+        }
+
+        if (items.length === 0) return;
+
+        this._multiSolidMeshMap = meshMap;
+        this._multiSolidParentId = parentNodeId;
+        this._multiSolidDefaultColors = defaultColors;
+
+        const panel = this.container.querySelector('#stl-viewer-panel');
+        if (!panel) return;
+
+        if (!this._viewer) {
+            panel.innerHTML = '';
+            this._viewer = new STLViewer(panel);
+        }
+
+        panel.classList.add('loading');
+        try {
+            await this._viewer.loadScene(items);
+        } finally {
+            panel.classList.remove('loading');
+        }
+    }
+
+    _highlightMesh(nodeId) {
+        if (!this._multiSolidMeshMap || !this._viewer) return;
+        const HL = AnalysisPage._HIGHLIGHT_COLOR;
+        const DIM_C = AnalysisPage._DIM_COLOR;
+        const DIM_O = AnalysisPage._DIM_OPACITY;
+        for (const [nid, idx] of this._multiSolidMeshMap) {
+            if (nid === nodeId) {
+                this._viewer.setMeshColor(idx, HL, 1.0);
+            } else {
+                this._viewer.setMeshColor(idx, DIM_C, DIM_O);
+            }
+        }
+    }
+
+    _unhighlightAllMeshes() {
+        if (!this._multiSolidMeshMap || !this._viewer) return;
+        const DC = AnalysisPage._DEFAULT_COLOR;
+        const OP = AnalysisPage._DEFAULT_OPACITY;
+        for (const [, idx] of this._multiSolidMeshMap) {
+            this._viewer.setMeshColor(idx, DC, OP);
+        }
+    }
+
     _loadInViewer(url) {
+        // Clear multi-solid scene state when loading a single STL
+        this._multiSolidMeshMap = null;
+        this._multiSolidParentId = null;
+        this._multiSolidDefaultColors = null;
+
         const panel = this.container.querySelector('#stl-viewer-panel');
         if (!panel) return;
 

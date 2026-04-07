@@ -279,6 +279,12 @@
     outline-offset: -2px;
 }
 
+.tree-node-row.node-hover-highlight {
+    background: #fef9c3;
+    outline: 1px solid #facc15;
+    outline-offset: -1px;
+}
+
 /* Dim non-selectable, non-classified node names */
 .tree-node-row:not(.node-selectable):not(.node-classified) .tree-node-name {
     opacity: 0.5;
