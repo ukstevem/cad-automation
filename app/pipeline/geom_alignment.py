@@ -172,6 +172,80 @@ def _longest_straight_edge_dir(solid):
     return best_dir, best_len
 
 
+def _voted_edge_direction(solid, ang_tol_deg=5.0, min_edge_len=10.0):
+    """
+    Cluster all straight edges by direction similarity and return the
+    direction of the cluster with the highest cumulative edge length.
+
+    More robust than picking the single longest edge because the extrusion
+    direction typically has many parallel edges (profile corners, web/flange
+    junctions) while anomalous long edges (miter cuts, connection details)
+    are isolated.
+
+    Returns (unit_direction, longest_edge_length_in_cluster) or (None, 0.0).
+    """
+    cos_tol = math.cos(math.radians(ang_tol_deg))
+
+    edges = []  # [(canonical_dir, length)]
+    fexp = TopExp_Explorer(solid, TopAbs_FACE)
+    while fexp.More():
+        f = TopoDS.Face_s(fexp.Current())
+        wexp = TopExp_Explorer(f, TopAbs_WIRE)
+        while wexp.More():
+            w = TopoDS.Wire_s(wexp.Current())
+            eexp = TopExp_Explorer(w, TopAbs_EDGE)
+            while eexp.More():
+                e = TopoDS.Edge_s(eexp.Current())
+                c = BRepAdaptor_Curve(e)
+                if c.GetType() == GeomAbs_Line:
+                    p1 = c.Value(c.FirstParameter())
+                    p2 = c.Value(c.LastParameter())
+                    v = np.array([p2.X() - p1.X(),
+                                  p2.Y() - p1.Y(),
+                                  p2.Z() - p1.Z()], float)
+                    L = float(np.linalg.norm(v))
+                    if L >= min_edge_len:
+                        edges.append((_canon_dir(v / L), L))
+                eexp.Next()
+            wexp.Next()
+        fexp.Next()
+
+    if not edges:
+        return None, 0.0
+
+    # Cluster by direction similarity
+    clusters = []  # [{"dir", "total_len", "count", "longest"}]
+    for d, L in edges:
+        placed = False
+        for c in clusters:
+            if abs(float(np.dot(c["dir"], d))) >= cos_tol:
+                old_total = c["total_len"]
+                new_total = old_total + L
+                new_dir = (c["dir"] * old_total + d * L) / new_total
+                norm = np.linalg.norm(new_dir)
+                if norm > 1e-12:
+                    c["dir"] = _canon_dir(new_dir / norm)
+                c["total_len"] = new_total
+                c["count"] += 1
+                c["longest"] = max(c["longest"], L)
+                placed = True
+                break
+        if not placed:
+            clusters.append({
+                "dir": d.copy(),
+                "total_len": L,
+                "count": 1,
+                "longest": L,
+            })
+
+    if not clusters:
+        return None, 0.0
+
+    clusters.sort(key=lambda c: c["total_len"], reverse=True)
+    best = clusters[0]
+    return best["dir"].copy(), best["longest"]
+
+
 def _longest_wire_dir(solid):
     """If no straight edge found, pick the wire with greatest chord length (end-to-end)."""
     best_len = -1.0
@@ -225,18 +299,38 @@ def _build_frame_and_trsf(dir_x_np: np.ndarray, dir_z_seed_np: np.ndarray):
 
 def align_by_longest_straight_edge(solid, *, debug: bool = False):
     """
-    Minimal, semi-working aligner:
-      1) Use the LONGEST straight edge direction as +X (fallback: longest wire end-to-end).
-      2) Seed +Z from the OBB secondary axis; orthogonalize to X; build RH frame.
+    Aligner using edge-direction voting (primary) or longest straight edge (fallback).
+      1) Cluster all straight edges by direction; pick the cluster with the
+         highest cumulative edge length as +X.  This is more robust than picking
+         the single longest edge because the extrusion direction has many
+         parallel edges while anomalous edges (miter cuts etc.) are isolated.
+      2) Seed +Z from planar-face voting or OBB secondary axis; orthogonalize.
       3) Displace (Z->+Z, X->+X).
     Returns: aligned, trsf, world_cs, None, dx, dy, dz, dbg
     """
-    dbg = {"used": "longest-edge", "longest_edge_len": 0.0}
+    dbg = {"used": "edge-vote", "longest_edge_len": 0.0}
 
-    # 1) choose X
+    # 1) choose X — prefer voted direction, fall back to single longest edge
+    vote_dir, vote_len = _voted_edge_direction(solid)
     edge_dir, edge_len = _longest_straight_edge_dir(solid)
     axes = None
-    if edge_dir is None:
+
+    if vote_dir is not None:
+        X = vote_dir
+        dbg["used"] = "edge-vote"
+        dbg["longest_edge_len"] = float(vote_len)
+        # Diagnostic: flag when voting overrides the single-longest edge
+        if edge_dir is not None:
+            cos_agree = abs(float(np.dot(
+                _canon_dir(vote_dir), _canon_dir(edge_dir))))
+            if cos_agree < math.cos(math.radians(15)):
+                dbg["vote_override"] = True
+                dbg["single_edge_len"] = float(edge_len)
+    elif edge_dir is not None:
+        X = edge_dir
+        dbg["used"] = "longest-edge"
+        dbg["longest_edge_len"] = float(edge_len)
+    else:
         wire_dir, _ = _longest_wire_dir(solid)
         if wire_dir is None:
             axes = _obb_longest_axes(solid)
@@ -245,10 +339,6 @@ def align_by_longest_straight_edge(solid, *, debug: bool = False):
         else:
             X = wire_dir
             dbg["used"] = "longest-wire"
-    else:
-        X = edge_dir
-        dbg["used"] = "longest-edge"
-        dbg["longest_edge_len"] = float(edge_len)
 
     # stabilize sign so X points roughly +globalX
     if X[0] < 0:
@@ -278,6 +368,45 @@ def align_by_longest_straight_edge(solid, *, debug: bool = False):
     BRepBndLib.Add_s(aligned, bb)
     xmin, ymin, zmin, xmax, ymax, zmax = bb.Get()
     if debug:
+        dbg.update({"extents_after": (xmax - xmin, ymax - ymin, zmax - zmin)})
+
+    return aligned, trsf, world_cs, None, dx, dy, dz, (dbg if debug else None)
+
+
+def align_by_obb(solid, *, debug: bool = False):
+    """
+    Align using the Oriented Bounding Box principal axes.
+    OBB longest axis → X, second longest → seed Z.
+    Used as a fallback when edge-based alignment produces implausible geometry.
+    Returns: aligned, trsf, world_cs, None, dx, dy, dz, dbg
+    """
+    axes = _obb_longest_axes(solid)
+    X = axes[0][0] / np.linalg.norm(axes[0][0])
+    if X[0] < 0:
+        X = -X
+
+    Zcand = axes[1][0]
+    Z = Zcand - np.dot(Zcand, X) * X
+    nZ = np.linalg.norm(Z)
+    if nZ < 1e-12:
+        up = np.array([0.0, 0.0, 1.0])
+        if abs(np.dot(up, X)) > 0.9:
+            up = np.array([0.0, 1.0, 0.0])
+        Z = up - np.dot(up, X) * X
+        Z /= np.linalg.norm(Z)
+    else:
+        Z /= nZ
+
+    dx = gp_Dir(float(X[0]), float(X[1]), float(X[2]))
+    dz = gp_Dir(float(Z[0]), float(Z[1]), float(Z[2]))
+    trsf, from_cs, world_cs, dx, dy, dz = _build_xz_frame(dx, dz)
+    aligned = BRepBuilderAPI_Transform(solid, trsf, True).Shape()
+
+    dbg = {"used": "obb-primary"}
+    if debug:
+        bb = Bnd_Box()
+        BRepBndLib.Add_s(aligned, bb)
+        xmin, ymin, zmin, xmax, ymax, zmax = bb.Get()
         dbg.update({"extents_after": (xmax - xmin, ymax - ymin, zmax - zmin)})
 
     return aligned, trsf, world_cs, None, dx, dy, dz, (dbg if debug else None)

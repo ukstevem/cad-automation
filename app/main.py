@@ -146,6 +146,14 @@ async def root():
     }
 
 
+@app.get("/api/v1/config")
+async def frontend_config():
+    """Return environment-driven config for the frontend."""
+    return {
+        "nesting_base_url": settings.NESTING_BASE_URL,
+    }
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

@@ -13,6 +13,12 @@ RUN apt-get update && apt-get install -y \
     libxcursor1 \
     libxinerama1 \
     libmagic1 \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install OCP and CadQuery via conda (not available via pip on Linux)

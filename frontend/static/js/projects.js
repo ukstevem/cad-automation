@@ -215,7 +215,7 @@ export class ProjectsPage {
     }
 
     async _reconnectNesting(taskId) {
-        const NESTING_BASE = 'http://localhost:8001';
+        const NESTING_BASE = await this.api.getNestingBase();
         try {
             const resp = await fetch(
                 `${NESTING_BASE}/api/v1/nesting/status/${encodeURIComponent(taskId)}`
@@ -553,11 +553,20 @@ export class ProjectsPage {
             .sort((a, b) => a[0].localeCompare(b[0]))
             .map(([sec, info]) => `
                 <tr class="nesting-section-row" data-section="${this._esc(sec)}">
-                    <td class="nesting-section-name">${this._esc(sec)}</td>
+                    <td><label class="nesting-include-label"><input type="checkbox" class="nesting-include-chk" checked> ${this._esc(sec)}</label></td>
                     <td class="nesting-section-count">${info.count} pcs</td>
                     <td class="nesting-section-maxlen">${info.maxLen} mm</td>
-                    <td><input type="number" class="nesting-stock-len" min="100" step="100" placeholder="default"></td>
-                    <td><input type="number" class="nesting-stock-qty" min="1" step="1" placeholder="default"></td>
+                    <td colspan="2" class="nesting-stock-cell">
+                        <div class="nesting-stock-entries" data-section="${this._esc(sec)}">
+                            <div class="nesting-stock-entry">
+                                <input type="number" class="nesting-stock-len" min="100" step="100" placeholder="length">
+                                <span class="nesting-stock-x">x</span>
+                                <input type="number" class="nesting-stock-qty" min="1" step="1" placeholder="qty">
+                                <button type="button" class="nesting-stock-remove outline" title="Remove">-</button>
+                            </div>
+                        </div>
+                        <button type="button" class="nesting-stock-add outline" data-section="${this._esc(sec)}" title="Add stock length">+</button>
+                    </td>
                 </tr>
             `).join('');
 
@@ -590,16 +599,12 @@ export class ProjectsPage {
                     </div>
                 </div>
 
-                ${sectionInfo.size > 1 ? `
-                <details class="nesting-overrides-details">
-                    <summary>Per-section stock overrides</summary>
-                    <table class="nesting-overrides-table">
-                        <thead>
-                            <tr><th>Section</th><th>Items</th><th>Max Len</th><th>Stock Len</th><th>Stock Qty</th></tr>
-                        </thead>
-                        <tbody>${sectionRows}</tbody>
-                    </table>
-                </details>` : ''}
+                <table class="nesting-overrides-table">
+                    <thead>
+                        <tr><th>Section</th><th>Items</th><th>Max Len</th><th>Stock (leave blank for default)</th></tr>
+                    </thead>
+                    <tbody>${sectionRows}</tbody>
+                </table>
 
                 <div class="nesting-settings-actions">
                     <button type="button" id="pn-nesting-cancel" class="outline">Cancel</button>
@@ -611,6 +616,35 @@ export class ProjectsPage {
         document.body.appendChild(dialog);
         dialog.showModal();
         dialog.querySelector('#pn-stock-length')?.focus();
+
+        // Add/remove stock entry handlers
+        dialog.addEventListener('click', (e) => {
+            if (e.target.classList.contains('nesting-stock-add')) {
+                const sec = e.target.dataset.section;
+                const container = dialog.querySelector(`.nesting-stock-entries[data-section="${sec}"]`);
+                if (!container) return;
+                const entry = document.createElement('div');
+                entry.className = 'nesting-stock-entry';
+                entry.innerHTML = `
+                    <input type="number" class="nesting-stock-len" min="100" step="100" placeholder="length">
+                    <span class="nesting-stock-x">x</span>
+                    <input type="number" class="nesting-stock-qty" min="1" step="1" placeholder="qty">
+                    <button type="button" class="nesting-stock-remove outline" title="Remove">-</button>
+                `;
+                container.appendChild(entry);
+            }
+            if (e.target.classList.contains('nesting-stock-remove')) {
+                const entry = e.target.closest('.nesting-stock-entry');
+                const container = entry?.parentElement;
+                // Keep at least one entry row
+                if (container && container.querySelectorAll('.nesting-stock-entry').length > 1) {
+                    entry.remove();
+                } else if (entry) {
+                    // Clear the inputs instead of removing the last row
+                    entry.querySelectorAll('input').forEach(i => { i.value = ''; });
+                }
+            }
+        });
 
         dialog.querySelector('#pn-nesting-cancel').addEventListener('click', () => {
             dialog.close();
@@ -627,25 +661,48 @@ export class ProjectsPage {
             this._nestingDefaultStockQty = stockQty;
             this._nestingKerf = kerf;
 
+            // Collect excluded sections and per-section stock overrides
+            const excludedSections = new Set();
             const stockPerSection = [];
             for (const row of dialog.querySelectorAll('.nesting-section-row')) {
                 const sec = row.dataset.section;
-                const len = parseInt(row.querySelector('.nesting-stock-len')?.value);
-                const qty = parseInt(row.querySelector('.nesting-stock-qty')?.value);
-                if (len > 0 && qty > 0) {
-                    stockPerSection.push({ section: sec, stock: [{ length: len, qty }] });
+                const included = row.querySelector('.nesting-include-chk')?.checked;
+                if (!included) {
+                    excludedSections.add(sec);
+                    continue;
                 }
+                // Collect all stock entries for this section
+                const stockEntries = [];
+                for (const entry of row.querySelectorAll('.nesting-stock-entry')) {
+                    const len = parseInt(entry.querySelector('.nesting-stock-len')?.value);
+                    const qty = parseInt(entry.querySelector('.nesting-stock-qty')?.value);
+                    if (len > 0 && qty > 0) {
+                        stockEntries.push({ length: len, qty });
+                    }
+                }
+                if (stockEntries.length > 0) {
+                    stockPerSection.push({ section: sec, stock: stockEntries });
+                }
+            }
+
+            const filteredItems = excludedSections.size > 0
+                ? items.filter(it => !excludedSections.has(it.section))
+                : items;
+
+            if (filteredItems.length === 0) {
+                alert('All sections are excluded. Include at least one section to run nesting.');
+                return;
             }
 
             dialog.close();
             dialog.remove();
-            this._submitNesting(items, stockPerSection, stockLen, stockQty, kerf);
+            this._submitNesting(filteredItems, stockPerSection, stockLen, stockQty, kerf);
         });
 
         dialog.addEventListener('cancel', () => dialog.remove());
     }
 
-    _submitNesting(items, stockPerSection, defaultLen, defaultQty, kerf) {
+    async _submitNesting(items, stockPerSection, defaultLen, defaultQty, kerf) {
         this._nestingRunning = true;
         this._nestingCuttingList = null;
         this._updateNestingButton();
@@ -659,7 +716,7 @@ export class ProjectsPage {
             time_limit: 300.0,
         };
 
-        const NESTING_BASE = 'http://localhost:8001';
+        const NESTING_BASE = await this.api.getNestingBase();
 
         fetch(`${NESTING_BASE}/api/v1/nesting/run`, {
             method: 'POST',
@@ -689,10 +746,10 @@ export class ProjectsPage {
         });
     }
 
-    _pollNesting(taskId) {
+    async _pollNesting(taskId) {
         if (this._nestingPollTimer) clearInterval(this._nestingPollTimer);
 
-        const NESTING_BASE = 'http://localhost:8001';
+        const NESTING_BASE = await this.api.getNestingBase();
         this._renderNestingProgress({ phase: 0, description: 'Starting nesting solver...' });
 
         this._nestingPollTimer = setInterval(() => {
@@ -810,6 +867,7 @@ export class ProjectsPage {
             <div class="nesting-results-header">
                 <span class="nesting-results-title">Cutting List</span>
                 <div class="nesting-results-actions">
+                    <button class="nesting-pdf-btn outline">PDF</button>
                     <button class="nesting-csv-btn outline">CSV</button>
                     <button class="nesting-close-btn outline">x</button>
                 </div>
@@ -935,9 +993,19 @@ export class ProjectsPage {
 
         panel.innerHTML = html;
 
-        panel.querySelector('.nesting-csv-btn')?.addEventListener('click', () => {
+        panel.querySelector('.nesting-pdf-btn')?.addEventListener('click', () => {
+            if (!this._selectedProject) return;
+            const a = document.createElement('a');
+            a.href = this.api.getProjectNestingPdfUrl(this._selectedProject);
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+
+        panel.querySelector('.nesting-csv-btn')?.addEventListener('click', async () => {
             if (!this._nestingTaskId) return;
-            const NESTING_BASE = 'http://localhost:8001';
+            const NESTING_BASE = await this.api.getNestingBase();
             const a = document.createElement('a');
             a.href = `${NESTING_BASE}/api/v1/nesting/cutting-list/${encodeURIComponent(this._nestingTaskId)}/csv`;
             a.download = '';

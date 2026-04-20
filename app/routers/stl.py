@@ -23,6 +23,7 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 _STL_WORKER = Path(__file__).parent.parent / "workers" / "generate_stl.py"
+_IFC_STL_WORKER = Path(__file__).parent.parent / "workers" / "generate_ifc_stl.py"
 _STL_TIMEOUT = 600  # seconds
 
 
@@ -30,6 +31,36 @@ def _stl_output_dir(filename: str) -> Path:
     """Build the per-file STL output directory using the 8-char hex run ID."""
     run_id = filename[:8]
     return Path(settings.STL_OUTPUT_DIR) / run_id
+
+
+def _is_ifc(filename: str) -> bool:
+    return Path(filename).suffix.lower() in settings.IFC_EXTENSIONS
+
+
+def _stl_worker_for(filename: str) -> Path:
+    """Return the STL worker script appropriate for the given upload."""
+    return _IFC_STL_WORKER if _is_ifc(filename) else _STL_WORKER
+
+
+def _reject_unsupported_ifc_mode(filename: str, mode: str) -> None:
+    """Raise 501 for IFC modes we don't yet support (children / solids).
+
+    The IFC worker generates STL for **all** leaves on the first 'all' run.
+    Per-assembly explode and multi-solid explode have no natural mapping for
+    flat Tekla exports, so the corresponding endpoints return a clean 501.
+    """
+    if _is_ifc(filename) and mode != "all":
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail={
+                "error": f"STL {mode!r} mode not yet implemented for IFC files",
+                "filename": filename,
+                "hint": (
+                    "All leaves are meshed on first analysis. "
+                    "Per-assembly explode and solid explode are STEP-only in v1."
+                ),
+            },
+        )
 
 
 async def _run_stl_subprocess(
@@ -43,9 +74,11 @@ async def _run_stl_subprocess(
 
     await proc.communicate() yields the event loop while OCC meshes shapes,
     keeping uvicorn fully responsive so Three.js can fetch generated STL files
-    as soon as each one is written.
+    as soon as each one is written.  IFC uploads are routed to the ifcopenshell-
+    based worker; STEP uploads use the XCAF-based worker.
     """
-    cmd = [sys.executable, str(_STL_WORKER), mode, str(file_path), str(output_dir)]
+    worker = _stl_worker_for(file_path.name)
+    cmd = [sys.executable, str(worker), mode, str(file_path), str(output_dir)]
     if node_id:
         cmd.append(node_id)
 
@@ -93,6 +126,7 @@ async def generate_stl(filename: str) -> Dict[str, Any]:
 
     Idempotent: returns existing task if one is already running or completed.
     """
+    _reject_unsupported_ifc_mode(filename, "all")
     file_path = Path(settings.UPLOAD_DIR) / filename
     if not file_path.exists():
         raise HTTPException(
@@ -124,6 +158,7 @@ async def generate_stl_children(filename: str, parent_id: str) -> Dict[str, Any]
 
     Idempotent: returns existing task if one matches.
     """
+    _reject_unsupported_ifc_mode(filename, "children")
     file_path = Path(settings.UPLOAD_DIR) / filename
     if not file_path.exists():
         raise HTTPException(
@@ -167,6 +202,7 @@ async def generate_stl_solids(filename: str, node_id: str) -> Dict[str, Any]:
 
     Idempotent: returns existing task if one matches.
     """
+    _reject_unsupported_ifc_mode(filename, "solids")
     file_path = Path(settings.UPLOAD_DIR) / filename
     if not file_path.exists():
         raise HTTPException(

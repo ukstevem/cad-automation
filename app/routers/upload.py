@@ -93,24 +93,25 @@ async def upload_step_file(
             }
         }
         
-        # Parse STEP file if requested
-        if parse_geometry:
+        # Parse STEP file if requested. IFC uploads skip this legacy path —
+        # their geometry is extracted by the main /analysis/assembly pipeline.
+        if parse_geometry and file_ext in settings.STEP_EXTENSIONS:
             try:
                 parser = STEPParser(str(file_path))
                 parse_result = parser.parse()
-                
+
                 # Extract geometry
                 geometry_data = parser.extract_geometry()
-                
+
                 response_data["parse_result"] = parse_result
                 response_data["geometry"] = geometry_data
-                
+
                 logger.info(
                     "step_file_parsed",
                     filename=safe_filename,
                     num_shapes=parse_result.get("num_shapes", 0)
                 )
-                
+
             except (STEPParseError, GeometryExtractionError) as e:
                 logger.error(
                     "parsing_failed",
@@ -123,6 +124,11 @@ async def upload_step_file(
                     "details": e.details
                 }
                 response_data["success"] = False
+        elif parse_geometry and file_ext in settings.IFC_EXTENSIONS:
+            response_data["parse_skipped"] = (
+                "parse_geometry=true is ignored for IFC uploads; "
+                "use /api/v1/analysis/assembly/{filename} to extract geometry"
+            )
         
         return JSONResponse(
             status_code=status.HTTP_200_OK,

@@ -35,7 +35,7 @@ from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
 from OCP.ShapeAnalysis import ShapeAnalysis_FreeBounds
 
 from app.exceptions import STEPParseError
-from app.pipeline.geom_alignment import align_by_longest_straight_edge
+from app.pipeline.geom_alignment import align_by_longest_straight_edge, align_by_obb
 from app.pipeline.geometry_utils import (
     compute_obb_geometry,
     compute_section_area,
@@ -368,11 +368,25 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
         _raw_dims_early = sorted([_rxx - _rxn, _ryx - _ryn, _rzx - _rzn], reverse=True)
         _aligned_sorted_early = sorted([L, H, W], reverse=True)
         if _raw_dims_early[0] > 1e-9:
-            _max_infl_early = max(
+            _dim_ratios_early = [
                 a / max(r, 1e-9)
                 for a, r in zip(_aligned_sorted_early, _raw_dims_early)
-            )
+            ]
+            _max_infl_early = max(_dim_ratios_early)
+            _min_ratio_early = min(_dim_ratios_early)
             _alignment_suspect = _raw_dims_early[0] > 20.0 and _max_infl_early > 1.15
+            # For correctly-aligned angled parts the extrusion length grows
+            # (exceeds axis-aligned projection) but the cross-section height
+            # shrinks dramatically.  Mesh-diagonal inflation grows ALL dims.
+            # If any dim ratio dropped below 0.50 the alignment likely found
+            # the true extrusion axis of a shape at an angle — not suspect.
+            if _alignment_suspect and _min_ratio_early < 0.50:
+                _alignment_suspect = False
+                logger.debug("angled_alignment_accepted", ref_id=ref_id,
+                             max_inflation=round(_max_infl_early, 3),
+                             min_ratio=round(_min_ratio_early, 3),
+                             raw_dims=[round(d, 1) for d in _raw_dims_early],
+                             aligned_dims=[round(L, 1), round(H, 1), round(W, 1)])
             if _alignment_suspect:
                 logger.debug("alignment_suspect", ref_id=ref_id,
                              max_inflation=round(_max_infl_early, 3),
@@ -428,6 +442,49 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
         except Exception as e:
             profile_match = None
             logger.warning("classify_profile_failed", ref_id=ref_id, error=str(e))
+
+    # Step 4a: sanity-check — reject if OBB height far exceeds the library
+    # profile height.  This catches false positives from oblique cross-sections
+    # when the alignment picked a non-extrusion axis (e.g. angled parts).
+    if profile_match:
+        _H_lib_chk = profile_match["JSON"]["height"]
+        if H > _H_lib_chk * 1.5 and H > _H_lib_chk + 50:
+            logger.warning("classification_rejected_obb_height",
+                           ref_id=ref_id,
+                           designation=profile_match.get("Designation"),
+                           H_obb=round(H, 1), H_lib=round(_H_lib_chk, 1))
+            # Fallback: try OBB-based re-alignment on the original shape
+            _obb_fallback_ok = False
+            try:
+                _aligned_obb, _trsf_obb, _, _, _, _, _, _ = align_by_obb(shape)
+                _obb_obb = compute_obb_geometry(_aligned_obb)
+                _L_o, _H_o, _W_o = _obb_obb["aligned_extents"]
+                if _L_o >= 20.0:
+                    _sd_o = compute_section_dims(_aligned_obb)
+                    _area_o = _sd_o["area"]
+                    _H_cs_o = _sd_o.get("H") or _H_o
+                    _W_cs_o = _sd_o.get("W") or _W_o
+                    _cs_o = {"span_web": _H_cs_o, "span_flange": _W_cs_o,
+                             "area": _area_o, "length": _L_o}
+                    _match_o = classify_profile(_cs_o, section_lib)
+                    if _match_o:
+                        _H_lib_o = _match_o["JSON"]["height"]
+                        if _H_o <= _H_lib_o * 1.5 or _H_o <= _H_lib_o + 50:
+                            logger.info("obb_realign_match", ref_id=ref_id,
+                                        designation=_match_o.get("Designation"),
+                                        score=_match_o.get("Match_score"),
+                                        L=round(_L_o, 1), H=round(_H_o, 1))
+                            _match_o.setdefault("Diagnostics", {})["obb_realign"] = True
+                            _obb_fallback_ok = True
+                            return _process_section(
+                                _aligned_obb, _obb_obb, _match_o, ref_id,
+                                member_id, solid_idx, file_path, out_dir,
+                                parent_name, project_number, steel_grade)
+            except Exception as e:
+                logger.debug("obb_realign_failed", ref_id=ref_id, error=str(e))
+            if not _obb_fallback_ok:
+                profile_match = None
+                _alignment_suspect = True
 
     if profile_match:
         logger.info("section_match_found", ref_id=ref_id,

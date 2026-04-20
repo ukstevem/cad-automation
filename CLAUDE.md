@@ -317,10 +317,24 @@ docker exec cad-automation-api python -m pytest tests/ -v
 - Asyncio subprocess architecture — event loop stays responsive throughout OCC work
 - All 20 tests passing
 
+## Portal Tree Export
+
+`GET /api/v1/analysis/portal-tree/{filename}` returns a slim payload for the platform portal viewer:
+
+- `runId`, `projectName` (from `cnc_project_number`), `summary`
+- `assembly_tree` — with solid children embedded on `part_multi_solid` nodes and local placements replaced by world-space `placement` (accumulated 4x4 transform), rounded (rotation 3dp, translation 1dp)
+- `stl_map`, `classifications`
+- Excludes: `consolidation`, `cnc_analysis`, `solid_children` (already merged into tree)
+
+Solid children are embedded into the sidecar's `assembly_tree` at save time (`_embed_solid_children` in `_save_project_state`). This means the cad-automation frontend also sees them on re-open — `_createSolidChildrenDOM` is idempotent so it replaces them during restore, but there is a brief render before restore where solid children appear without action buttons.
+
+**Known issue — solid children in sidecar tree**: Embedding children at save time couples the portal export format with the cad-automation frontend's data. A cleaner approach would be to keep the sidecar tree clean (children: []) and only merge during portal-tree export. This avoids the brief no-action-buttons flash on the frontend and keeps the sidecar format as a pure parse cache + separate project_state. Low priority since it's cosmetic only.
+
 ## What's Not Yet Built
 
 - **Mirrored-part STL meshes** — `is_mirrored` is now correctly detected; STL generator still meshes the prototype (non-mirrored) shape; mirrored parts show wrong-handed mesh in viewer
 - **Postprocess consolidation worker** — cross-assembly flat parts list, identify truly unique parts by ref_id across all assembly levels
+- **Portal ancillary data** — world placement, material, shape type, dimensions etc. should move to a separate ancillary JSON fetched on-demand by the portal service, reducing the main portal-tree payload (~4.2 MB → ~2.7 MB for the test file)
 - DXF/DWG output generation (ezdxf is installed but not wired up)
 - NC code generation
 - BOM export (CSV/Excel)

@@ -66,9 +66,9 @@ def main() -> None:
 
     def run() -> None:
         try:
-            from app.parsers.assembly_analyzer import AssemblyAnalyzer
+            from app.parsers import get_assembly_parser
 
-            analyzer = AssemblyAnalyzer(file_path)
+            analyzer = get_assembly_parser(file_path)
             result_holder[0] = analyzer.analyze()
         except Exception as exc:
             error_holder[0] = exc

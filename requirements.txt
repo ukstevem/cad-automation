@@ -12,6 +12,11 @@ filetype==1.2.0
 # NOTE: OCP and cadquery are installed via conda (see Dockerfile)
 # They cannot be installed via pip on Linux.
 
+# IFC parsing (Tekla / Revit / Allplan / etc. — dispatched by vendor)
+# Pinned loosely because wheels for (Python 3.11 / manylinux) ship on a release
+# cadence of their own; the 0.8.x line is stable and supports IFC2X3+IFC4.
+ifcopenshell>=0.7.12,<0.9
+
 # DXF/DWG generation
 ezdxf==1.1.3
 
@@ -21,6 +26,10 @@ pandas==2.1.4
 matplotlib==3.8.2
 openpyxl==3.1.2
 trimesh==4.4.1
+
+# PDF generation
+weasyprint==62.3
+pydyf==0.11.0
 
 # Logging and monitoring
 structlog==24.1.0

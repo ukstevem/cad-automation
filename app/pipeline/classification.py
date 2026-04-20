@@ -1,5 +1,111 @@
 import json
 import math
+import re
+
+
+# Designation matcher: "UB 914x419x388" → ("UB", "914x419x388")
+# Accepts optional separators (space, hyphen, slash, dot) between the category
+# prefix and the rest of the designation.  Decimal values in the tail (e.g.
+# CHS "114.3x6.3") are preserved.
+_NAME_RE = re.compile(r"^\s*([A-Za-z]+)[\s\-\/_]*([0-9.xX\-]+)\s*$")
+
+
+def classify_by_name(type_name, json_path):
+    """Look up an entry in the classifier library by its Tekla-style designation.
+
+    Tekla (and most steel detailers) emit section names like ``UB203x102x23`` or
+    ``PFC 300x100x46`` in ``IfcTypeProduct.Name``.  When that name is present
+    we can skip the four-pass geometric classifier entirely — the name is more
+    reliable than dimensions recovered from a tessellated mesh, and orders of
+    magnitude faster.
+
+    Returns a match dict shaped like :func:`classify_profile`'s return value,
+    or ``None`` if the name can't be parsed or matched.
+    """
+    if not type_name:
+        return None
+
+    m = _NAME_RE.match(str(type_name))
+    if not m:
+        return None
+    category, designation = m.group(1).upper(), m.group(2).lower()
+
+    with open(json_path) as f:
+        lib = json.load(f)
+
+    # Direct category match first (UB → UB section)
+    bucket = lib.get(category)
+    if bucket is None:
+        # Some Tekla catalogues use 'ANG' for EA, 'I' for UB, etc.  Keep a
+        # small aliases map here — extend as new sources appear.
+        aliases = {
+            "ANG": "EA",
+            "ANGLE": "EA",
+            "I": "UB",
+            "HEA": "UC",
+            "HEB": "UC",
+            "IPE": "UB",
+            "UPE": "PFC",
+            "UPN": "PFC",
+        }
+        mapped = aliases.get(category)
+        if mapped:
+            bucket = lib.get(mapped)
+            category = mapped
+    if bucket is None:
+        return None
+
+    entry = bucket.get(designation) or bucket.get(designation.upper())
+    if entry is None:
+        # Some designations omit leading zeros or use different separators —
+        # normalise and compare lowercased.
+        norm_target = designation.replace("-", "x").replace("X", "x")
+        for key, val in bucket.items():
+            if key.lower().replace("-", "x") == norm_target:
+                entry = val
+                designation = key
+                break
+
+    if entry is None:
+        return None
+
+    H = float(entry["height"])
+    W = float(entry["width"])
+    A = float(entry["csa"])
+    return {
+        "Designation": designation,
+        "Category": category,
+        "Profile_type": entry["code_profile"],
+        "Match_score": 0.0,
+        "Requires_rotation": False,
+        "Matched_by": "name",
+        "Source_name": type_name,
+        "JSON": {
+            "height": H,
+            "width": W,
+            "csa": A,
+            "length": 0,
+            "Mass": 0.0,
+            "web_thickness": entry.get("web_thickness", 0.0),
+            "flange_thickness": entry.get("flange_thickness", 0.0),
+            "root_radius": entry.get("root_radius", 0.0),
+            "toe_radius": entry.get("toe_radius", 0.0),
+        },
+        "STEP": {
+            "height": H,
+            "width": W,
+            "area": A,
+            "length": 0.0,
+            "mass": 0.0,
+            "web_thickness": entry.get("web_thickness", 0.0),
+            "flange_thickness": entry.get("flange_thickness", 0.0),
+            "root_radius": entry.get("root_radius", 0.0),
+            "toe_radius": entry.get("toe_radius", 0.0),
+        },
+        "Diagnostics": {
+            "matched_by": "name",
+        },
+    }
 
 
 def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):

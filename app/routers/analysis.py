@@ -13,6 +13,7 @@ from fastapi import APIRouter, Body, HTTPException, status
 import structlog
 
 from app.config import settings
+from app.services.bom_builder import build_step_bom
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker scripts
@@ -27,6 +28,10 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 STEP_EXTENSIONS = {".step", ".stp"}
+# Extensions shown on the Analysis file list (STEP + IFC).  Kept separate from
+# STEP_EXTENSIONS so code that specifically needs STEP-only behaviour still has
+# the narrow set available.
+ANALYSABLE_EXTENSIONS = STEP_EXTENSIONS | {".ifc"}
 
 # Uploaded files are stored as "<8-hex-chars>_<original_name>"
 _PREFIX_RE = re.compile(r"^[0-9a-f]{8}_")
@@ -73,12 +78,32 @@ def _save_analysis(filename: str, analysis_result: dict):
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
         **analysis_result,
     }
+
+    # STEP results don't include native_bom (no metadata to build one from at
+    # parse time). Synthesise placeholder rows from the tree so every leaf
+    # part appears in the BOM immediately; CNC analysis later enriches them.
+    # IFC results already carry native_bom from the parser — leave untouched.
+    if "native_bom" not in analysis_result:
+        tree = analysis_result.get("assembly_tree") or []
+        existing["analysis"]["native_bom"] = build_step_bom(
+            tree,
+            cnc_analysis=existing.get("cnc_analysis"),
+            cnc_member_names=existing.get("cnc_member_names"),
+            parent_names=existing.get("cnc_parent_names"),
+            steel_grade=existing.get("cnc_steel_grade", ""),
+            project_number=existing.get("cnc_project_number", ""),
+        )
+
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     logger.info("analysis_cached", filename=filename, path=str(path))
 
 
 def _save_project_state(filename: str, state: dict):
-    """Update the project_state section of the cache, preserving analysis."""
+    """Update the project_state section of the cache, preserving analysis.
+
+    Also embeds solid_children into assembly_tree nodes so the tree is
+    self-contained for portal consumers.
+    """
     path = _analysis_json_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -90,7 +115,45 @@ def _save_project_state(filename: str, state: dict):
             pass
 
     existing["project_state"] = state
+    _embed_solid_children(existing)
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+
+def _embed_solid_children(cache: dict):
+    """Merge solid_children from project_state into assembly_tree nodes.
+
+    For each ``part_multi_solid`` node, looks up its solid children by chiral
+    key and writes them as proper child nodes with ``node_type: "solid"``.
+    Nodes whose chiral key has no entry in solid_children are left unchanged
+    (children stay as-is — typically ``[]``).
+    """
+    tree = (cache.get("analysis") or {}).get("assembly_tree")
+    solid_children = (cache.get("project_state") or {}).get("solid_children", {})
+    if not tree or not solid_children:
+        return
+
+    def _walk(nodes):
+        for node in nodes:
+            if node.get("node_type") == "part_multi_solid":
+                ref_id = node.get("ref_id", node.get("id", ""))
+                suffix = "M" if node.get("is_mirrored") else "N"
+                children_info = solid_children.get(f"{ref_id}:{suffix}")
+                if children_info:
+                    node["children"] = [
+                        {
+                            "id": child["nodeId"],
+                            "name": child["name"],
+                            "node_type": "solid",
+                            "ref_id": child["nodeId"],
+                            "solid_count": 0,
+                            "children": [],
+                        }
+                        for child in children_info
+                    ]
+            if node.get("children"):
+                _walk(node["children"])
+
+    _walk(tree)
 
 
 def _save_consolidation(filename: str, result: dict):
@@ -153,7 +216,7 @@ async def list_uploaded_files() -> Dict[str, Any]:
 
     files: List[Dict[str, Any]] = []
     for entry in upload_dir.iterdir():
-        if entry.is_file() and entry.suffix.lower() in STEP_EXTENSIONS:
+        if entry.is_file() and entry.suffix.lower() in ANALYSABLE_EXTENSIONS:
             stat = entry.stat()
             uploaded_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
             files.append({
@@ -637,3 +700,76 @@ async def save_project_state(
     _save_project_state(filename, state)
 
     return {"success": True}
+
+
+@router.get("/analysis/portal-tree/{filename}")
+async def get_portal_tree(filename: str) -> Dict[str, Any]:
+    """
+    Return a portal-ready payload: assembly tree (with solid children already
+    embedded), STL map, classifications, and summary metadata.
+
+    Excludes consolidation, cnc_analysis, and other heavy sections that the
+    portal viewer does not need.
+    """
+    cache = _load_cache(filename)
+    if not cache or "analysis" not in cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "No analysis found", "filename": filename},
+        )
+
+    analysis = cache["analysis"]
+    state = cache.get("project_state") or {}
+
+    # runId: 8-char hex prefix of the upload filename
+    run_id = Path(filename).stem.split("_", 1)[0] if "_" in filename else ""
+
+    tree = analysis.get("assembly_tree", [])
+    _add_world_placements(tree)
+
+    return {
+        "runId": run_id,
+        "projectName": cache.get("cnc_project_number", ""),
+        "assembly_tree": tree,
+        "summary": analysis.get("summary", {}),
+        "stl_map": state.get("stl_map", {}),
+        "classifications": state.get("classifications", {}),
+    }
+
+
+# Column-major 4x4 per-index rounding precision:
+#   Rotation  (indices 0-2, 4-6, 8-10) → 3 dp (direction cosines)
+#   Translation (indices 12-14)         → 1 dp (mm)
+#   Fixed       (indices 3, 7, 11, 15)  → 0 dp (always 0 or 1)
+_MAT4_DP = [3, 3, 3, 0, 3, 3, 3, 0, 3, 3, 3, 0, 1, 1, 1, 0]
+_IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+
+
+def _mat4_mul(a: list, b: list) -> list:
+    """Multiply two 4x4 column-major matrices."""
+    r = [0.0] * 16
+    for col in range(4):
+        for row in range(4):
+            r[col * 4 + row] = sum(
+                a[k * 4 + row] * b[col * 4 + k] for k in range(4)
+            )
+    return r
+
+
+def _round_mat4(m: list) -> list:
+    return [round(v, d) for v, d in zip(m, _MAT4_DP)]
+
+
+def _add_world_placements(nodes: list, parent_world: list = _IDENTITY):
+    """Replace local ``placement`` with the world-space transform on every node.
+
+    The field is kept as ``placement`` (what the portal service expects) but
+    now contains the accumulated world transform, not the local one.
+    """
+    for node in nodes:
+        local = node.pop("placement", None) or _IDENTITY
+        world = _mat4_mul(parent_world, local)
+        node["placement"] = _round_mat4(world)
+        children = node.get("children")
+        if children:
+            _add_world_placements(children, world)

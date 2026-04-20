@@ -23,6 +23,7 @@ services:
       - OUTPUT_DIR=/app/outputs
       - ANALYSIS_OUTPUT_DIR=/app/outputs/analysis
       - STL_OUTPUT_DIR=/app/outputs/stl
+      - NESTING_BASE_URL=http://10.0.0.74:8001
     restart: unless-stopped
     networks:
       - cad-network

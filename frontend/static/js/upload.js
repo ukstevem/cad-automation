@@ -5,7 +5,7 @@ import { createCheckRow, createResultCard, createVerdictBanner } from './compone
 import { formatFileSize } from './utils.js';
 
 const MAX_SIZE = 200 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = ['.step', '.stp'];
+const ALLOWED_EXTENSIONS = ['.step', '.stp', '.ifc'];
 
 export class UploadPage {
     constructor(api) {
@@ -22,20 +22,20 @@ export class UploadPage {
     _template() {
         return `
             <section>
-                <h2>Upload STEP File</h2>
-                <p>Drag and drop a STEP file to validate and analyse its geometry.</p>
+                <h2>Upload CAD File</h2>
+                <p>Drag and drop a STEP or IFC file to validate and analyse its geometry.</p>
 
-                <div class="upload-zone" id="drop-zone" tabindex="0" role="button" aria-label="Upload STEP file">
+                <div class="upload-zone" id="drop-zone" tabindex="0" role="button" aria-label="Upload CAD file">
                     <div class="upload-zone-content" id="zone-content">
                         <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                             <polyline points="17 8 12 3 7 8"/>
                             <line x1="12" y1="3" x2="12" y2="15"/>
                         </svg>
-                        <p><strong>Drop STEP file here</strong></p>
-                        <p><small>.step, .stp | Max ${formatFileSize(MAX_SIZE)}</small></p>
+                        <p><strong>Drop STEP or IFC file here</strong></p>
+                        <p><small>.step, .stp, .ifc | Max ${formatFileSize(MAX_SIZE)}</small></p>
                     </div>
-                    <input type="file" id="file-input" accept=".step,.stp" hidden>
+                    <input type="file" id="file-input" accept=".step,.stp,.ifc" hidden>
                 </div>
 
                 <div id="progress-area" hidden>
@@ -218,10 +218,13 @@ export class UploadPage {
             detail: ext || null,
         });
 
+        const isIFC = ext === '.ifc';
         checks.push({
-            label: 'STEP content validated',
+            label: isIFC ? 'IFC content validated' : 'STEP content validated',
             pass: data.success !== false,
-            detail: data.success !== false ? 'Valid STEP header' : 'Invalid content',
+            detail: data.success !== false
+                ? (isIFC ? 'Valid IFC header' : 'Valid STEP header')
+                : 'Invalid content',
         });
 
         const overallPass = checks.every(c => c.pass);

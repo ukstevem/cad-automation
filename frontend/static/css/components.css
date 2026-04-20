@@ -1607,6 +1607,62 @@ details summary {
 .add-analysis-file-item input[type="checkbox"] {
     margin: 0;
 }
+.nesting-include-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    margin-bottom: 0;
+}
+.nesting-include-label input[type="checkbox"] {
+    margin: 0;
+}
+
+/* Multi-stock entries per section */
+.nesting-stock-cell {
+    padding: 0.2rem 0.4rem !important;
+}
+.nesting-stock-entries {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.nesting-stock-entry {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+.nesting-stock-entry .nesting-stock-len {
+    width: 80px;
+    padding: 0.2rem 0.3rem;
+    margin-bottom: 0;
+    font-size: 0.8rem;
+}
+.nesting-stock-entry .nesting-stock-qty {
+    width: 50px;
+    padding: 0.2rem 0.3rem;
+    margin-bottom: 0;
+    font-size: 0.8rem;
+}
+.nesting-stock-x {
+    font-size: 0.75rem;
+    color: #64748b;
+}
+.nesting-stock-remove {
+    padding: 0.1rem 0.4rem !important;
+    margin-bottom: 0 !important;
+    font-size: 0.75rem;
+    line-height: 1;
+    border-color: #94a3b8 !important;
+    color: #94a3b8 !important;
+}
+.nesting-stock-add {
+    margin-top: 0.25rem;
+    padding: 0.1rem 0.5rem !important;
+    margin-bottom: 0 !important;
+    font-size: 0.7rem;
+}
 .nesting-warnings {
     color: #b45309;
     font-size: 0.8rem;

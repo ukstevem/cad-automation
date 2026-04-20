@@ -112,14 +112,14 @@ class FileValidator:
     async def validate_step_content(file: BinaryIO, filename: str) -> bool:
         """
         Validate file content is actually a STEP file
-        
+
         Args:
             file: File object to validate
             filename: Name of the file
-            
+
         Returns:
             bool: True if valid STEP content
-            
+
         Raises:
             FileTypeError: If content is not a valid STEP file
         """
@@ -127,7 +127,7 @@ class FileValidator:
         file.seek(0)
         header = file.read(settings.MAX_STEP_HEADER_SIZE)
         file.seek(0)
-        
+
         # Check for STEP magic bytes
         if not header.startswith(settings.STEP_MAGIC_BYTES):
             raise FileTypeError(
@@ -138,26 +138,62 @@ class FileValidator:
                     "found_header": header[:50].decode('utf-8', errors='ignore')
                 }
             )
-        
+
         # Additional STEP format validation
         header_str = header.decode('utf-8', errors='ignore')
-        
+
         required_sections = ['HEADER;', 'DATA;']
         missing_sections = [s for s in required_sections if s not in header_str]
-        
+
         if missing_sections:
             logger.warning(
                 "step_header_incomplete",
                 filename=filename,
                 missing_sections=missing_sections
             )
-        
+
         logger.info(
             "step_content_validated",
             filename=filename,
             header_valid=True
         )
-        
+
+        return True
+
+    @staticmethod
+    async def validate_ifc_content(file: BinaryIO, filename: str) -> bool:
+        """
+        Validate file content is a STEP-encoded IFC file.
+
+        IFC Part 21 files share the ``ISO-10303-21;`` magic bytes with STEP,
+        but carry ``FILE_SCHEMA(('IFC...'))`` in the HEADER section rather
+        than a STEP application protocol identifier.
+        """
+        file.seek(0)
+        header = file.read(settings.MAX_IFC_HEADER_SIZE)
+        file.seek(0)
+
+        if not header.startswith(settings.STEP_MAGIC_BYTES):
+            raise FileTypeError(
+                "File does not contain valid IFC (ISO-10303-21) header",
+                details={
+                    "filename": filename,
+                    "expected_header": settings.STEP_MAGIC_BYTES.decode('utf-8', errors='ignore'),
+                    "found_header": header[:50].decode('utf-8', errors='ignore'),
+                }
+            )
+
+        header_str = header.decode('utf-8', errors='ignore')
+        if "FILE_SCHEMA" not in header_str or "IFC" not in header_str:
+            raise FileTypeError(
+                "File header is ISO-10303-21 but does not declare an IFC schema",
+                details={
+                    "filename": filename,
+                    "found_header_snippet": header_str[:200],
+                }
+            )
+
+        logger.info("ifc_content_validated", filename=filename, header_valid=True)
         return True
     
     @staticmethod
@@ -180,13 +216,16 @@ class FileValidator:
         try:
             # 1. Validate extension
             file_ext = FileValidator.validate_file_extension(filename)
-            
+
             # 2. Validate size
             file_size = await FileValidator.validate_file_size(file, filename)
-            
-            # 3. Validate STEP content
-            await FileValidator.validate_step_content(file, filename)
-            
+
+            # 3. Validate content — dispatched by extension
+            if file_ext in settings.IFC_EXTENSIONS:
+                await FileValidator.validate_ifc_content(file, filename)
+            else:
+                await FileValidator.validate_step_content(file, filename)
+
             logger.info(
                 "file_validation_complete",
                 filename=filename,
@@ -194,7 +233,7 @@ class FileValidator:
                 size=file_size,
                 status="success"
             )
-            
+
             return file_ext, file_size
             
         except (FileSizeError, FileTypeError) as e:

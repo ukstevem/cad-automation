@@ -11,11 +11,15 @@ class Settings(BaseSettings):
     # File upload settings
     MAX_UPLOAD_SIZE: int = 200 * 1024 * 1024  # 200MB
     UPLOAD_DIR: str = "/uploads"
-    ALLOWED_EXTENSIONS: Set[str] = {".step", ".stp"}
-    
-    # STEP file validation
+    ALLOWED_EXTENSIONS: Set[str] = {".step", ".stp", ".ifc"}
+    STEP_EXTENSIONS: Set[str] = {".step", ".stp"}
+    IFC_EXTENSIONS: Set[str] = {".ifc"}
+
+    # STEP + IFC share the STEP physical file header (ISO-10303-21)
     STEP_MAGIC_BYTES: bytes = b"ISO-10303-21;"
+    # IFC header sniffer needs enough bytes to reach FILE_SCHEMA reliably
     MAX_STEP_HEADER_SIZE: int = 1024  # bytes to read for validation
+    MAX_IFC_HEADER_SIZE: int = 4096
     
     # Processing settings
     TEMP_DIR: str = "/tmp/cad-processing"
@@ -29,6 +33,9 @@ class Settings(BaseSettings):
     STL_LINEAR_DEFLECTION: float = 0.5
     STL_ANGULAR_DEFLECTION: float = 0.5
     
+    # External services
+    NESTING_BASE_URL: str = "http://10.0.0.74:8001"
+
     # API settings
     API_TITLE: str = "CAD Automation API"
     API_VERSION: str = "0.2.0"

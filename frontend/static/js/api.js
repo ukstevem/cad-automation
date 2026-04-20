@@ -5,6 +5,19 @@
 export class ApiClient {
     constructor(baseUrl = '') {
         this.baseUrl = baseUrl;
+        /** @type {string|null} cached nesting service base URL */
+        this._nestingBase = null;
+    }
+
+    /**
+     * Return the nesting service base URL (fetched once from /api/v1/config).
+     */
+    async getNestingBase() {
+        if (!this._nestingBase) {
+            const cfg = await this._get('/api/v1/config');
+            this._nestingBase = cfg.nesting_base_url;
+        }
+        return this._nestingBase;
     }
 
     async getHealth() {
@@ -169,6 +182,10 @@ export class ApiClient {
 
     async getProjectNestingItems(projectNumber) {
         return this._get(`/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-items`);
+    }
+
+    getProjectNestingPdfUrl(projectNumber) {
+        return `${this.baseUrl}/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-pdf`;
     }
 
     async updateProjectNestingTask(projectNumber, nestingTaskId, nestingStartedAt) {

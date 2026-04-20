@@ -188,6 +188,7 @@ export class AnalysisPage {
         this._treeData = null;
         this._cncAnalysisResults = null;
         this._cncAnalysing = false;
+        this._projectStateRestored = false;
         // Note: _lastProjectNumber and _lastSteelGrade are intentionally NOT reset
         // on cleanup so values persist across file selections within the same session.
     }
@@ -200,10 +201,10 @@ export class AnalysisPage {
         return `
             <section>
                 <h2>Assembly Analysis</h2>
-                <p>Select an uploaded STEP file to inspect its assembly hierarchy.</p>
+                <p>Select an uploaded STEP or IFC file to inspect its assembly hierarchy.</p>
 
                 <div class="analysis-controls">
-                    <select id="file-select" aria-label="Select STEP file">
+                    <select id="file-select" aria-label="Select CAD file">
                         <option value="">Loading files...</option>
                     </select>
                     <button id="analyze-btn" disabled>Analyze</button>
@@ -464,6 +465,7 @@ export class AnalysisPage {
         if (data.project_state) {
             this._restoreProjectState(data.project_state);
         }
+        this._projectStateRestored = true;
 
         // Only trigger STL generation if we don't already have cached STL results.
         // _restoreProjectState populates stlMap from project_state.stl_map, so if
@@ -1567,6 +1569,11 @@ export class AnalysisPage {
     async _saveProjectState() {
         const filename = this._currentFilename;
         if (!filename) return;
+
+        // Don't save if project state hasn't been restored yet — avoids
+        // overwriting existing classifications with empty data during the
+        // window between page load and project_state restore.
+        if (!this._projectStateRestored) return;
 
         const state = {
             classifications: Object.fromEntries(this.classifications),
@@ -2997,7 +3004,7 @@ export class AnalysisPage {
     /**
      * Submit the nesting job to the nesting service.
      */
-    _submitNesting(items, stockPerSection, defaultLen, defaultQty, kerf) {
+    async _submitNesting(items, stockPerSection, defaultLen, defaultQty, kerf) {
         this._nestingRunning = true;
         this._nestingResult = null;
         this._nestingCuttingList = null;
@@ -3012,7 +3019,7 @@ export class AnalysisPage {
             time_limit: 300.0,
         };
 
-        const NESTING_BASE = 'http://localhost:8001';
+        const NESTING_BASE = await this.api.getNestingBase();
 
         fetch(`${NESTING_BASE}/api/v1/nesting/run`, {
             method: 'POST',
@@ -3043,10 +3050,10 @@ export class AnalysisPage {
     /**
      * Poll the nesting service for task completion.
      */
-    _pollNesting(taskId) {
+    async _pollNesting(taskId) {
         if (this._nestingPollTimer) clearInterval(this._nestingPollTimer);
 
-        const NESTING_BASE = 'http://localhost:8001';
+        const NESTING_BASE = await this.api.getNestingBase();
 
         // Show initial progress
         this._renderNestingProgress({ phase: 0, description: 'Starting nesting solver\u2026' });
@@ -3228,9 +3235,9 @@ export class AnalysisPage {
         panel.innerHTML = html;
 
         // CSV download
-        panel.querySelector('.nesting-csv-btn')?.addEventListener('click', () => {
+        panel.querySelector('.nesting-csv-btn')?.addEventListener('click', async () => {
             if (!this._nestingTaskId) return;
-            const NESTING_BASE = 'http://localhost:8001';
+            const NESTING_BASE = await this.api.getNestingBase();
             const a = document.createElement('a');
             a.href = `${NESTING_BASE}/api/v1/nesting/cutting-list/${encodeURIComponent(this._nestingTaskId)}/csv`;
             a.download = '';

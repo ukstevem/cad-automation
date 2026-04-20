@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+import httpx
 import structlog
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -156,6 +158,53 @@ async def update_nesting_task(project_number: str, req: UpdateNestingTaskRequest
     return data
 
 
+NESTING_BASE = settings.NESTING_BASE_URL
+
+
+@router.get("/{project_number}/nesting-pdf")
+async def get_nesting_pdf(project_number: str):
+    """
+    Fetch the cutting list from the nesting service for this project's
+    saved task and render it as a PDF report.
+    """
+    from app.services.nesting_pdf import render_cutting_list_pdf
+
+    data = _read_project(project_number)
+    task_id = data.get("nesting_task_id")
+    if not task_id:
+        raise HTTPException(status_code=400, detail="No nesting task saved for this project")
+
+    # Fetch cutting list from nesting service
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{NESTING_BASE}/api/v1/nesting/cutting-list/{task_id}"
+            )
+            resp.raise_for_status()
+            cutting_list = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Nesting service returned {exc.response.status_code}",
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach nesting service: {exc}",
+        )
+
+    pdf_bytes = render_cutting_list_pdf(cutting_list, project_number=project_number)
+
+    safe_name = re.sub(r'[^\w\-]', '_', project_number)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="cutting_list_{safe_name}.pdf"',
+        },
+    )
+
+
 @router.get("/{project_number}/nesting-items")
 async def get_nesting_items(project_number: str):
     """
@@ -193,45 +242,105 @@ async def get_nesting_items(project_number: str):
         member_names = sidecar.get("cnc_member_names", {})
         parent_names = sidecar.get("cnc_parent_names", {})
 
-        # Build ref_id -> instance count from consolidation part_groups
+        # Respect classifications — skip excluded and bought-out parts.
+        # Classifications may be at part level (0:1:1:81) or solid level
+        # (0:1:1:81:s0).  Solid-level exclusions only remove that specific
+        # solid from nesting, leaving other solids in the same weldment.
+        classifications = sidecar.get("project_state", {}).get("classifications", {})
+        excluded_refs = {
+            rid for rid, cls_val in classifications.items()
+            if cls_val in ("exclude", "bought-out")
+        }
+
+        # Build ref_id -> instance count from consolidation part_groups.
+        # A consolidation group may contain multiple ref_ids that are
+        # geometrically identical.  all_node_ids is the total instance
+        # count for the *whole* group, so we must only emit items once
+        # per group — mark the canonical ref_id (the first one with CNC
+        # results) and skip the rest.
         ref_instance_count = {}
+        group_processed = set()   # canonical ref_ids we've already emitted
+        ref_to_group_key = {}     # ref_id -> group key (first ref_id in group)
+
         for group in consolidation.get("part_groups", []):
             ref_ids = group.get("ref_ids", [])
             all_node_ids = group.get("all_node_ids", [])
             count = len(all_node_ids) if all_node_ids else len(ref_ids)
+            group_key = ref_ids[0] if ref_ids else None
             for rid in ref_ids:
                 ref_instance_count[rid] = count
+                ref_to_group_key[rid] = group_key
 
         # Also count from tree if consolidation is missing
         if not ref_instance_count:
             tree = sidecar.get("analysis", {}).get("assembly_tree", [])
+            if not tree:
+                # This sidecar may lack the tree (e.g. CNC-only re-run).
+                # Search sibling sidecars for the same file.
+                tree = _find_tree_for_stem(stem)
             _count_refs(tree, ref_instance_count)
 
         for ref_id, result in cnc.items():
-            if result.get("type") != "section":
+            if ref_id in excluded_refs:
                 continue
-            designation = result.get("designation")
-            dims = result.get("dims", {})
-            length = dims.get("L")
-            if not designation or not length:
+
+            # Collect nestable sections from this CNC entry.
+            # Top-level sections have type=section directly.
+            # Multi-solid weldments have type=multi_solid with nested
+            # solids[] array — each solid may be a section.
+            section_results = []
+
+            if result.get("type") == "section":
+                section_results.append((ref_id, result))
+
+            elif result.get("type") == "multi_solid":
+                for si, solid in enumerate(result.get("solids", [])):
+                    if solid.get("type") != "section":
+                        continue
+                    # Check solid-level exclusion.  The classification key
+                    # uses the enumeration index (e.g. "0:1:1:81:s0").
+                    solid_idx = solid.get("solid_index")
+                    if solid_idx is None:
+                        solid_idx = si
+                    solid_ref = f"{ref_id}:s{solid_idx}"
+                    if solid_ref in excluded_refs:
+                        continue
+                    section_results.append((ref_id, solid))
+
+            if not section_results:
                 continue
+
+            # Skip if another ref_id in the same consolidation group
+            # has already been emitted (avoids double-counting).
+            gk = ref_to_group_key.get(ref_id)
+            if gk is not None:
+                if gk in group_processed:
+                    continue
+                group_processed.add(gk)
 
             instance_count = ref_instance_count.get(ref_id, 1)
             total_count = instance_count * project_qty
             member = member_names.get(ref_id, "")
             parent = parent_names.get(ref_id, "")
 
-            for _ in range(total_count):
-                items.append({
-                    "item_index": idx,
-                    "ref_id": ref_id,
-                    "section": designation,
-                    "length": round(length),
-                    "parent": parent,
-                    "member_name": member,
-                    "source_file": entry.get("display_name") or filename,
-                })
-                idx += 1
+            for _src_ref, sec_result in section_results:
+                designation = sec_result.get("designation")
+                dims = sec_result.get("dims", {})
+                length = dims.get("L")
+                if not designation or not length:
+                    continue
+
+                for _ in range(total_count):
+                    items.append({
+                        "item_index": idx,
+                        "ref_id": ref_id,
+                        "section": designation,
+                        "length": round(length),
+                        "parent": parent,
+                        "member_name": member,
+                        "source_file": entry.get("display_name") or filename,
+                    })
+                    idx += 1
 
     # Collect unique sections
     sections = sorted(set(it["section"] for it in items))
@@ -254,3 +363,41 @@ def _count_refs(nodes: list, counts: dict):
         children = node.get("children", [])
         if children:
             _count_refs(children, counts)
+
+
+def _find_tree_for_stem(stem: str) -> list:
+    """Search analysis sidecars for one that has a tree for the same file.
+
+    Tries exact prefix match first, then falls back to matching the
+    original filename portion (everything after the 8-char hex prefix).
+    """
+    analysis_dir = Path(settings.ANALYSIS_OUTPUT_DIR)
+    prefix = stem[:8]
+
+    # 1) Exact prefix match
+    for f in analysis_dir.glob(f"{prefix}*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            tree = data.get("analysis", {}).get("assembly_tree", [])
+            if tree:
+                return tree
+        except Exception:
+            continue
+
+    # 2) Match by original filename (after the 9-char "prefix_" part)
+    original = stem[9:] if len(stem) > 9 else stem
+    if original:
+        for f in analysis_dir.glob("*.json"):
+            fname = f.stem
+            candidate_original = fname[9:] if len(fname) > 9 else fname
+            if candidate_original != original:
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                tree = data.get("analysis", {}).get("assembly_tree", [])
+                if tree:
+                    return tree
+            except Exception:
+                continue
+
+    return []

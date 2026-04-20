@@ -72,3 +72,9 @@ nul
 *.dxf
 *.csv
 *.json
+*.step
+*.stp
+*.STEP
+*.STP
+*.ifc
+*.IFC

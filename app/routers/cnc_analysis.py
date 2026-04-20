@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse, Response
 import structlog
 
 from app.config import settings
+from app.services.bom_builder import build_step_bom
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker script
@@ -118,8 +119,28 @@ def _save_cnc_analysis(
     if steel_grade:
         existing["cnc_steel_grade"] = steel_grade
 
+    # Rebuild the unified native BOM from the full cnc_analysis dict (not just
+    # this batch) so progressive/resumed runs produce a complete BOM.
+    analysis_section = existing.get("analysis") or {}
+    tree = analysis_section.get("assembly_tree") or []
+    native_bom = build_step_bom(
+        tree,
+        existing.get("cnc_analysis") or {},
+        cnc_member_names=existing.get("cnc_member_names"),
+        parent_names=existing.get("cnc_parent_names"),
+        steel_grade=existing.get("cnc_steel_grade", ""),
+        project_number=existing.get("cnc_project_number", ""),
+    )
+    if native_bom:
+        existing.setdefault("analysis", {})["native_bom"] = native_bom
+
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    logger.info("cnc_analysis_cached", filename=filename, n_refs=len(results))
+    logger.info(
+        "cnc_analysis_cached",
+        filename=filename,
+        n_refs=len(results),
+        bom_rows=len(native_bom),
+    )
 
 
 # ---------------------------------------------------------------
