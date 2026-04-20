@@ -83,6 +83,9 @@ export class AnalysisPage {
         /** @type {Array|null} raw assembly_tree nodes from API response */
         this._treeData = null;
 
+        /** @type {Array|null} unified native BOM rows from analysis.native_bom */
+        this._nativeBom = null;
+
         /** @type {Map<string, number>} refId -> total instance count in tree (for qty display) */
         this._refIdInstanceCount = new Map();
 
@@ -186,6 +189,7 @@ export class AnalysisPage {
         this._intraSolidGroups = null;
         this._consolidating = false;
         this._treeData = null;
+        this._nativeBom = null;
         this._cncAnalysisResults = null;
         this._cncAnalysing = false;
         this._projectStateRestored = false;
@@ -244,8 +248,10 @@ export class AnalysisPage {
 
                 <div id="parts-list-bar" class="parts-list-bar" hidden>
                     <button id="show-parts-list-btn" class="outline">BOM</button>
+                    <button id="show-native-bom-btn" class="outline" title="Full BOM including unclassified and bought-out parts">Full BOM</button>
                 </div>
                 <div id="parts-list-panel" class="parts-list-panel" hidden></div>
+                <div id="native-bom-panel" class="parts-list-panel" hidden></div>
             </section>
         `;
     }
@@ -271,6 +277,8 @@ export class AnalysisPage {
         this.container.addEventListener('click', (e) => {
             if (e.target.id === 'show-parts-list-btn') {
                 this._togglePartsList();
+            } else if (e.target.id === 'show-native-bom-btn') {
+                this._toggleNativeBom();
             }
         });
 
@@ -513,6 +521,7 @@ export class AnalysisPage {
 
         const nodes = data.assembly_tree || [];
         this._treeData = nodes;
+        this._nativeBom = Array.isArray(data.native_bom) ? data.native_bom : [];
         treeEl.innerHTML = '<ul>' + nodes.map(n => this._renderNode(n, 0)).join('') + '</ul>';
 
         this._buildParentMap(nodes, null);
@@ -1409,6 +1418,7 @@ export class AnalysisPage {
         this._updateTreeSelectability();
         this._updateProgress();
         this._debouncedSave();
+        this._refreshNativeBomIfOpen();
 
         // Auto-advance: select next unclassified sibling with an STL
         this._selectNextUnclassified(li);
@@ -1481,6 +1491,7 @@ export class AnalysisPage {
         this._updateTreeSelectability();
         this._updateProgress();
         this._debouncedSave();
+        this._refreshNativeBomIfOpen();
     }
 
     // ---------------------------------------------------------------
@@ -1711,6 +1722,232 @@ export class AnalysisPage {
         ]).finally(() => {
             this._renderPartsList(this._consolidationGroups);
         });
+    }
+
+    // ---------------------------------------------------------------
+    // Unified native BOM view (data-first, from analysis.native_bom)
+    // ---------------------------------------------------------------
+
+    _toggleNativeBom() {
+        const panel = this.container.querySelector('#native-bom-panel');
+        const btn = this.container.querySelector('#show-native-bom-btn');
+        if (!panel) return;
+        if (!panel.hidden) {
+            panel.hidden = true;
+            if (btn) btn.textContent = 'Full BOM';
+            return;
+        }
+        this._renderNativeBom();
+        if (btn) btn.textContent = 'Hide Full BOM';
+    }
+
+    _renderNativeBom() {
+        const panel = this.container.querySelector('#native-bom-panel');
+        if (!panel) return;
+        const rows = this._nativeBom || [];
+
+        if (rows.length === 0) {
+            panel.innerHTML = `
+                <div class="parts-list-card">
+                    <div class="parts-list-header">
+                        <span>Full BOM</span>
+                        <button class="outline parts-list-close native-bom-close">&#x2715;</button>
+                    </div>
+                    <div class="parts-list-empty-msg" style="padding:1rem;">
+                        No native BOM data available for this file. Re-parse to regenerate.
+                    </div>
+                </div>`;
+            panel.hidden = false;
+            panel.querySelector('.native-bom-close')?.addEventListener('click', () => {
+                panel.hidden = true;
+                const btn = this.container.querySelector('#show-native-bom-btn');
+                if (btn) btn.textContent = 'Full BOM';
+            });
+            return;
+        }
+
+        // Detect which optional (IFC/Tekla-specific) columns have any data
+        const hasPhase     = rows.some(r => r.phase != null && r.phase !== '');
+        const hasPour      = rows.some(r => r.pour != null && r.pour !== '');
+        const hasFinish    = rows.some(r => r.finish != null && r.finish !== '');
+        const hasPartClass = rows.some(r => r.part_class != null && r.part_class !== '');
+
+        const sourceLabel = rows[0]?.source === 'ifc' ? 'IFC' : 'STEP';
+        const classifiedCount = rows.filter(r => this.classifications.has(r.node_id)).length;
+
+        const header = `
+            <tr>
+                <th>Mark</th>
+                <th>Entity</th>
+                <th>Profile</th>
+                <th>Grade</th>
+                <th class="nb-num">Length&nbsp;(mm)</th>
+                <th class="nb-num">Weight&nbsp;(kg)</th>
+                <th>Assembly</th>
+                ${hasPhase     ? '<th>Phase</th>'  : ''}
+                ${hasPour      ? '<th>Pour</th>'   : ''}
+                ${hasFinish    ? '<th>Finish</th>' : ''}
+                ${hasPartClass ? '<th>Class</th>'  : ''}
+                <th>Classification</th>
+            </tr>`;
+
+        const body = rows.map(r => this._nativeBomRow(r, {
+            hasPhase, hasPour, hasFinish, hasPartClass,
+        })).join('');
+
+        panel.innerHTML = `
+            <div class="parts-list-card">
+                <div class="parts-list-header">
+                    <span>Full BOM &middot; ${rows.length} parts &middot; ${sourceLabel} &middot; ${classifiedCount} classified</span>
+                    <div class="parts-list-header-actions">
+                        <button class="outline parts-list-close native-bom-close">&#x2715;</button>
+                    </div>
+                </div>
+                <div class="parts-list-scroll">
+                    <table class="parts-list-table native-bom-table">
+                        <thead>${header}</thead>
+                        <tbody>${body}</tbody>
+                    </table>
+                </div>
+            </div>`;
+        panel.hidden = false;
+
+        panel.querySelector('.native-bom-close')?.addEventListener('click', () => {
+            panel.hidden = true;
+            const btn = this.container.querySelector('#show-native-bom-btn');
+            if (btn) btn.textContent = 'Full BOM';
+        });
+
+        panel.querySelector('tbody')?.addEventListener('click', (e) => {
+            const tr = e.target.closest('tr[data-node-id]');
+            if (!tr) return;
+            this._selectAndScrollToNode(this._bomNodeIdToTreeNodeId(tr.dataset.nodeId));
+        });
+    }
+
+    /**
+     * Translate a native-BOM row node_id (instance-based, e.g. "0:1:1:1:1:s0")
+     * into the tree DOM's actual node_id for that element. Exploded solid children
+     * in the tree are keyed by the prototype ref_id ("<refId>:s0"), not the
+     * instance path, so selection must hop through _nodeRefMap.
+     */
+    _bomNodeIdToTreeNodeId(nodeId) {
+        if (!nodeId) return nodeId;
+        const m = nodeId.match(/^(.*):s(\d+)$/);
+        if (m) {
+            const refId = this._nodeRefMap?.get(m[1]);
+            if (refId) return `${refId}:s${m[2]}`;
+        }
+        return nodeId;
+    }
+
+    _nativeBomRow(row, cols) {
+        const nodeId = row.node_id || '';
+        const resolved = this._resolveClassification(nodeId);
+        const displayedCls = resolved
+            ? this._classificationLabel(resolved.action, resolved.origin, resolved.mixed)
+            : '<span class="nb-pending">Pending</span>';
+
+        const length = row.length != null ? this._fmtNumber(row.length, 1) : '';
+        const weight = row.weight != null ? this._fmtNumber(row.weight, 2) : '';
+        const grade = row.grade || row.material || '';
+
+        return `<tr data-node-id="${this._esc(nodeId)}">
+            <td>${this._esc(row.mark || '')}</td>
+            <td><span class="nb-entity">${this._esc(row.entity || '')}</span></td>
+            <td>${this._esc(row.profile || '')}</td>
+            <td>${this._esc(grade)}</td>
+            <td class="nb-num">${length}</td>
+            <td class="nb-num">${weight}</td>
+            <td>${this._esc(row.assembly_mark || '')}</td>
+            ${cols.hasPhase     ? `<td>${this._esc(row.phase ?? '')}</td>` : ''}
+            ${cols.hasPour      ? `<td>${this._esc(row.pour ?? '')}</td>` : ''}
+            ${cols.hasFinish    ? `<td>${this._esc(row.finish ?? '')}</td>` : ''}
+            ${cols.hasPartClass ? `<td>${this._esc(row.part_class ?? '')}</td>` : ''}
+            <td>${displayedCls}</td>
+        </tr>`;
+    }
+
+    _classificationLabel(action, origin, mixed) {
+        if (mixed) return '<span class="nb-cls nb-cls-mixed">Mixed</span>';
+        let badge;
+        if (action === 'postprocess')       badge = '<span class="nb-cls nb-cls-cnc">CNC</span>';
+        else if (action === 'bought-out')   badge = '<span class="nb-cls nb-cls-bo">BO</span>';
+        else if (action === 'exclude')      badge = '<span class="nb-cls nb-cls-exc">EXC</span>';
+        else                                badge = this._esc(action);
+        if (origin === 'parent')   return badge + ' <small>(inherited)</small>';
+        if (origin === 'children') return badge + ' <small>(from components)</small>';
+        return badge;
+    }
+
+    /**
+     * Resolve a BOM row's classification by looking at:
+     *   1. Direct hit on the row's node_id
+     *   2. Parent (strip ":s<N>" suffix — for solid-split rows inheriting from
+     *      the multi-solid parent)
+     *   3. Descendants (any classification keyed under "{nodeId}:..." — for
+     *      placeholder rows where the user classified individual solid children)
+     * Returns {action, origin, mixed} or null if no classification found.
+     */
+    _resolveClassification(nodeId) {
+        if (!nodeId) return null;
+        if (this.classifications.has(nodeId)) {
+            return { action: this.classifications.get(nodeId), origin: 'direct', mixed: false };
+        }
+
+        // Per-solid BOM rows carry instance-based node_ids ("0:1:1:1:1:s0").
+        // The tree's exploded solid children, however, are keyed by the multi-solid
+        // prototype's ref_id ("<refId>:s0") — that's where the user's classification
+        // actually lives. Translate before falling back to structural inheritance.
+        const solidMatch = nodeId.match(/^(.*):s(\d+)$/);
+        if (solidMatch) {
+            const instanceParent = solidMatch[1];
+            const solidIdx = solidMatch[2];
+            const refId = this._nodeRefMap?.get(instanceParent);
+            if (refId) {
+                const refSolidId = `${refId}:s${solidIdx}`;
+                if (this.classifications.has(refSolidId)) {
+                    return { action: this.classifications.get(refSolidId), origin: 'direct', mixed: false };
+                }
+            }
+            // Fallback: parent multi-solid classified at its instance node_id
+            if (this.classifications.has(instanceParent)) {
+                return { action: this.classifications.get(instanceParent), origin: 'parent', mixed: false };
+            }
+        }
+
+        // Placeholder rows: any classification on descendants counts toward this row
+        const childPrefix = nodeId + ':';
+        const childActions = new Set();
+        for (const [nid, action] of this.classifications) {
+            if (nid.startsWith(childPrefix)) childActions.add(action);
+        }
+        // Also check ref_id-keyed solid children (when the row is a multi-solid placeholder)
+        const rowRefId = this._nodeRefMap?.get(nodeId);
+        if (rowRefId && rowRefId !== nodeId) {
+            const refPrefix = rowRefId + ':';
+            for (const [nid, action] of this.classifications) {
+                if (nid.startsWith(refPrefix)) childActions.add(action);
+            }
+        }
+        if (childActions.size === 1) {
+            return { action: [...childActions][0], origin: 'children', mixed: false };
+        }
+        if (childActions.size > 1) {
+            return { action: null, origin: 'children', mixed: true };
+        }
+        return null;
+    }
+
+    _fmtNumber(v, dp) {
+        if (typeof v !== 'number') v = parseFloat(v);
+        if (!Number.isFinite(v)) return '';
+        return v.toFixed(dp).replace(/\.?0+$/, '');
+    }
+
+    _refreshNativeBomIfOpen() {
+        const panel = this.container?.querySelector('#native-bom-panel');
+        if (panel && !panel.hidden) this._renderNativeBom();
     }
 
     /**

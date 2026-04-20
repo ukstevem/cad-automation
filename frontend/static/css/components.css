@@ -1765,3 +1765,48 @@ details summary {
 .nesting-full-detail-content {
     padding: 0.5rem 0.75rem;
 }
+
+/* Unified native BOM (analysis.native_bom) */
+.native-bom-table th,
+.native-bom-table td {
+    white-space: nowrap;
+    font-size: 0.85rem;
+    padding: 0.35rem 0.6rem;
+    vertical-align: middle;
+}
+.native-bom-table .nb-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.native-bom-table tr[data-node-id] {
+    cursor: pointer;
+}
+.native-bom-table tr[data-node-id]:hover {
+    background: #f1f5f9;
+}
+.nb-entity {
+    display: inline-block;
+    font-size: 0.75rem;
+    color: #475569;
+    background: #e2e8f0;
+    padding: 0.08rem 0.45rem;
+    border-radius: 10px;
+}
+.nb-cls {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 10px;
+    color: #fff;
+}
+.nb-cls-cnc   { background: #2563eb; }
+.nb-cls-bo    { background: #16a34a; }
+.nb-cls-exc   { background: #7c3aed; }
+.nb-cls-mixed { background: #d97706; }
+.nb-pending {
+    font-size: 0.75rem;
+    color: #b45309;
+    font-style: italic;
+}
