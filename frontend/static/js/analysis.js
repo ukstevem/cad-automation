@@ -86,6 +86,33 @@ export class AnalysisPage {
         /** @type {Array|null} unified native BOM rows from analysis.native_bom */
         this._nativeBom = null;
 
+        /** @type {'step'|'ifc'} source of the current analysis (determines world-placement handling) */
+        this._source = 'step';
+
+        /** @type {boolean} whether the viewer is showing the full assembly with highlight */
+        this._showFullAssembly = false;
+
+        /** @type {Map<string, number[]>} tree nodeId → column-major 4x4 world transform (STEP only) */
+        this._worldPlacements = new Map();
+
+        /** @type {Map<string, number>} tree nodeId → mesh index in the loaded assembly scene */
+        this._meshIndexByNodeId = new Map();
+
+        /** @type {boolean} whether clicks on meshes build a group selection instead of selecting a tree node */
+        this._groupMode = false;
+
+        /** @type {Set<string>} currently selected node_ids when group mode is on (yet to be grouped) */
+        this._groupSelection = new Set();
+
+        /**
+         * @type {Map<string, {id: string, name: string, node_ids: string[], created_at: string}>}
+         * Custom groups keyed by group id, persisted under project_state.groups.
+         */
+        this.groups = new Map();
+
+        /** @type {string|null} currently isolated group id (everything else dimmed) */
+        this._isolatedGroupId = null;
+
         /** @type {Map<string, number>} refId -> total instance count in tree (for qty display) */
         this._refIdInstanceCount = new Map();
 
@@ -190,6 +217,14 @@ export class AnalysisPage {
         this._consolidating = false;
         this._treeData = null;
         this._nativeBom = null;
+        this._source = 'step';
+        this._showFullAssembly = false;
+        this._worldPlacements?.clear();
+        this._meshIndexByNodeId?.clear();
+        this._groupMode = false;
+        this._groupSelection?.clear();
+        this.groups?.clear();
+        this._isolatedGroupId = null;
         this._cncAnalysisResults = null;
         this._cncAnalysing = false;
         this._projectStateRestored = false;
@@ -238,6 +273,13 @@ export class AnalysisPage {
                         <div id="assembly-tree-container" class="assembly-tree"></div>
                     </div>
                     <div class="workspace-viewer-panel">
+                        <div class="viewer-toolbar">
+                            <button id="show-full-assembly-btn" class="outline" title="Show the whole assembly in place; selected parts highlight">Show Full Assembly</button>
+                            <button id="group-mode-btn" class="outline" title="Toggle group-selection mode: click parts to build a selection, then create a named group" hidden>Group Mode</button>
+                            <span id="group-selection-counter" class="group-selection-counter" hidden></span>
+                            <button id="group-create-btn" class="outline" hidden>Create Group</button>
+                            <button id="group-clear-btn" class="outline" hidden>Clear Selection</button>
+                        </div>
                         <div id="stl-viewer-panel" class="stl-viewer-panel">
                             <div class="stl-viewer-placeholder">
                                 Click a node in the tree to preview its 3D model
@@ -249,9 +291,11 @@ export class AnalysisPage {
                 <div id="parts-list-bar" class="parts-list-bar" hidden>
                     <button id="show-parts-list-btn" class="outline">BOM</button>
                     <button id="show-native-bom-btn" class="outline" title="Full BOM including unclassified and bought-out parts">Full BOM</button>
+                    <button id="show-groups-btn" class="outline" title="Manage custom groupings of parts">Groups</button>
                 </div>
                 <div id="parts-list-panel" class="parts-list-panel" hidden></div>
                 <div id="native-bom-panel" class="parts-list-panel" hidden></div>
+                <div id="groups-panel" class="parts-list-panel" hidden></div>
             </section>
         `;
     }
@@ -279,6 +323,16 @@ export class AnalysisPage {
                 this._togglePartsList();
             } else if (e.target.id === 'show-native-bom-btn') {
                 this._toggleNativeBom();
+            } else if (e.target.id === 'show-groups-btn') {
+                this._toggleGroupsPanel();
+            } else if (e.target.id === 'show-full-assembly-btn') {
+                this._toggleFullAssembly();
+            } else if (e.target.id === 'group-mode-btn') {
+                this._toggleGroupMode();
+            } else if (e.target.id === 'group-create-btn') {
+                this._promptCreateGroup();
+            } else if (e.target.id === 'group-clear-btn') {
+                this._clearGroupSelection();
             }
         });
 
@@ -522,10 +576,12 @@ export class AnalysisPage {
         const nodes = data.assembly_tree || [];
         this._treeData = nodes;
         this._nativeBom = Array.isArray(data.native_bom) ? data.native_bom : [];
+        this._source = (data.summary && data.summary.source) || 'step';
         treeEl.innerHTML = '<ul>' + nodes.map(n => this._renderNode(n, 0)).join('') + '</ul>';
 
         this._buildParentMap(nodes, null);
         this._extractPlacements(nodes);
+        this._computeWorldPlacements(nodes);
         this._bindTreeEvents(treeEl);
 
         // Show the "All Parts" button once the tree is available
@@ -846,7 +902,18 @@ export class AnalysisPage {
 
         // Case 3: normal single-STL path
         const url = this.stlMap.get(nodeId);
-        if (!url) return;
+        if (!url) {
+            // No STL for this node, but if full assembly is on we can still highlight.
+            if (this._showFullAssembly && this._meshIndexByNodeId.has(nodeId)) {
+                this._selectedNodeId = nodeId;
+                for (const row of treeEl.querySelectorAll('.tree-node-row')) {
+                    const li = row.closest('.tree-node');
+                    row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
+                }
+                this._highlightSelectedInAssembly(nodeId);
+            }
+            return;
+        }
 
         this._selectedNodeId = nodeId;
         this._multiSolidMeshMap = null;
@@ -858,7 +925,11 @@ export class AnalysisPage {
             row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
         }
 
-        this._loadInViewer(url);
+        if (this._showFullAssembly) {
+            this._highlightSelectedInAssembly(nodeId);
+        } else {
+            this._loadInViewer(url);
+        }
     }
 
     /**
@@ -1014,6 +1085,516 @@ export class AnalysisPage {
         } else {
             doLoad();
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Full assembly view — load every generated STL, highlight selection
+    // ---------------------------------------------------------------
+
+    /**
+     * Column-major 4x4 matrix multiply (mirrors _mat4_mul in analysis.py).
+     * Used to walk tree nodes and accumulate local placements into world-space.
+     */
+    _matMul4(a, b) {
+        const r = new Array(16).fill(0);
+        for (let col = 0; col < 4; col++) {
+            for (let row = 0; row < 4; row++) {
+                let sum = 0;
+                for (let k = 0; k < 4; k++) {
+                    sum += a[k * 4 + row] * b[col * 4 + k];
+                }
+                r[col * 4 + row] = sum;
+            }
+        }
+        return r;
+    }
+
+    /**
+     * Walk the assembly tree and record each node's world transform.
+     *
+     * STEP: tree nodes carry local placements; world = parent_world × local.
+     * IFC:  tree nodes carry world-space placements AND STLs are generated in
+     *       world coordinates (use-world-coords), so we skip accumulation and
+     *       leave _worldPlacements empty — loadScene will then place meshes
+     *       at origin, which is correct for pre-transformed IFC geometry.
+     */
+    _computeWorldPlacements(nodes) {
+        this._worldPlacements.clear();
+        if (this._source === 'ifc') return;
+
+        const IDENT = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+        const walk = (list, parentMat) => {
+            for (const node of list || []) {
+                const local = Array.isArray(node.placement) && node.placement.length === 16
+                    ? node.placement
+                    : IDENT;
+                const world = this._matMul4(parentMat, local);
+                this._worldPlacements.set(node.id, world);
+                if (node.children && node.children.length > 0) {
+                    walk(node.children, world);
+                }
+            }
+        };
+        walk(nodes, IDENT);
+    }
+
+    async _toggleFullAssembly() {
+        this._showFullAssembly = !this._showFullAssembly;
+        const btn = this.container.querySelector('#show-full-assembly-btn');
+        if (btn) {
+            btn.textContent = this._showFullAssembly ? 'Hide Full Assembly' : 'Show Full Assembly';
+            btn.classList.toggle('viewer-active-toggle', this._showFullAssembly);
+        }
+
+        if (this._showFullAssembly) {
+            await this._loadFullAssemblyView();
+            if (this._selectedNodeId && this._meshIndexByNodeId.has(this._selectedNodeId)) {
+                this._highlightSelectedInAssembly(this._selectedNodeId);
+            }
+        } else {
+            // Exiting full-assembly view — drop group-mode state too.
+            this._groupMode = false;
+            this._groupSelection.clear();
+            this._isolatedGroupId = null;
+            // Revert: if a node is selected with an STL, show it alone; else placeholder.
+            if (this._selectedNodeId && this.stlMap.has(this._selectedNodeId)) {
+                this._loadInViewer(this.stlMap.get(this._selectedNodeId));
+            } else {
+                this._showViewerPlaceholder();
+            }
+        }
+        this._updateGroupToolbar();
+    }
+
+    async _loadFullAssemblyView() {
+        const panel = this.container.querySelector('#stl-viewer-panel');
+        if (!panel) return;
+
+        if (!this.stlMap || this.stlMap.size === 0) {
+            panel.innerHTML = '<div class="stl-viewer-placeholder">STL files not generated yet. Wait for preview generation to complete, then try again.</div>';
+            return;
+        }
+
+        const items = [];
+        for (const [nodeId, url] of this.stlMap) {
+            const placement = this._worldPlacements.get(nodeId);
+            items.push({
+                url,
+                nodeId,
+                placement: (placement && placement.length === 16) ? placement : null,
+                color: 0xaaaaaa,
+                opacity: 1.0,
+            });
+        }
+
+        if (!this._viewer) {
+            panel.innerHTML = '';
+            this._viewer = new STLViewer(panel);
+        }
+
+        panel.classList.add('loading');
+        try {
+            await this._viewer.loadScene(items);
+            this._meshIndexByNodeId.clear();
+            items.forEach((item, i) => this._meshIndexByNodeId.set(item.nodeId, i));
+
+            // Paint each mesh in its classification colour so overall progress
+            // is visible at a glance.
+            this._applyClassificationColors();
+
+            // Picking: left-click a mesh → either toggle group selection (if in
+            // Group Mode) or select the matching tree node.
+            this._viewer.setOnMeshClick((nodeId) => {
+                if (!nodeId) return;
+                if (this._groupMode) {
+                    this._toggleMeshInGroupSelection(nodeId);
+                } else {
+                    this._selectAndScrollToNode(nodeId);
+                }
+            });
+            // Right-click a mesh → classification context menu at the cursor
+            // (disabled while in Group Mode so it doesn't fight selection).
+            this._viewer.setOnMeshContextMenu((nodeId, ev) => {
+                if (!nodeId || this._groupMode) return;
+                this._selectAndScrollToNode(nodeId);
+                this._showMeshContextMenu(nodeId, ev.clientX, ev.clientY);
+            });
+        } catch (err) {
+            console.warn('Full assembly load failed', err);
+        } finally {
+            panel.classList.remove('loading');
+        }
+    }
+
+    _highlightSelectedInAssembly(nodeId) {
+        if (!this._viewer || this._meshIndexByNodeId.size === 0) return;
+        // In group mode the single-node highlight is suppressed; group selection
+        // is what we're visualising. Fall through to the full paint.
+        if (this._groupMode) {
+            this._paintAllMeshes();
+            return;
+        }
+        const HIGHLIGHT = 0xff6600;
+        const isolated = this._isolatedNodeIds();
+        const selectedIdx = this._meshIndexByNodeId.get(nodeId);
+        this._meshIndexByNodeId.forEach((idx, nid) => {
+            if (nid === nodeId && selectedIdx != null) {
+                this._viewer.setMeshColor(idx, HIGHLIGHT, 1.0);
+            } else if (isolated && !isolated.has(nid)) {
+                // A group is isolated — hide everything outside it.
+                this._viewer.setMeshColor(idx, 0xaaaaaa, 0.04);
+            } else {
+                // Keep non-selected parts in their classification colour
+                // (dimmed) so overall progress remains visible while inspecting.
+                const color = this._classificationColorFor(nid);
+                this._viewer.setMeshColor(idx, color, 0.18);
+            }
+        });
+    }
+
+    /**
+     * Paint every mesh considering (in order of precedence):
+     *   1. Isolated group — members at class colour, non-members heavily dimmed
+     *   2. Group-mode selection — selected parts yellow, others at class colour
+     *   3. Classification colour only
+     */
+    _paintAllMeshes() {
+        if (!this._viewer || this._meshIndexByNodeId.size === 0) return;
+        const GROUP_SELECT = 0xfacc15; // yellow — pending group members
+        const isolated = this._isolatedNodeIds();
+        this._meshIndexByNodeId.forEach((idx, nid) => {
+            let color, opacity;
+            if (isolated && !isolated.has(nid)) {
+                color = 0xaaaaaa;
+                opacity = 0.04;
+            } else if (this._groupMode && this._groupSelection.has(nid)) {
+                color = GROUP_SELECT;
+                opacity = 1.0;
+            } else {
+                color = this._classificationColorFor(nid);
+                opacity = 1.0;
+            }
+            this._viewer.setMeshColor(idx, color, opacity);
+        });
+    }
+
+    _isolatedNodeIds() {
+        if (!this._isolatedGroupId) return null;
+        const g = this.groups.get(this._isolatedGroupId);
+        if (!g) return null;
+        return new Set(g.node_ids);
+    }
+
+    // Backwards-compatible alias — some earlier call sites still use this name.
+    _applyClassificationColors() { this._paintAllMeshes(); }
+
+    _classificationColorFor(nodeId) {
+        const resolved = this._resolveClassification(nodeId);
+        if (!resolved) return 0xaaaaaa;               // Unclassified
+        if (resolved.mixed)                return 0xd97706;  // Mixed — amber
+        if (resolved.action === 'postprocess') return 0x2563eb;  // CNC — blue
+        if (resolved.action === 'bought-out')  return 0x16a34a;  // BO — green
+        if (resolved.action === 'exclude')     return 0x7c3aed;  // EXC — purple
+        return 0xaaaaaa;
+    }
+
+    /**
+     * Repaint the assembly view to reflect the current classification state.
+     * No-op unless full assembly is active. Keeps any existing selection
+     * highlight by routing through _highlightSelectedInAssembly.
+     */
+    _refreshAssemblyColors() {
+        if (!this._showFullAssembly) return;
+        if (this._selectedNodeId && this._meshIndexByNodeId.has(this._selectedNodeId)) {
+            this._highlightSelectedInAssembly(this._selectedNodeId);
+        } else {
+            this._applyClassificationColors();
+        }
+    }
+
+    _showViewerPlaceholder() {
+        const panel = this.container.querySelector('#stl-viewer-panel');
+        if (!panel) return;
+        if (this._viewer) {
+            this._viewer.dispose();
+            this._viewer = null;
+        }
+        panel.innerHTML = '<div class="stl-viewer-placeholder">Click a node in the tree to preview its 3D model</div>';
+        this._meshIndexByNodeId.clear();
+    }
+
+    /**
+     * Show a floating classification menu at the given viewport coordinates.
+     * Reuses the tree's _classifyNode / _unclassifyNode so peer-propagation,
+     * progress counter, and project-state save all behave identically to
+     * clicking the buttons on the tree row.
+     */
+    _showMeshContextMenu(nodeId, x, y) {
+        this._dismissMeshContextMenu();
+
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const li = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(nodeId)}"]`);
+        if (!li) return;
+
+        const current = this.classifications.get(nodeId) || null;
+        const label = li.dataset.nodeName || nodeId;
+
+        const menu = document.createElement('div');
+        menu.className = 'viewer-context-menu';
+        menu.innerHTML = `
+            <div class="vcm-header" title="${this._esc(label)}">${this._esc(label)}</div>
+            <button type="button" data-action="postprocess" class="${current === 'postprocess' ? 'vcm-active' : ''}">CNC</button>
+            <button type="button" data-action="bought-out" class="${current === 'bought-out' ? 'vcm-active' : ''}">Bought Out</button>
+            <button type="button" data-action="exclude"    class="${current === 'exclude'    ? 'vcm-active' : ''}">Exclude</button>
+            ${current ? '<button type="button" data-action="unclassify" class="vcm-clear">Clear classification</button>' : ''}
+        `;
+
+        menu.style.position = 'fixed';
+        menu.style.left = `${x}px`;
+        menu.style.top  = `${y}px`;
+        document.body.appendChild(menu);
+
+        // Nudge onto the page if the cursor was near the right/bottom edge
+        const rect = menu.getBoundingClientRect();
+        if (rect.right  > window.innerWidth)  menu.style.left = `${Math.max(0, window.innerWidth  - rect.width  - 4)}px`;
+        if (rect.bottom > window.innerHeight) menu.style.top  = `${Math.max(0, window.innerHeight - rect.height - 4)}px`;
+
+        menu.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            const action = btn.dataset.action;
+            if (action === 'unclassify') {
+                this._unclassifyNode(li, nodeId);
+            } else {
+                this._classifyNode(li, nodeId, action);
+            }
+            this._dismissMeshContextMenu();
+        });
+
+        // Dismiss on any outside pointerdown / Escape. Use capture so OrbitControls
+        // can't swallow the event first.
+        const outside = (e) => {
+            if (!menu.contains(e.target)) this._dismissMeshContextMenu();
+        };
+        const esc = (e) => { if (e.key === 'Escape') this._dismissMeshContextMenu(); };
+        // Defer attachment a tick so the originating contextmenu click doesn't
+        // immediately dismiss the freshly opened menu.
+        setTimeout(() => {
+            document.addEventListener('pointerdown', outside, { capture: true });
+            document.addEventListener('keydown', esc);
+        }, 0);
+
+        this._meshContextMenu = { menu, outside, esc };
+    }
+
+    _dismissMeshContextMenu() {
+        const ctx = this._meshContextMenu;
+        if (!ctx) return;
+        ctx.menu.remove();
+        document.removeEventListener('pointerdown', ctx.outside, { capture: true });
+        document.removeEventListener('keydown', ctx.esc);
+        this._meshContextMenu = null;
+    }
+
+    // ---------------------------------------------------------------
+    // Custom groups — multi-select in the viewer, persisted in project_state
+    // ---------------------------------------------------------------
+
+    _toggleGroupMode() {
+        this._groupMode = !this._groupMode;
+        if (!this._groupMode) {
+            this._groupSelection.clear();
+        }
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
+    }
+
+    _toggleMeshInGroupSelection(nodeId) {
+        if (!nodeId) return;
+        if (this._groupSelection.has(nodeId)) {
+            this._groupSelection.delete(nodeId);
+        } else {
+            this._groupSelection.add(nodeId);
+        }
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
+    }
+
+    _clearGroupSelection() {
+        this._groupSelection.clear();
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
+    }
+
+    _updateGroupToolbar() {
+        const modeBtn   = this.container.querySelector('#group-mode-btn');
+        const createBtn = this.container.querySelector('#group-create-btn');
+        const clearBtn  = this.container.querySelector('#group-clear-btn');
+        const counter   = this.container.querySelector('#group-selection-counter');
+
+        const showModeBtn = !!this._showFullAssembly;
+        const count = this._groupSelection.size;
+
+        if (modeBtn) {
+            modeBtn.hidden = !showModeBtn;
+            modeBtn.textContent = this._groupMode ? 'Exit Group Mode' : 'Group Mode';
+            modeBtn.classList.toggle('viewer-active-toggle', this._groupMode);
+        }
+        if (createBtn) {
+            createBtn.hidden = !(this._groupMode && count > 0);
+        }
+        if (clearBtn) {
+            clearBtn.hidden = !(this._groupMode && count > 0);
+        }
+        if (counter) {
+            counter.hidden = !(this._groupMode && count > 0);
+            counter.textContent = count > 0 ? `${count} selected` : '';
+        }
+    }
+
+    _promptCreateGroup() {
+        const count = this._groupSelection.size;
+        if (count === 0) return;
+        const defaultName = `Group ${this.groups.size + 1}`;
+        const name = (prompt(`Name this group of ${count} part${count === 1 ? '' : 's'}:`, defaultName) || '').trim();
+        if (!name) return;
+
+        // Remove these node_ids from any existing group (uniqueness: one group per node_id).
+        const selected = new Set(this._groupSelection);
+        for (const g of this.groups.values()) {
+            const originalLen = g.node_ids.length;
+            g.node_ids = g.node_ids.filter(nid => !selected.has(nid));
+            if (g.node_ids.length !== originalLen) {
+                g._changed = true;
+            }
+        }
+        // Drop any groups emptied by the reassignment.
+        for (const [gid, g] of [...this.groups]) {
+            if (g.node_ids.length === 0) this.groups.delete(gid);
+        }
+
+        const id = `grp_${Math.random().toString(16).slice(2, 10)}`;
+        const group = {
+            id,
+            name,
+            node_ids: [...selected],
+            created_at: new Date().toISOString(),
+        };
+        this.groups.set(id, group);
+
+        this._groupSelection.clear();
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+    }
+
+    _deleteGroup(groupId) {
+        if (!this.groups.has(groupId)) return;
+        if (!confirm(`Delete group "${this.groups.get(groupId).name}"? The parts remain, just the grouping is removed.`)) return;
+        this.groups.delete(groupId);
+        if (this._isolatedGroupId === groupId) this._isolatedGroupId = null;
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    _toggleIsolateGroup(groupId) {
+        this._isolatedGroupId = this._isolatedGroupId === groupId ? null : groupId;
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    _renameGroup(groupId) {
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        const name = (prompt('Rename group:', g.name) || '').trim();
+        if (!name || name === g.name) return;
+        g.name = name;
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+    }
+
+    _toggleGroupsPanel() {
+        const panel = this.container.querySelector('#groups-panel');
+        const btn = this.container.querySelector('#show-groups-btn');
+        if (!panel) return;
+        if (!panel.hidden) {
+            panel.hidden = true;
+            if (btn) btn.textContent = 'Groups';
+            return;
+        }
+        this._renderGroupsPanel();
+        if (btn) btn.textContent = 'Hide Groups';
+    }
+
+    _renderGroupsPanelIfOpen() {
+        const panel = this.container?.querySelector('#groups-panel');
+        if (panel && !panel.hidden) this._renderGroupsPanel();
+    }
+
+    _renderGroupsPanel() {
+        const panel = this.container.querySelector('#groups-panel');
+        if (!panel) return;
+        const entries = [...this.groups.values()];
+
+        const emptyMsg = `
+            <div class="parts-list-empty-msg" style="padding:1rem;">
+                No groups yet. Turn on <strong>Show Full Assembly</strong>, enable <strong>Group Mode</strong>,
+                click parts in the viewer, then <strong>Create Group</strong>.
+            </div>`;
+
+        const rows = entries.map(g => {
+            const isolated = this._isolatedGroupId === g.id;
+            return `<tr data-group-id="${this._esc(g.id)}" class="${isolated ? 'group-isolated' : ''}">
+                <td>${this._esc(g.name)}</td>
+                <td class="parts-list-qty">${g.node_ids.length}</td>
+                <td class="group-actions">
+                    <button class="outline group-isolate-btn" title="Dim everything except this group">${isolated ? 'Clear Isolate' : 'Isolate'}</button>
+                    <button class="outline group-rename-btn">Rename</button>
+                    <button class="outline group-delete-btn">Delete</button>
+                </td>
+            </tr>`;
+        }).join('');
+
+        panel.innerHTML = `
+            <div class="parts-list-card">
+                <div class="parts-list-header">
+                    <span>Groups${entries.length > 0 ? ' &middot; ' + entries.length : ''}</span>
+                    <div class="parts-list-header-actions">
+                        <button class="outline parts-list-close groups-panel-close">&#x2715;</button>
+                    </div>
+                </div>
+                <div class="parts-list-scroll">
+                    ${entries.length === 0 ? emptyMsg : `
+                        <table class="parts-list-table">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th class="parts-list-qty">Parts</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>`}
+                </div>
+            </div>`;
+        panel.hidden = false;
+
+        panel.querySelector('.groups-panel-close')?.addEventListener('click', () => {
+            panel.hidden = true;
+            const btn = this.container.querySelector('#show-groups-btn');
+            if (btn) btn.textContent = 'Groups';
+        });
+
+        panel.querySelector('tbody')?.addEventListener('click', (e) => {
+            const tr = e.target.closest('tr[data-group-id]');
+            if (!tr) return;
+            const gid = tr.dataset.groupId;
+            if (e.target.closest('.group-isolate-btn')) this._toggleIsolateGroup(gid);
+            else if (e.target.closest('.group-rename-btn')) this._renameGroup(gid);
+            else if (e.target.closest('.group-delete-btn')) this._deleteGroup(gid);
+        });
     }
 
     // ---------------------------------------------------------------
@@ -1419,6 +2000,7 @@ export class AnalysisPage {
         this._updateProgress();
         this._debouncedSave();
         this._refreshNativeBomIfOpen();
+        this._refreshAssemblyColors();
 
         // Auto-advance: select next unclassified sibling with an STL
         this._selectNextUnclassified(li);
@@ -1492,6 +2074,7 @@ export class AnalysisPage {
         this._updateProgress();
         this._debouncedSave();
         this._refreshNativeBomIfOpen();
+        this._refreshAssemblyColors();
     }
 
     // ---------------------------------------------------------------
@@ -1556,6 +2139,19 @@ export class AnalysisPage {
             }
         }
 
+        // Restore custom groups
+        if (state.groups && typeof state.groups === 'object') {
+            for (const [gid, g] of Object.entries(state.groups)) {
+                if (!g || !Array.isArray(g.node_ids)) continue;
+                this.groups.set(gid, {
+                    id: g.id || gid,
+                    name: g.name || gid,
+                    node_ids: g.node_ids.slice(),
+                    created_at: g.created_at || null,
+                });
+            }
+        }
+
         // Apply selectability based on restored state
         this._updateTreeSelectability();
         this._updateProgress();
@@ -1591,6 +2187,7 @@ export class AnalysisPage {
             exploded_nodes: Array.from(this.explodedNodes),
             stl_map: Object.fromEntries(this.stlMap),
             solid_children: Object.fromEntries(this._solidChildrenCache),
+            groups: Object.fromEntries(this.groups),
         };
 
         try {

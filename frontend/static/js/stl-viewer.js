@@ -62,10 +62,65 @@ export class STLViewer {
         this._animId = null;
         this._loadGen = 0;
 
+        // Picking
+        this._raycaster = new THREE.Raycaster();
+        this._ndc = new THREE.Vector2();
+        this._onMeshClickCb = null;
+        this._onMeshContextCb = null;
+        this._pointerDownPos = null;
+
+        const canvas = this.renderer.domElement;
+        canvas.addEventListener('pointerdown', (e) => {
+            this._pointerDownPos = { x: e.clientX, y: e.clientY, button: e.button };
+        });
+        canvas.addEventListener('pointerup', (e) => {
+            const start = this._pointerDownPos;
+            this._pointerDownPos = null;
+            if (!start) return;
+            const dx = e.clientX - start.x;
+            const dy = e.clientY - start.y;
+            if (dx * dx + dy * dy > 25) return;     // was a drag, not a click
+            if (start.button !== e.button) return;  // mismatched button
+            const hit = this._pick(e);
+            if (!hit) return;
+            if (e.button === 0 && this._onMeshClickCb)   this._onMeshClickCb(hit);
+            if (e.button === 2 && this._onMeshContextCb) this._onMeshContextCb(hit, e);
+        });
+        canvas.addEventListener('contextmenu', (e) => {
+            // Prevent default only when a right-click handler is installed — otherwise
+            // users lose the browser's normal context menu on the 3D viewer.
+            if (this._onMeshContextCb) e.preventDefault();
+        });
+
         this._resizeObserver = new ResizeObserver(() => this._onResize());
         this._resizeObserver.observe(containerEl);
 
         this._animate();
+    }
+
+    /**
+     * Register a callback fired when a mesh in a multi-mesh scene is clicked.
+     * Callback receives the nodeId stored in mesh.userData.nodeId (set by
+     * loadScene from item.nodeId).
+     */
+    setOnMeshClick(cb) {
+        this._onMeshClickCb = cb;
+    }
+
+    setOnMeshContextMenu(cb) {
+        this._onMeshContextCb = cb;
+    }
+
+    _pick(event) {
+        if (this._meshes.length === 0) return null;
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        this._ndc.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+        this._ndc.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+        this._raycaster.setFromCamera(this._ndc, this.camera);
+        const objects = this._meshes.filter(m => m).map(m => m.mesh);
+        const hits = this._raycaster.intersectObjects(objects, false);
+        if (hits.length === 0) return null;
+        return hits[0].object.userData?.nodeId || null;
     }
 
     // ── Single-mesh loading (backward compat) ────────────────────────
@@ -158,6 +213,9 @@ export class STLViewer {
                         });
 
                         const mesh = new THREE.Mesh(geometry, material);
+                        if (item.nodeId) {
+                            mesh.userData.nodeId = item.nodeId;
+                        }
 
                         // Apply instance placement transform if provided
                         if (item.placement && item.placement.length === 16) {

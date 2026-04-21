@@ -696,6 +696,7 @@ async def save_project_state(
         "exploded_nodes": body.get("exploded_nodes", []),
         "stl_map": body.get("stl_map", {}),
         "solid_children": body.get("solid_children", {}),
+        "groups": body.get("groups", {}),
     }
     _save_project_state(filename, state)
 

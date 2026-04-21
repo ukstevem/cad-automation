@@ -1810,3 +1810,104 @@ details summary {
     color: #b45309;
     font-style: italic;
 }
+
+/* Viewer toolbar (above the 3D preview) */
+.viewer-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.5rem;
+    background: #f8fafc;
+    border: 1px solid var(--cad-border, #e2e8f0);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+}
+.viewer-toolbar button {
+    margin: 0;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.85rem;
+}
+.viewer-toolbar button.viewer-active-toggle {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+}
+
+/* Viewer right-click classification menu */
+.viewer-context-menu {
+    background: #fff;
+    border: 1px solid var(--cad-border, #e2e8f0);
+    border-radius: 6px;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+    padding: 0.35rem 0;
+    min-width: 160px;
+    max-width: 280px;
+    z-index: 10000;
+    font-size: 0.85rem;
+}
+.viewer-context-menu .vcm-header {
+    padding: 0.35rem 0.75rem;
+    font-weight: 600;
+    color: #475569;
+    border-bottom: 1px solid var(--cad-border, #e2e8f0);
+    margin-bottom: 0.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.viewer-context-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.4rem 0.75rem;
+    background: transparent;
+    border: none;
+    color: #334155;
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1.2;
+    border-radius: 0;
+}
+.viewer-context-menu button:hover {
+    background: #f1f5f9;
+}
+.viewer-context-menu button.vcm-active {
+    color: #2563eb;
+    font-weight: 600;
+}
+.viewer-context-menu button.vcm-clear {
+    color: #b45309;
+    border-top: 1px solid var(--cad-border, #e2e8f0);
+    margin-top: 0.25rem;
+    padding-top: 0.45rem;
+}
+
+/* Group mode toolbar bits */
+.group-selection-counter {
+    display: inline-block;
+    padding: 0.25rem 0.6rem;
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fcd34d;
+    border-radius: 10px;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+/* Groups panel action cells */
+.group-actions {
+    display: flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+}
+.group-actions button {
+    margin: 0;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+}
+tr.group-isolated {
+    background: #fef3c7;
+}
+tr.group-isolated td {
+    font-weight: 600;
+}
