@@ -113,6 +113,12 @@ export class AnalysisPage {
         /** @type {string|null} currently isolated group id (everything else dimmed) */
         this._isolatedGroupId = null;
 
+        /** @type {Set<string>} group ids currently hidden from the viewer */
+        this._hiddenGroupIds = new Set();
+
+        /** @type {Set<string>} group ids whose member list is expanded in the panel */
+        this._expandedGroups = new Set();
+
         /** @type {Map<string, number>} refId -> total instance count in tree (for qty display) */
         this._refIdInstanceCount = new Map();
 
@@ -225,6 +231,8 @@ export class AnalysisPage {
         this._groupSelection?.clear();
         this.groups?.clear();
         this._isolatedGroupId = null;
+        this._hiddenGroupIds?.clear();
+        this._expandedGroups?.clear();
         this._cncAnalysisResults = null;
         this._cncAnalysing = false;
         this._projectStateRestored = false;
@@ -278,7 +286,10 @@ export class AnalysisPage {
                             <button id="group-mode-btn" class="outline" title="Toggle group-selection mode: click parts to build a selection, then create a named group" hidden>Group Mode</button>
                             <span id="group-selection-counter" class="group-selection-counter" hidden></span>
                             <button id="group-create-btn" class="outline" hidden>Create Group</button>
+                            <button id="group-add-btn" class="outline" hidden>Add to Group…</button>
                             <button id="group-clear-btn" class="outline" hidden>Clear Selection</button>
+                            <button id="viewer-groups-btn" class="outline" title="Open the groups panel" hidden>Groups</button>
+                            <button id="viewer-maximize-btn" class="outline viewer-maximize-btn" title="Maximise viewer (Esc to restore)" aria-label="Maximise viewer">&#x26F6;</button>
                         </div>
                         <div id="stl-viewer-panel" class="stl-viewer-panel">
                             <div class="stl-viewer-placeholder">
@@ -331,8 +342,24 @@ export class AnalysisPage {
                 this._toggleGroupMode();
             } else if (e.target.id === 'group-create-btn') {
                 this._promptCreateGroup();
+            } else if (e.target.id === 'group-add-btn') {
+                this._showAddToGroupPicker(e.target);
             } else if (e.target.id === 'group-clear-btn') {
                 this._clearGroupSelection();
+            } else if (e.target.id === 'viewer-groups-btn') {
+                this._toggleGroupsPanel();
+            } else if (e.target.closest('#viewer-maximize-btn')) {
+                this._toggleViewerMaximized();
+            }
+        });
+
+        // Esc restores the viewer from maximised state.
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const panel = this.container?.querySelector('.workspace-viewer-panel');
+                if (panel?.classList.contains('viewer-maximized')) {
+                    this._toggleViewerMaximized();
+                }
             }
         });
 
@@ -1212,12 +1239,17 @@ export class AnalysisPage {
                     this._selectAndScrollToNode(nodeId);
                 }
             });
-            // Right-click a mesh → classification context menu at the cursor
-            // (disabled while in Group Mode so it doesn't fight selection).
+            // Right-click a mesh → context menu.
+            //   * Group Mode  → group-membership actions (remove from group).
+            //   * Otherwise   → classification (CNC / BO / EXC).
             this._viewer.setOnMeshContextMenu((nodeId, ev) => {
-                if (!nodeId || this._groupMode) return;
-                this._selectAndScrollToNode(nodeId);
-                this._showMeshContextMenu(nodeId, ev.clientX, ev.clientY);
+                if (!nodeId) return;
+                if (this._groupMode) {
+                    this._showGroupContextMenu(nodeId, ev.clientX, ev.clientY);
+                } else {
+                    this._selectAndScrollToNode(nodeId);
+                    this._showMeshContextMenu(nodeId, ev.clientX, ev.clientY);
+                }
             });
         } catch (err) {
             console.warn('Full assembly load failed', err);
@@ -1236,16 +1268,23 @@ export class AnalysisPage {
         }
         const HIGHLIGHT = 0xff6600;
         const isolated = this._isolatedNodeIds();
+        const hidden = this._hiddenNodeIds();
         const selectedIdx = this._meshIndexByNodeId.get(nodeId);
         this._meshIndexByNodeId.forEach((idx, nid) => {
+            // A mesh is visible only when (a) it's within the isolate filter,
+            // if any; AND (b) it isn't marked hidden by any hide-group flag.
+            // Hide stacks on isolate — so you can isolate a parent group and
+            // still hide one of its children.
+            const inIsolate = !isolated || isolated.has(nid);
+            const inHide    = hidden && hidden.has(nid);
+            if (!inIsolate || inHide) {
+                this._viewer.setMeshVisible(idx, false);
+                return;
+            }
+            this._viewer.setMeshVisible(idx, true);
             if (nid === nodeId && selectedIdx != null) {
                 this._viewer.setMeshColor(idx, HIGHLIGHT, 1.0);
-            } else if (isolated && !isolated.has(nid)) {
-                // A group is isolated — hide everything outside it.
-                this._viewer.setMeshColor(idx, 0xaaaaaa, 0.04);
             } else {
-                // Keep non-selected parts in their classification colour
-                // (dimmed) so overall progress remains visible while inspecting.
                 const color = this._classificationColorFor(nid);
                 this._viewer.setMeshColor(idx, color, 0.18);
             }
@@ -1254,7 +1293,7 @@ export class AnalysisPage {
 
     /**
      * Paint every mesh considering (in order of precedence):
-     *   1. Isolated group — members at class colour, non-members heavily dimmed
+     *   1. Isolated group — members fully visible, non-members completely hidden
      *   2. Group-mode selection — selected parts yellow, others at class colour
      *   3. Classification colour only
      */
@@ -1262,12 +1301,17 @@ export class AnalysisPage {
         if (!this._viewer || this._meshIndexByNodeId.size === 0) return;
         const GROUP_SELECT = 0xfacc15; // yellow — pending group members
         const isolated = this._isolatedNodeIds();
+        const hidden = this._hiddenNodeIds();
         this._meshIndexByNodeId.forEach((idx, nid) => {
+            const inIsolate = !isolated || isolated.has(nid);
+            const inHide    = hidden && hidden.has(nid);
+            if (!inIsolate || inHide) {
+                this._viewer.setMeshVisible(idx, false);
+                return;
+            }
+            this._viewer.setMeshVisible(idx, true);
             let color, opacity;
-            if (isolated && !isolated.has(nid)) {
-                color = 0xaaaaaa;
-                opacity = 0.04;
-            } else if (this._groupMode && this._groupSelection.has(nid)) {
+            if (this._groupMode && this._groupSelection.has(nid)) {
                 color = GROUP_SELECT;
                 opacity = 1.0;
             } else {
@@ -1282,7 +1326,52 @@ export class AnalysisPage {
         if (!this._isolatedGroupId) return null;
         const g = this.groups.get(this._isolatedGroupId);
         if (!g) return null;
-        return new Set(g.node_ids);
+        const out = this._groupNodeIdsRecursive(this._isolatedGroupId);
+        return out.size > 0 ? out : null;
+    }
+
+    /** Union of node_ids belonging to any group currently flagged Hidden (including descendants). */
+    _hiddenNodeIds() {
+        if (this._hiddenGroupIds.size === 0) return null;
+        const out = new Set();
+        for (const gid of this._hiddenGroupIds) {
+            for (const nid of this._groupNodeIdsRecursive(gid)) out.add(nid);
+        }
+        return out.size > 0 ? out : null;
+    }
+
+    /** Direct child groups of ``parentId`` (or all top-level when parentId is null). */
+    _groupChildrenOf(parentId) {
+        const out = [];
+        for (const g of this.groups.values()) {
+            if ((g.parent_id || null) === parentId) out.push(g);
+        }
+        return out;
+    }
+
+    /** Return the set of node_ids in ``groupId`` and all descendant groups. */
+    _groupNodeIdsRecursive(groupId) {
+        const out = new Set();
+        const visit = (gid) => {
+            const g = this.groups.get(gid);
+            if (!g) return;
+            for (const nid of g.node_ids) out.add(nid);
+            for (const child of this._groupChildrenOf(gid)) visit(child.id);
+        };
+        visit(groupId);
+        return out;
+    }
+
+    /** Collect ids of ``groupId`` and all its descendants — used for cycle prevention. */
+    _groupAndDescendantIds(groupId) {
+        const out = new Set();
+        const visit = (gid) => {
+            if (out.has(gid)) return;
+            out.add(gid);
+            for (const child of this._groupChildrenOf(gid)) visit(child.id);
+        };
+        visit(groupId);
+        return out;
     }
 
     // Backwards-compatible alias — some earlier call sites still use this name.
@@ -1396,6 +1485,61 @@ export class AnalysisPage {
         this._meshContextMenu = null;
     }
 
+    /**
+     * Right-click context menu shown *only in Group Mode*.  Tells the user
+     * which group the clicked part belongs to (and its breadcrumb path), and
+     * offers a single "Remove from group" action.  No classification here —
+     * that stays in the non-group-mode menu.
+     */
+    _showGroupContextMenu(nodeId, x, y) {
+        this._dismissMeshContextMenu();
+
+        const label = this._nodeLabelFor(nodeId) || nodeId;
+        const groupEntry = this._groupContainingNodeId(nodeId);
+
+        const menu = document.createElement('div');
+        menu.className = 'viewer-context-menu';
+        menu.innerHTML = `
+            <div class="vcm-header" title="${this._esc(label)}">${this._esc(label)}</div>
+            ${groupEntry ? `
+                <div class="vcm-subheader" title="${this._esc(groupEntry.groupPath)}">In group: ${this._esc(groupEntry.groupPath)}</div>
+                <button type="button" data-action="remove-from-group"
+                        data-group-id="${this._esc(groupEntry.group.id)}"
+                        class="vcm-clear">Remove from group</button>
+            ` : `
+                <div class="vcm-subheader" style="font-style:italic;color:#64748b;">Not in any group</div>
+            `}
+            <button type="button" data-action="cancel">Cancel</button>
+        `;
+
+        menu.style.position = 'fixed';
+        menu.style.left = `${x}px`;
+        menu.style.top  = `${y}px`;
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        if (rect.right  > window.innerWidth)  menu.style.left = `${Math.max(0, window.innerWidth  - rect.width  - 4)}px`;
+        if (rect.bottom > window.innerHeight) menu.style.top  = `${Math.max(0, window.innerHeight - rect.height - 4)}px`;
+
+        menu.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            const action = btn.dataset.action;
+            if (action === 'remove-from-group') {
+                this._removeNodeFromGroup(btn.dataset.groupId, nodeId);
+            }
+            this._dismissMeshContextMenu();
+        });
+
+        const outside = (e) => { if (!menu.contains(e.target)) this._dismissMeshContextMenu(); };
+        const esc = (e) => { if (e.key === 'Escape') this._dismissMeshContextMenu(); };
+        setTimeout(() => {
+            document.addEventListener('pointerdown', outside, { capture: true });
+            document.addEventListener('keydown', esc);
+        }, 0);
+        this._meshContextMenu = { menu, outside, esc };
+    }
+
     // ---------------------------------------------------------------
     // Custom groups — multi-select in the viewer, persisted in project_state
     // ---------------------------------------------------------------
@@ -1431,6 +1575,8 @@ export class AnalysisPage {
         const createBtn = this.container.querySelector('#group-create-btn');
         const clearBtn  = this.container.querySelector('#group-clear-btn');
         const counter   = this.container.querySelector('#group-selection-counter');
+        const groupsBtn = this.container.querySelector('#viewer-groups-btn');
+        const groupsPanel = this.container.querySelector('#groups-panel');
 
         const showModeBtn = !!this._showFullAssembly;
         const count = this._groupSelection.size;
@@ -1446,9 +1592,19 @@ export class AnalysisPage {
         if (clearBtn) {
             clearBtn.hidden = !(this._groupMode && count > 0);
         }
+        const addBtn = this.container.querySelector('#group-add-btn');
+        if (addBtn) {
+            addBtn.hidden = !(this._groupMode && count > 0 && this.groups.size > 0);
+        }
         if (counter) {
             counter.hidden = !(this._groupMode && count > 0);
             counter.textContent = count > 0 ? `${count} selected` : '';
+        }
+        if (groupsBtn) {
+            groupsBtn.hidden = !showModeBtn;
+            const open = groupsPanel && !groupsPanel.hidden;
+            groupsBtn.textContent = open ? 'Hide Groups' : 'Groups';
+            groupsBtn.classList.toggle('viewer-active-toggle', open);
         }
     }
 
@@ -1477,6 +1633,7 @@ export class AnalysisPage {
         const group = {
             id,
             name,
+            parent_id: null,
             node_ids: [...selected],
             created_at: new Date().toISOString(),
         };
@@ -1489,11 +1646,210 @@ export class AnalysisPage {
         this._renderGroupsPanelIfOpen();
     }
 
+    /**
+     * Open a floating picker listing existing groups — clicking one adds the
+     * current group selection to that group (removing the same node_ids from
+     * any other group to keep each part in a single group).
+     */
+    _showAddToGroupPicker(anchorEl) {
+        this._dismissAddToGroupPicker();
+        if (this._groupSelection.size === 0 || this.groups.size === 0) return;
+
+        const rect = anchorEl.getBoundingClientRect();
+        const menu = document.createElement('div');
+        menu.className = 'viewer-context-menu';
+        menu.innerHTML = `
+            <div class="vcm-header">Add ${this._groupSelection.size} to group…</div>
+            ${[...this.groups.values()].map(g => `
+                <button type="button" data-group-id="${this._esc(g.id)}">
+                    ${this._esc(g.name)} <small>(${g.node_ids.length})</small>
+                </button>
+            `).join('')}
+        `;
+
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left}px`;
+        menu.style.top  = `${rect.bottom + 4}px`;
+        document.body.appendChild(menu);
+
+        const bounds = menu.getBoundingClientRect();
+        if (bounds.right  > window.innerWidth)  menu.style.left = `${Math.max(0, window.innerWidth  - bounds.width  - 4)}px`;
+        if (bounds.bottom > window.innerHeight) menu.style.top  = `${Math.max(0, rect.top - bounds.height - 4)}px`;
+
+        menu.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-group-id]');
+            if (!btn) return;
+            this._addSelectionToGroup(btn.dataset.groupId);
+            this._dismissAddToGroupPicker();
+        });
+
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) this._dismissAddToGroupPicker(); };
+        const esc = (e) => { if (e.key === 'Escape') this._dismissAddToGroupPicker(); };
+        setTimeout(() => {
+            document.addEventListener('pointerdown', outside, { capture: true });
+            document.addEventListener('keydown', esc);
+        }, 0);
+        this._addToGroupPicker = { menu, outside, esc };
+    }
+
+    _dismissAddToGroupPicker() {
+        const ctx = this._addToGroupPicker;
+        if (!ctx) return;
+        ctx.menu.remove();
+        document.removeEventListener('pointerdown', ctx.outside, { capture: true });
+        document.removeEventListener('keydown', ctx.esc);
+        this._addToGroupPicker = null;
+    }
+
+    _addSelectionToGroup(groupId) {
+        const target = this.groups.get(groupId);
+        if (!target || this._groupSelection.size === 0) return;
+        const incoming = new Set(this._groupSelection);
+
+        // Uniqueness: strip these node_ids from any other group first.
+        for (const g of this.groups.values()) {
+            if (g.id === groupId) continue;
+            g.node_ids = g.node_ids.filter(nid => !incoming.has(nid));
+        }
+        // Drop emptied groups so the panel stays tidy.
+        for (const [gid, g] of [...this.groups]) {
+            if (gid !== groupId && g.node_ids.length === 0) this.groups.delete(gid);
+        }
+
+        // Append only new members (preserve order, skip duplicates).
+        const existing = new Set(target.node_ids);
+        for (const nid of incoming) {
+            if (!existing.has(nid)) target.node_ids.push(nid);
+        }
+
+        this._groupSelection.clear();
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+    }
+
     _deleteGroup(groupId) {
-        if (!this.groups.has(groupId)) return;
-        if (!confirm(`Delete group "${this.groups.get(groupId).name}"? The parts remain, just the grouping is removed.`)) return;
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        if (!confirm(`Delete group "${g.name}"? Any child groups will be re-parented to its parent; parts remain assigned to their own groups.`)) return;
+        // Re-parent children to this group's parent so the tree survives.
+        const newParent = g.parent_id || null;
+        for (const child of this._groupChildrenOf(groupId)) {
+            child.parent_id = newParent;
+        }
         this.groups.delete(groupId);
         if (this._isolatedGroupId === groupId) this._isolatedGroupId = null;
+        this._hiddenGroupIds.delete(groupId);
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    /**
+     * Open a floating picker listing valid parent candidates for ``groupId``.
+     * Excludes the group itself and all its descendants to prevent cycles.
+     */
+    _showSetParentPicker(groupId, anchorEl) {
+        this._dismissSetParentPicker();
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        const forbidden = this._groupAndDescendantIds(groupId);
+        const candidates = [...this.groups.values()].filter(c => !forbidden.has(c.id));
+
+        const menu = document.createElement('div');
+        menu.className = 'viewer-context-menu';
+        menu.innerHTML = `
+            <div class="vcm-header">Set parent of "${this._esc(g.name)}"</div>
+            <button type="button" data-parent-id="__new__" class="vcm-new">
+                &#x2795;&nbsp;New parent group…
+            </button>
+            <button type="button" data-parent-id="__none__" class="${g.parent_id ? '' : 'vcm-active'}">
+                (No parent — top level)
+            </button>
+            ${candidates.map(c => `
+                <button type="button" data-parent-id="${this._esc(c.id)}" class="${g.parent_id === c.id ? 'vcm-active' : ''}">
+                    ${this._esc(c.name)}
+                </button>
+            `).join('')}
+        `;
+
+        const rect = anchorEl.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left}px`;
+        menu.style.top  = `${rect.bottom + 4}px`;
+        document.body.appendChild(menu);
+
+        const bounds = menu.getBoundingClientRect();
+        if (bounds.right  > window.innerWidth)  menu.style.left = `${Math.max(0, window.innerWidth  - bounds.width  - 4)}px`;
+        if (bounds.bottom > window.innerHeight) menu.style.top  = `${Math.max(0, rect.top - bounds.height - 4)}px`;
+
+        menu.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-parent-id]');
+            if (!btn) return;
+            const choice = btn.dataset.parentId;
+            if (choice === '__new__') {
+                this._dismissSetParentPicker();
+                this._createEmptyParentFor(groupId);
+                return;
+            }
+            const pid = choice === '__none__' ? null : choice;
+            this._setGroupParent(groupId, pid);
+            this._dismissSetParentPicker();
+        });
+
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) this._dismissSetParentPicker(); };
+        const esc = (e) => { if (e.key === 'Escape') this._dismissSetParentPicker(); };
+        setTimeout(() => {
+            document.addEventListener('pointerdown', outside, { capture: true });
+            document.addEventListener('keydown', esc);
+        }, 0);
+        this._setParentPicker = { menu, outside, esc };
+    }
+
+    _dismissSetParentPicker() {
+        const ctx = this._setParentPicker;
+        if (!ctx) return;
+        ctx.menu.remove();
+        document.removeEventListener('pointerdown', ctx.outside, { capture: true });
+        document.removeEventListener('keydown', ctx.esc);
+        this._setParentPicker = null;
+    }
+
+    /**
+     * Create a new (empty) parent group, inheriting the child's current parent,
+     * and reassign the child under it.  Lets the user wrap one group in a new
+     * parent in a single step.
+     */
+    _createEmptyParentFor(childId) {
+        const child = this.groups.get(childId);
+        if (!child) return;
+        const defaultName = `Parent of ${child.name}`;
+        const name = (prompt('Name the new parent group:', defaultName) || '').trim();
+        if (!name) return;
+
+        const id = `grp_${Math.random().toString(16).slice(2, 10)}`;
+        const parent = {
+            id,
+            name,
+            parent_id: child.parent_id || null,  // take the child's current parent, if any
+            node_ids: [],
+            created_at: new Date().toISOString(),
+        };
+        this.groups.set(id, parent);
+        child.parent_id = id;
+
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    _setGroupParent(groupId, parentId) {
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        if (parentId === groupId) return;  // defensive — UI already prevents this
+        if (parentId && this._groupAndDescendantIds(groupId).has(parentId)) return;  // cycle guard
+        g.parent_id = parentId || null;
         this._debouncedSave();
         this._renderGroupsPanelIfOpen();
         this._refreshAssemblyColors();
@@ -1501,6 +1857,16 @@ export class AnalysisPage {
 
     _toggleIsolateGroup(groupId) {
         this._isolatedGroupId = this._isolatedGroupId === groupId ? null : groupId;
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    _toggleHideGroup(groupId) {
+        if (this._hiddenGroupIds.has(groupId)) {
+            this._hiddenGroupIds.delete(groupId);
+        } else {
+            this._hiddenGroupIds.add(groupId);
+        }
         this._renderGroupsPanelIfOpen();
         this._refreshAssemblyColors();
     }
@@ -1515,6 +1881,25 @@ export class AnalysisPage {
         this._renderGroupsPanelIfOpen();
     }
 
+    _toggleViewerMaximized() {
+        const panel = this.container?.querySelector('.workspace-viewer-panel');
+        const btn   = this.container?.querySelector('#viewer-maximize-btn');
+        if (!panel) return;
+        const max = panel.classList.toggle('viewer-maximized');
+        document.body.classList.toggle('viewer-maximized-active', max);
+        if (btn) {
+            btn.innerHTML = max ? '&#x26F7;' : '&#x26F6;';
+            btn.title = max ? 'Restore viewer (Esc)' : 'Maximise viewer (Esc to restore)';
+        }
+        // Nudge the Three.js ResizeObserver — some browsers take a frame to
+        // report the new bounding rect after a class toggle.
+        requestAnimationFrame(() => {
+            if (this._viewer && typeof this._viewer._onResize === 'function') {
+                this._viewer._onResize();
+            }
+        });
+    }
+
     _toggleGroupsPanel() {
         const panel = this.container.querySelector('#groups-panel');
         const btn = this.container.querySelector('#show-groups-btn');
@@ -1522,10 +1907,12 @@ export class AnalysisPage {
         if (!panel.hidden) {
             panel.hidden = true;
             if (btn) btn.textContent = 'Groups';
+            this._updateGroupToolbar();
             return;
         }
         this._renderGroupsPanel();
         if (btn) btn.textContent = 'Hide Groups';
+        this._updateGroupToolbar();
     }
 
     _renderGroupsPanelIfOpen() {
@@ -1544,17 +1931,60 @@ export class AnalysisPage {
                 click parts in the viewer, then <strong>Create Group</strong>.
             </div>`;
 
-        const rows = entries.map(g => {
+        // Flatten the group tree depth-first so rows appear under their parents.
+        const ordered = [];
+        const walk = (parentId, depth) => {
+            const kids = this._groupChildrenOf(parentId)
+                .sort((a, b) => a.name.localeCompare(b.name));
+            for (const g of kids) {
+                ordered.push({ g, depth });
+                walk(g.id, depth + 1);
+            }
+        };
+        walk(null, 0);
+
+        const rows = ordered.flatMap(({ g, depth }) => {
             const isolated = this._isolatedGroupId === g.id;
-            return `<tr data-group-id="${this._esc(g.id)}" class="${isolated ? 'group-isolated' : ''}">
-                <td>${this._esc(g.name)}</td>
-                <td class="parts-list-qty">${g.node_ids.length}</td>
+            const hidden   = this._hiddenGroupIds.has(g.id);
+            const expanded = this._expandedGroups.has(g.id);
+            const rowClass = [
+                isolated ? 'group-isolated' : '',
+                hidden   ? 'group-hidden'   : '',
+            ].filter(Boolean).join(' ');
+            const indent = depth > 0 ? `<span class="group-indent" style="--depth:${depth}"></span>` : '';
+            const descCount = this._groupNodeIdsRecursive(g.id).size;
+            const countCell = descCount > g.node_ids.length
+                ? `${g.node_ids.length} <small class="group-desc-count">(+${descCount - g.node_ids.length})</small>`
+                : `${g.node_ids.length}`;
+            const expandBtn = g.node_ids.length > 0
+                ? `<button class="outline group-expand-btn" title="Show / hide members">${expanded ? '▾' : '▸'}</button>`
+                : '<span class="group-expand-placeholder"></span>';
+
+            const out = [`<tr data-group-id="${this._esc(g.id)}" class="${rowClass}">
+                <td>${indent}${expandBtn} ${this._esc(g.name)}</td>
+                <td class="parts-list-qty">${countCell}</td>
                 <td class="group-actions">
-                    <button class="outline group-isolate-btn" title="Dim everything except this group">${isolated ? 'Clear Isolate' : 'Isolate'}</button>
+                    <button class="outline group-isolate-btn" title="Show only this group (and its children)">${isolated ? 'Clear Isolate' : 'Isolate'}</button>
+                    <button class="outline group-hide-btn" title="Hide this group (and its children) from the viewer">${hidden ? 'Show' : 'Hide'}</button>
+                    <button class="outline group-parent-btn" title="Set parent group">Parent…</button>
                     <button class="outline group-rename-btn">Rename</button>
                     <button class="outline group-delete-btn">Delete</button>
                 </td>
-            </tr>`;
+            </tr>`];
+
+            if (expanded && g.node_ids.length > 0) {
+                for (const nid of g.node_ids) {
+                    const label = this._nodeLabelFor(nid);
+                    out.push(`<tr class="group-member-row" data-group-id="${this._esc(g.id)}" data-node-id="${this._esc(nid)}">
+                        <td colspan="2"><span class="group-indent" style="--depth:${depth + 1}"></span>${this._esc(label)}</td>
+                        <td class="group-actions">
+                            <button class="outline group-member-locate-btn" title="Select this part in the tree">Locate</button>
+                            <button class="outline group-member-remove-btn" title="Remove this part from the group">Remove</button>
+                        </td>
+                    </tr>`);
+                }
+            }
+            return out;
         }).join('');
 
         panel.innerHTML = `
@@ -1591,10 +2021,95 @@ export class AnalysisPage {
             const tr = e.target.closest('tr[data-group-id]');
             if (!tr) return;
             const gid = tr.dataset.groupId;
-            if (e.target.closest('.group-isolate-btn')) this._toggleIsolateGroup(gid);
+
+            // Member-row actions
+            if (tr.classList.contains('group-member-row')) {
+                const nid = tr.dataset.nodeId;
+                if (e.target.closest('.group-member-remove-btn')) this._removeNodeFromGroup(gid, nid);
+                else if (e.target.closest('.group-member-locate-btn'))
+                    this._selectAndScrollToNode(this._bomNodeIdToTreeNodeId(nid));
+                return;
+            }
+
+            // Group-row actions
+            if (e.target.closest('.group-expand-btn')) this._toggleGroupExpanded(gid);
+            else if (e.target.closest('.group-isolate-btn')) this._toggleIsolateGroup(gid);
+            else if (e.target.closest('.group-hide-btn')) this._toggleHideGroup(gid);
+            else if (e.target.closest('.group-parent-btn')) this._showSetParentPicker(gid, e.target.closest('.group-parent-btn'));
             else if (e.target.closest('.group-rename-btn')) this._renameGroup(gid);
             else if (e.target.closest('.group-delete-btn')) this._deleteGroup(gid);
         });
+    }
+
+    _toggleGroupExpanded(groupId) {
+        if (this._expandedGroups.has(groupId)) this._expandedGroups.delete(groupId);
+        else this._expandedGroups.add(groupId);
+        this._renderGroupsPanelIfOpen();
+    }
+
+    _removeNodeFromGroup(groupId, nodeId) {
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        const before = g.node_ids.length;
+        g.node_ids = g.node_ids.filter(nid => nid !== nodeId);
+        if (g.node_ids.length === before) return;  // wasn't in group
+
+        // Also drop it from any pending group-mode selection so the viewer's
+        // yellow "selected" highlight disappears when the action completes.
+        if (this._groupSelection.has(nodeId)) {
+            this._groupSelection.delete(nodeId);
+            this._updateGroupToolbar();
+        }
+
+        this._debouncedSave();
+        this._renderGroupsPanelIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    /**
+     * Human label for a node_id — prefers the tree's node name, falls back to
+     * the native_bom row's mark, and finally the raw id.  Handles both direct
+     * tree nodes and synthetic ":s<N>" solid-child ids.
+     */
+    /**
+     * Find the group that directly contains ``nodeId`` (uniqueness rule means
+     * at most one), plus a breadcrumb path that includes any ancestor groups.
+     * Returns null if the part isn't grouped.
+     */
+    _groupContainingNodeId(nodeId) {
+        for (const g of this.groups.values()) {
+            if (!g.node_ids.includes(nodeId)) continue;
+            // Walk up parent_id to build "Grandparent → Parent → Group"
+            const names = [];
+            let cur = g;
+            const guard = new Set();
+            while (cur && !guard.has(cur.id)) {
+                names.unshift(cur.name);
+                guard.add(cur.id);
+                cur = cur.parent_id ? this.groups.get(cur.parent_id) : null;
+            }
+            return { group: g, groupPath: names.join(' › ') };
+        }
+        return null;
+    }
+
+    _nodeLabelFor(nodeId) {
+        if (!nodeId) return '';
+        // Direct tree node
+        const direct = this._parentMap?.get(nodeId);
+        if (direct?.name) return direct.name;
+        // Solid-split child — match against the BOM (which carries per-solid marks)
+        if (Array.isArray(this._nativeBom)) {
+            const row = this._nativeBom.find(r => r.node_id === nodeId);
+            if (row?.mark) return row.mark;
+        }
+        // Fallback: translate instance-suffix to ref-suffix and try the tree DOM
+        const treeId = this._bomNodeIdToTreeNodeId(nodeId);
+        if (treeId !== nodeId) {
+            const treeHit = this._parentMap?.get(treeId);
+            if (treeHit?.name) return treeHit.name;
+        }
+        return nodeId;
     }
 
     // ---------------------------------------------------------------
@@ -2146,6 +2661,7 @@ export class AnalysisPage {
                 this.groups.set(gid, {
                     id: g.id || gid,
                     name: g.name || gid,
+                    parent_id: g.parent_id || null,
                     node_ids: g.node_ids.slice(),
                     created_at: g.created_at || null,
                 });

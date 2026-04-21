@@ -117,7 +117,7 @@ export class STLViewer {
         this._ndc.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
         this._ndc.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
         this._raycaster.setFromCamera(this._ndc, this.camera);
-        const objects = this._meshes.filter(m => m).map(m => m.mesh);
+        const objects = this._meshes.filter(m => m && m.mesh.visible).map(m => m.mesh);
         const hits = this._raycaster.intersectObjects(objects, false);
         if (hits.length === 0) return null;
         return hits[0].object.userData?.nodeId || null;
@@ -303,6 +303,17 @@ export class STLViewer {
         }
     }
 
+    /**
+     * Hide or show a mesh (and its edge overlay) in the scene.
+     * Hidden meshes are excluded from picking raycasts.
+     */
+    setMeshVisible(index, visible) {
+        const entry = this._meshes[index];
+        if (!entry) return;
+        entry.mesh.visible = !!visible;
+        if (entry.edges) entry.edges.visible = !!visible;
+    }
+
     // ── Line geometry overlay ────────────────────────────────────────
 
     /**
@@ -366,14 +377,7 @@ export class STLViewer {
         this._mesh.position.sub(center);
         if (this._edges) this._edges.position.sub(center);
 
-        const fov = this.camera.fov * (Math.PI / 180);
-        const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.5;
-
-        this.camera.position.set(dist * 0.7, dist * 0.5, dist);
-        this.camera.near = dist / 100;
-        this.camera.far = dist * 10;
-        this.camera.updateProjectionMatrix();
-
+        this._setCameraForDim(maxDim);
         this.controls.target.set(0, 0, 0);
         this.controls.update();
     }
@@ -383,16 +387,28 @@ export class STLViewer {
         box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z);
 
-        const fov = this.camera.fov * (Math.PI / 180);
-        const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.5;
-
-        this.camera.position.set(dist * 0.7, dist * 0.5, dist);
-        this.camera.near = dist / 100;
-        this.camera.far = dist * 10;
-        this.camera.updateProjectionMatrix();
-
+        this._setCameraForDim(maxDim);
         this.controls.target.set(0, 0, 0);
         this.controls.update();
+    }
+
+    /**
+     * Position the camera to frame a scene whose largest dimension is
+     * ``maxDim`` and size the near/far planes generously so the user can
+     * zoom out to see the whole assembly — and beyond — without the far
+     * plane clipping parts at the back.  Near is kept small enough for
+     * close inspection but not so tight that depth-buffer precision
+     * collapses at the far extreme (ratio capped at ~1e6).
+     */
+    _setCameraForDim(maxDim) {
+        const safeDim = Math.max(maxDim, 1);
+        const fov = this.camera.fov * (Math.PI / 180);
+        const dist = (safeDim / 2) / Math.tan(fov / 2) * 1.5;
+
+        this.camera.position.set(dist * 0.7, dist * 0.5, dist);
+        this.camera.near = Math.max(safeDim / 5000, 0.1);
+        this.camera.far  = safeDim * 100;
+        this.camera.updateProjectionMatrix();
     }
 
     // ── Cleanup helpers ──────────────────────────────────────────────
