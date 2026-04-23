@@ -86,6 +86,9 @@ export class AnalysisPage {
         /** @type {Array|null} unified native BOM rows from analysis.native_bom */
         this._nativeBom = null;
 
+        /** @type {'instance'|'consolidated'} current Full BOM view mode */
+        this._nativeBomView = 'instance';
+
         /** @type {'step'|'ifc'} source of the current analysis (determines world-placement handling) */
         this._source = 'step';
 
@@ -1324,7 +1327,7 @@ export class AnalysisPage {
 
     _isolatedNodeIds() {
         if (!this._isolatedGroupId) return null;
-        const g = this.groups.get(this._isolatedGroupId);
+        const g = this._groupById(this._isolatedGroupId);
         if (!g) return null;
         const out = this._groupNodeIdsRecursive(this._isolatedGroupId);
         return out.size > 0 ? out : null;
@@ -1353,13 +1356,46 @@ export class AnalysisPage {
     _groupNodeIdsRecursive(groupId) {
         const out = new Set();
         const visit = (gid) => {
-            const g = this.groups.get(gid);
+            const g = this._groupById(gid);
             if (!g) return;
             for (const nid of g.node_ids) out.add(nid);
             for (const child of this._groupChildrenOf(gid)) visit(child.id);
         };
         visit(groupId);
         return out;
+    }
+
+    /**
+     * Resolve a group id to its record — handles both user groups (stored in
+     * ``this.groups``) and the special virtual Unclassified group (computed
+     * on the fly).  Callers receive the same shape either way.
+     */
+    _groupById(groupId) {
+        if (groupId === '__unclassified__') return this._virtualUnclassifiedGroup();
+        return this.groups.get(groupId) || null;
+    }
+
+    /**
+     * Build a virtual group listing every native-BOM part with no resolved
+     * classification.  The group is never persisted and cannot be edited
+     * (rename/delete/parent/remove are blocked in the panel).  Returns null
+     * when there's no BOM data yet — in that case the UI silently omits it.
+     */
+    _virtualUnclassifiedGroup() {
+        if (!Array.isArray(this._nativeBom) || this._nativeBom.length === 0) return null;
+        const nodeIds = [];
+        for (const row of this._nativeBom) {
+            const nid = row.node_id;
+            if (!nid) continue;
+            if (this._resolveClassification(nid) == null) nodeIds.push(nid);
+        }
+        return {
+            id: '__unclassified__',
+            name: 'Unclassified',
+            parent_id: null,
+            node_ids: nodeIds,
+            _virtual: true,
+        };
     }
 
     /** Collect ids of ``groupId`` and all its descendants — used for cycle prevention. */
@@ -1488,19 +1524,26 @@ export class AnalysisPage {
     /**
      * Right-click context menu shown *only in Group Mode*.  Tells the user
      * which group the clicked part belongs to (and its breadcrumb path), and
-     * offers a single "Remove from group" action.  No classification here —
-     * that stays in the non-group-mode menu.
+     * offers Remove-from-group plus a "select every visible instance sharing
+     * this prototype" action.  Classification stays in the non-group-mode
+     * menu.
      */
     _showGroupContextMenu(nodeId, x, y) {
         this._dismissMeshContextMenu();
 
         const label = this._nodeLabelFor(nodeId) || nodeId;
         const groupEntry = this._groupContainingNodeId(nodeId);
+        const siblingCount = this._countVisibleSiblings(nodeId);
 
         const menu = document.createElement('div');
         menu.className = 'viewer-context-menu';
         menu.innerHTML = `
             <div class="vcm-header" title="${this._esc(label)}">${this._esc(label)}</div>
+            ${siblingCount > 1 ? `
+                <button type="button" data-action="select-siblings">Select all visible instances (${siblingCount})</button>
+            ` : `
+                <div class="vcm-subheader" style="font-style:italic;color:#64748b;">No other visible instances</div>
+            `}
             ${groupEntry ? `
                 <div class="vcm-subheader" title="${this._esc(groupEntry.groupPath)}">In group: ${this._esc(groupEntry.groupPath)}</div>
                 <button type="button" data-action="remove-from-group"
@@ -1527,6 +1570,8 @@ export class AnalysisPage {
             const action = btn.dataset.action;
             if (action === 'remove-from-group') {
                 this._removeNodeFromGroup(btn.dataset.groupId, nodeId);
+            } else if (action === 'select-siblings') {
+                this._selectAllVisibleSiblings(nodeId);
             }
             this._dismissMeshContextMenu();
         });
@@ -1538,6 +1583,69 @@ export class AnalysisPage {
             document.addEventListener('keydown', esc);
         }, 0);
         this._meshContextMenu = { menu, outside, esc };
+    }
+
+    /**
+     * Return a key that uniquely identifies ``nodeId``'s prototype, so any two
+     * meshes sharing it represent the same physical part template.
+     *   STEP: the XCAF ref_id (shared across instances); per-solid rows also
+     *         key on the solid index so only the same solid-of-prototype matches.
+     *   IFC:  IfcTypeProduct GlobalId (from ifc_metadata.type_guid) in the BOM.
+     * Falls back to the node_id itself when no prototype info is resolvable.
+     */
+    _prototypeKeyFor(nodeId) {
+        if (!nodeId) return null;
+        if (this._source === 'step') {
+            // Direct leaf: its own ref_id
+            if (this._nodeRefMap?.has(nodeId)) {
+                return `step:${this._nodeRefMap.get(nodeId)}`;
+            }
+            // Per-solid split row: "<instance>:s<N>" — prototype key is the
+            // instance's ref_id plus the solid index.
+            const m = nodeId.match(/^(.*):s(\d+)$/);
+            if (m && this._nodeRefMap?.has(m[1])) {
+                return `step:${this._nodeRefMap.get(m[1])}:s${m[2]}`;
+            }
+        }
+        if (this._source === 'ifc' && Array.isArray(this._nativeBom)) {
+            const row = this._nativeBom.find(r => r.node_id === nodeId);
+            if (row?.type_guid) return `ifc:${row.type_guid}`;
+        }
+        return `solo:${nodeId}`;
+    }
+
+    /** True if the mesh for ``nodeId`` is currently rendered in the viewer. */
+    _isMeshCurrentlyVisible(nodeId) {
+        const isolated = this._isolatedNodeIds();
+        const hidden   = this._hiddenNodeIds();
+        const inIsolate = !isolated || isolated.has(nodeId);
+        const inHide    = hidden && hidden.has(nodeId);
+        return inIsolate && !inHide;
+    }
+
+    /** Count visible meshes that share the given node's prototype key. */
+    _countVisibleSiblings(nodeId) {
+        const key = this._prototypeKeyFor(nodeId);
+        let count = 0;
+        for (const nid of this._meshIndexByNodeId.keys()) {
+            if (this._prototypeKeyFor(nid) !== key) continue;
+            if (!this._isMeshCurrentlyVisible(nid)) continue;
+            count += 1;
+        }
+        return count;
+    }
+
+    /** Add every visible mesh sharing the prototype to the group selection. */
+    _selectAllVisibleSiblings(nodeId) {
+        const key = this._prototypeKeyFor(nodeId);
+        if (!key) return;
+        for (const nid of this._meshIndexByNodeId.keys()) {
+            if (this._prototypeKeyFor(nid) !== key) continue;
+            if (!this._isMeshCurrentlyVisible(nid)) continue;
+            this._groupSelection.add(nid);
+        }
+        this._updateGroupToolbar();
+        this._refreshAssemblyColors();
     }
 
     // ---------------------------------------------------------------
@@ -1618,15 +1726,15 @@ export class AnalysisPage {
         // Remove these node_ids from any existing group (uniqueness: one group per node_id).
         const selected = new Set(this._groupSelection);
         for (const g of this.groups.values()) {
-            const originalLen = g.node_ids.length;
             g.node_ids = g.node_ids.filter(nid => !selected.has(nid));
-            if (g.node_ids.length !== originalLen) {
-                g._changed = true;
-            }
         }
-        // Drop any groups emptied by the reassignment.
+        // Drop groups that both became empty AND have no child groups.  Parent
+        // containers with zero direct members must survive; otherwise their
+        // children get orphaned.
         for (const [gid, g] of [...this.groups]) {
-            if (g.node_ids.length === 0) this.groups.delete(gid);
+            if (g.node_ids.length === 0 && this._groupChildrenOf(gid).length === 0) {
+                this.groups.delete(gid);
+            }
         }
 
         const id = `grp_${Math.random().toString(16).slice(2, 10)}`;
@@ -1660,7 +1768,7 @@ export class AnalysisPage {
         menu.className = 'viewer-context-menu';
         menu.innerHTML = `
             <div class="vcm-header">Add ${this._groupSelection.size} to group…</div>
-            ${[...this.groups.values()].map(g => `
+            ${[...this.groups.values()].filter(g => !g._virtual).map(g => `
                 <button type="button" data-group-id="${this._esc(g.id)}">
                     ${this._esc(g.name)} <small>(${g.node_ids.length})</small>
                 </button>
@@ -1711,9 +1819,13 @@ export class AnalysisPage {
             if (g.id === groupId) continue;
             g.node_ids = g.node_ids.filter(nid => !incoming.has(nid));
         }
-        // Drop emptied groups so the panel stays tidy.
+        // Drop emptied groups — but only if they have no child groups, so
+        // parent containers survive.
         for (const [gid, g] of [...this.groups]) {
-            if (gid !== groupId && g.node_ids.length === 0) this.groups.delete(gid);
+            if (gid === groupId) continue;
+            if (g.node_ids.length === 0 && this._groupChildrenOf(gid).length === 0) {
+                this.groups.delete(gid);
+            }
         }
 
         // Append only new members (preserve order, skip duplicates).
@@ -1744,6 +1856,61 @@ export class AnalysisPage {
         this._debouncedSave();
         this._renderGroupsPanelIfOpen();
         this._refreshAssemblyColors();
+    }
+
+    /**
+     * Floating menu listing CNC / BO / EXC / Clear that applies to every part
+     * inside ``groupId`` (and its descendants).
+     */
+    _showGroupClassifyPicker(groupId, anchorEl) {
+        this._dismissGroupClassifyPicker();
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        const count = this._groupNodeIdsRecursive(groupId).size;
+
+        const menu = document.createElement('div');
+        menu.className = 'viewer-context-menu';
+        menu.innerHTML = `
+            <div class="vcm-header">Classify "${this._esc(g.name)}" (${count} part${count === 1 ? '' : 's'})</div>
+            <button type="button" data-action="postprocess">CNC</button>
+            <button type="button" data-action="bought-out">Bought Out</button>
+            <button type="button" data-action="exclude">Exclude</button>
+            <button type="button" data-action="unclassify" class="vcm-clear">Clear classification</button>
+        `;
+
+        const rect = anchorEl.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.left = `${rect.left}px`;
+        menu.style.top  = `${rect.bottom + 4}px`;
+        document.body.appendChild(menu);
+
+        const bounds = menu.getBoundingClientRect();
+        if (bounds.right  > window.innerWidth)  menu.style.left = `${Math.max(0, window.innerWidth  - bounds.width  - 4)}px`;
+        if (bounds.bottom > window.innerHeight) menu.style.top  = `${Math.max(0, rect.top - bounds.height - 4)}px`;
+
+        menu.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            this._dismissGroupClassifyPicker();
+            this._classifyGroup(groupId, btn.dataset.action);
+        });
+
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchorEl) this._dismissGroupClassifyPicker(); };
+        const esc = (e) => { if (e.key === 'Escape') this._dismissGroupClassifyPicker(); };
+        setTimeout(() => {
+            document.addEventListener('pointerdown', outside, { capture: true });
+            document.addEventListener('keydown', esc);
+        }, 0);
+        this._groupClassifyPicker = { menu, outside, esc };
+    }
+
+    _dismissGroupClassifyPicker() {
+        const ctx = this._groupClassifyPicker;
+        if (!ctx) return;
+        ctx.menu.remove();
+        document.removeEventListener('pointerdown', ctx.outside, { capture: true });
+        document.removeEventListener('keydown', ctx.esc);
+        this._groupClassifyPicker = null;
     }
 
     /**
@@ -1933,6 +2100,11 @@ export class AnalysisPage {
 
         // Flatten the group tree depth-first so rows appear under their parents.
         const ordered = [];
+        // Virtual Unclassified group pinned at the top when BOM data exists.
+        const virt = this._virtualUnclassifiedGroup();
+        if (virt && virt.node_ids.length > 0) {
+            ordered.push({ g: virt, depth: 0 });
+        }
         const walk = (parentId, depth) => {
             const kids = this._groupChildrenOf(parentId)
                 .sort((a, b) => a.name.localeCompare(b.name));
@@ -1947,9 +2119,11 @@ export class AnalysisPage {
             const isolated = this._isolatedGroupId === g.id;
             const hidden   = this._hiddenGroupIds.has(g.id);
             const expanded = this._expandedGroups.has(g.id);
+            const virtual  = !!g._virtual;
             const rowClass = [
                 isolated ? 'group-isolated' : '',
                 hidden   ? 'group-hidden'   : '',
+                virtual  ? 'group-virtual'  : '',
             ].filter(Boolean).join(' ');
             const indent = depth > 0 ? `<span class="group-indent" style="--depth:${depth}"></span>` : '';
             const descCount = this._groupNodeIdsRecursive(g.id).size;
@@ -1961,25 +2135,37 @@ export class AnalysisPage {
                 : '<span class="group-expand-placeholder"></span>';
 
             const out = [`<tr data-group-id="${this._esc(g.id)}" class="${rowClass}">
-                <td>${indent}${expandBtn} ${this._esc(g.name)}</td>
+                <td>${indent}${expandBtn} ${this._esc(g.name)}${virtual ? ' <small class="group-virtual-tag">auto</small>' : ''}</td>
                 <td class="parts-list-qty">${countCell}</td>
                 <td class="group-actions">
+                    <button class="outline group-classify-btn" title="Classify all parts in this group">Classify…</button>
                     <button class="outline group-isolate-btn" title="Show only this group (and its children)">${isolated ? 'Clear Isolate' : 'Isolate'}</button>
                     <button class="outline group-hide-btn" title="Hide this group (and its children) from the viewer">${hidden ? 'Show' : 'Hide'}</button>
-                    <button class="outline group-parent-btn" title="Set parent group">Parent…</button>
-                    <button class="outline group-rename-btn">Rename</button>
-                    <button class="outline group-delete-btn">Delete</button>
+                    ${virtual ? '' : `
+                        <button class="outline group-parent-btn" title="Set parent group">Parent…</button>
+                        <button class="outline group-rename-btn">Rename</button>
+                        <button class="outline group-delete-btn">Delete</button>
+                    `}
                 </td>
             </tr>`];
 
             if (expanded && g.node_ids.length > 0) {
                 for (const nid of g.node_ids) {
                     const label = this._nodeLabelFor(nid);
+                    const current = this._resolveClassification(nid);
+                    const badge = current
+                        ? this._classificationLabel(current.action, current.origin, current.mixed)
+                        : '';
                     out.push(`<tr class="group-member-row" data-group-id="${this._esc(g.id)}" data-node-id="${this._esc(nid)}">
-                        <td colspan="2"><span class="group-indent" style="--depth:${depth + 1}"></span>${this._esc(label)}</td>
+                        <td><span class="group-indent" style="--depth:${depth + 1}"></span>${this._esc(label)} ${badge}</td>
+                        <td class="parts-list-qty"></td>
                         <td class="group-actions">
+                            <button class="outline group-member-cnc-btn ${current?.action === 'postprocess' ? 'cls-active-cnc' : ''}" title="Mark as CNC">CNC</button>
+                            <button class="outline group-member-bo-btn  ${current?.action === 'bought-out'  ? 'cls-active-bo'  : ''}" title="Mark as Bought Out">BO</button>
+                            <button class="outline group-member-exc-btn ${current?.action === 'exclude'     ? 'cls-active-exc' : ''}" title="Mark as Excluded">EXC</button>
+                            ${current ? '<button class="outline group-member-clear-btn" title="Clear classification">&#x2715;</button>' : ''}
                             <button class="outline group-member-locate-btn" title="Select this part in the tree">Locate</button>
-                            <button class="outline group-member-remove-btn" title="Remove this part from the group">Remove</button>
+                            ${virtual ? '' : '<button class="outline group-member-remove-btn" title="Remove this part from the group">&#x2013;</button>'}
                         </td>
                     </tr>`);
                 }
@@ -2028,11 +2214,17 @@ export class AnalysisPage {
                 if (e.target.closest('.group-member-remove-btn')) this._removeNodeFromGroup(gid, nid);
                 else if (e.target.closest('.group-member-locate-btn'))
                     this._selectAndScrollToNode(this._bomNodeIdToTreeNodeId(nid));
+                else if (e.target.closest('.group-member-cnc-btn'))   this._applyClassification(nid, 'postprocess');
+                else if (e.target.closest('.group-member-bo-btn'))    this._applyClassification(nid, 'bought-out');
+                else if (e.target.closest('.group-member-exc-btn'))   this._applyClassification(nid, 'exclude');
+                else if (e.target.closest('.group-member-clear-btn')) this._applyClassification(nid, 'unclassify');
                 return;
             }
 
             // Group-row actions
             if (e.target.closest('.group-expand-btn')) this._toggleGroupExpanded(gid);
+            else if (e.target.closest('.group-classify-btn'))
+                this._showGroupClassifyPicker(gid, e.target.closest('.group-classify-btn'));
             else if (e.target.closest('.group-isolate-btn')) this._toggleIsolateGroup(gid);
             else if (e.target.closest('.group-hide-btn')) this._toggleHideGroup(gid);
             else if (e.target.closest('.group-parent-btn')) this._showSetParentPicker(gid, e.target.closest('.group-parent-btn'));
@@ -2045,6 +2237,49 @@ export class AnalysisPage {
         if (this._expandedGroups.has(groupId)) this._expandedGroups.delete(groupId);
         else this._expandedGroups.add(groupId);
         this._renderGroupsPanelIfOpen();
+    }
+
+    /**
+     * Apply a classification action to a single node_id.  Prefers the existing
+     * tree-driven path (`_classifyNode` / `_unclassifyNode`) so peer
+     * propagation and DOM highlighting behave identically to clicking a
+     * tree-row button.  For synthetic ids (e.g. "...:s0") with no tree <li>
+     * we fall back to the minimal state update.
+     */
+    _applyClassification(nodeId, action) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const li = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(nodeId)}"]`);
+        if (li) {
+            if (action === 'unclassify') this._unclassifyNode(li, nodeId);
+            else this._classifyNode(li, nodeId, action);
+            return;
+        }
+        // No tree element — minimal path, still keeps BOM/viewer/progress in sync.
+        if (action === 'unclassify') this.classifications.delete(nodeId);
+        else this.classifications.set(nodeId, action);
+        this._updateProgress();
+        this._debouncedSave();
+        this._refreshNativeBomIfOpen();
+        this._refreshAssemblyColors();
+    }
+
+    /**
+     * Apply a classification to every part in a group and its descendants.
+     * Always asks for confirmation since one click can affect many parts.
+     */
+    _classifyGroup(groupId, action) {
+        const g = this.groups.get(groupId);
+        if (!g) return;
+        const nodes = [...this._groupNodeIdsRecursive(groupId)];
+        if (nodes.length === 0) return;
+        const label = action === 'postprocess' ? 'CNC'
+                    : action === 'bought-out' ? 'Bought Out'
+                    : action === 'exclude'    ? 'Exclude'
+                    : 'Clear classification on';
+        if (!confirm(`${label} ${nodes.length} part${nodes.length === 1 ? '' : 's'} in "${g.name}"?`)) return;
+        for (const nid of nodes) {
+            this._applyClassification(nid, action);
+        }
     }
 
     _removeNodeFromGroup(groupId, nodeId) {
@@ -2666,6 +2901,20 @@ export class AnalysisPage {
                     created_at: g.created_at || null,
                 });
             }
+            // Rescue orphans: if parent_id points at a group that isn't
+            // loaded (deleted at some point without re-parenting), promote
+            // the child to top-level so it's visible in the panel again.
+            let rescued = 0;
+            for (const g of this.groups.values()) {
+                if (g.parent_id && !this.groups.has(g.parent_id)) {
+                    g.parent_id = null;
+                    rescued += 1;
+                }
+            }
+            if (rescued > 0) {
+                // Persist the fix so we don't need to rescue every load.
+                this._debouncedSave();
+            }
         }
 
         // Apply selectability based on restored state
@@ -2888,31 +3137,71 @@ export class AnalysisPage {
         const sourceLabel = rows[0]?.source === 'ifc' ? 'IFC' : 'STEP';
         const classifiedCount = rows.filter(r => this.classifications.has(r.node_id)).length;
 
-        const header = `
-            <tr>
-                <th>Mark</th>
-                <th>Entity</th>
-                <th>Profile</th>
-                <th>Grade</th>
-                <th class="nb-num">Length&nbsp;(mm)</th>
-                <th class="nb-num">Weight&nbsp;(kg)</th>
-                <th>Assembly</th>
-                ${hasPhase     ? '<th>Phase</th>'  : ''}
-                ${hasPour      ? '<th>Pour</th>'   : ''}
-                ${hasFinish    ? '<th>Finish</th>' : ''}
-                ${hasPartClass ? '<th>Class</th>'  : ''}
-                <th>Classification</th>
-            </tr>`;
+        const hasGroups = this.groups.size > 0;
+        const view = this._nativeBomView === 'consolidated' ? 'consolidated' : 'instance';
 
-        const body = rows.map(r => this._nativeBomRow(r, {
-            hasPhase, hasPour, hasFinish, hasPartClass,
-        })).join('');
+        let header, body, summaryExtras;
+        if (view === 'consolidated') {
+            const cons = this._consolidateNativeBom(rows);
+            summaryExtras = ` &middot; ${cons.length} unique`;
+            header = `
+                <tr>
+                    <th>Entity</th>
+                    <th>Profile</th>
+                    <th>Grade</th>
+                    <th class="nb-num">Length&nbsp;(mm)</th>
+                    <th class="nb-num">Qty</th>
+                    <th class="nb-num">Total&nbsp;Length&nbsp;(mm)</th>
+                    <th class="nb-num">Total&nbsp;Weight&nbsp;(kg)</th>
+                    <th>Classification</th>
+                    ${hasGroups ? '<th>Groups</th>' : ''}
+                </tr>`;
+            body = cons.map(c => this._nativeBomConsolidatedRow(c, { hasGroups })).join('');
+        } else {
+            summaryExtras = '';
+            header = `
+                <tr>
+                    <th>Mark</th>
+                    <th>Entity</th>
+                    <th>Profile</th>
+                    <th>Grade</th>
+                    <th class="nb-num">Length&nbsp;(mm)</th>
+                    <th class="nb-num">Weight&nbsp;(kg)</th>
+                    <th>Assembly</th>
+                    ${hasGroups    ? '<th>Group</th>'  : ''}
+                    ${hasPhase     ? '<th>Phase</th>'  : ''}
+                    ${hasPour      ? '<th>Pour</th>'   : ''}
+                    ${hasFinish    ? '<th>Finish</th>' : ''}
+                    ${hasPartClass ? '<th>Class</th>'  : ''}
+                    <th>Classification</th>
+                </tr>`;
+            body = rows.map(r => this._nativeBomRow(r, {
+                hasPhase, hasPour, hasFinish, hasPartClass, hasGroups,
+            })).join('');
+        }
+
+        const nestableCount = this._nestableCountFromNativeBom();
+        const nestBtn = nestableCount > 0
+            ? (this._nestingRunning
+                ? `<button class="outline native-bom-nest-btn" disabled>Nesting…</button>`
+                : `<button class="outline native-bom-nest-btn" title="Nest all CNC-classified sections from this BOM">✂ Nest Sections (${nestableCount})</button>`)
+            : '';
+        const csvBtn = `<button class="outline native-bom-csv-btn" title="Download this BOM as CSV (matches the current view)">↓ CSV</button>`;
+
+        const viewToggle = `
+            <div class="nb-view-toggle" role="tablist" aria-label="BOM view">
+                <button class="outline nb-view-btn ${view === 'instance' ? 'nb-view-active' : ''}" data-view="instance">Per-instance</button>
+                <button class="outline nb-view-btn ${view === 'consolidated' ? 'nb-view-active' : ''}" data-view="consolidated">Consolidated</button>
+            </div>`;
 
         panel.innerHTML = `
             <div class="parts-list-card">
                 <div class="parts-list-header">
-                    <span>Full BOM &middot; ${rows.length} parts &middot; ${sourceLabel} &middot; ${classifiedCount} classified</span>
+                    <span>Full BOM &middot; ${rows.length} parts &middot; ${sourceLabel} &middot; ${classifiedCount} classified${summaryExtras}</span>
                     <div class="parts-list-header-actions">
+                        ${viewToggle}
+                        ${csvBtn}
+                        ${nestBtn}
                         <button class="outline parts-list-close native-bom-close">&#x2715;</button>
                     </div>
                 </div>
@@ -2922,6 +3211,7 @@ export class AnalysisPage {
                         <tbody>${body}</tbody>
                     </table>
                 </div>
+                <div id="native-bom-nesting-results" class="nesting-results-panel" ${this._nestingCuttingList ? '' : 'hidden'}></div>
             </div>`;
         panel.hidden = false;
 
@@ -2929,6 +3219,22 @@ export class AnalysisPage {
             panel.hidden = true;
             const btn = this.container.querySelector('#show-native-bom-btn');
             if (btn) btn.textContent = 'Full BOM';
+        });
+
+        panel.querySelector('.native-bom-nest-btn')?.addEventListener('click', () => {
+            this._showNestingSettingsDialog(this._buildNestingItemsFromNativeBom());
+        });
+        panel.querySelector('.native-bom-csv-btn')?.addEventListener('click', () => {
+            this._downloadNativeBomCsv();
+        });
+
+        panel.querySelectorAll('.nb-view-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const v = btn.dataset.view === 'consolidated' ? 'consolidated' : 'instance';
+                if (this._nativeBomView === v) return;
+                this._nativeBomView = v;
+                this._renderNativeBom();
+            });
         });
 
         panel.querySelector('tbody')?.addEventListener('click', (e) => {
@@ -2965,6 +3271,12 @@ export class AnalysisPage {
         const weight = row.weight != null ? this._fmtNumber(row.weight, 2) : '';
         const grade = row.grade || row.material || '';
 
+        let groupCell = '';
+        if (cols.hasGroups) {
+            const entry = this._groupContainingNodeId(nodeId);
+            groupCell = `<td>${entry ? `<span class="nb-group" title="${this._esc(entry.groupPath)}">${this._esc(entry.groupPath)}</span>` : ''}</td>`;
+        }
+
         return `<tr data-node-id="${this._esc(nodeId)}">
             <td>${this._esc(row.mark || '')}</td>
             <td><span class="nb-entity">${this._esc(row.entity || '')}</span></td>
@@ -2973,6 +3285,7 @@ export class AnalysisPage {
             <td class="nb-num">${length}</td>
             <td class="nb-num">${weight}</td>
             <td>${this._esc(row.assembly_mark || '')}</td>
+            ${groupCell}
             ${cols.hasPhase     ? `<td>${this._esc(row.phase ?? '')}</td>` : ''}
             ${cols.hasPour      ? `<td>${this._esc(row.pour ?? '')}</td>` : ''}
             ${cols.hasFinish    ? `<td>${this._esc(row.finish ?? '')}</td>` : ''}
@@ -3056,6 +3369,202 @@ export class AnalysisPage {
         if (typeof v !== 'number') v = parseFloat(v);
         if (!Number.isFinite(v)) return '';
         return v.toFixed(dp).replace(/\.?0+$/, '');
+    }
+
+    /**
+     * Group native_bom rows by (entity, profile, grade, rounded length,
+     * classification) so identical parts roll up into one summary row.
+     * Rounding length to the nearest mm absorbs tiny float noise.
+     */
+    _consolidateNativeBom(rows) {
+        const buckets = new Map();
+        for (const row of rows) {
+            const resolved = this._resolveClassification(row.node_id);
+            const cls = resolved?.mixed ? 'mixed'
+                     : (resolved?.action || 'pending');
+            const entity = row.entity || '';
+            const profile = row.profile || '';
+            const grade = row.grade || row.material || '';
+            const length = row.length != null ? Math.round(row.length) : null;
+            const key = [entity, profile, grade, length == null ? '' : length, cls].join('|');
+
+            let b = buckets.get(key);
+            if (!b) {
+                b = {
+                    key, entity, profile, grade, length,
+                    classification: resolved,
+                    qty: 0,
+                    totalWeight: 0,
+                    totalLength: 0,
+                    hasLength: length != null,
+                    hasWeight: false,
+                    groups: new Set(),
+                    nodeIds: [],
+                };
+                buckets.set(key, b);
+            }
+            b.qty += 1;
+            if (typeof row.weight === 'number') { b.totalWeight += row.weight; b.hasWeight = true; }
+            if (typeof row.length === 'number') b.totalLength += row.length;
+            const entry = this._groupContainingNodeId(row.node_id);
+            if (entry) b.groups.add(entry.group.name);
+            b.nodeIds.push(row.node_id);
+        }
+
+        // Sort: classification precedence, then by profile, then length
+        const clsOrder = { postprocess: 0, 'bought-out': 1, exclude: 2, mixed: 3, pending: 4 };
+        const resolvedKey = b => clsOrder[b.classification?.action] ?? (b.classification?.mixed ? 3 : 4);
+        return [...buckets.values()].sort((a, b) => {
+            const d = resolvedKey(a) - resolvedKey(b);
+            if (d !== 0) return d;
+            const p = (a.profile || '').localeCompare(b.profile || '');
+            if (p !== 0) return p;
+            return (a.length || 0) - (b.length || 0);
+        });
+    }
+
+    _nativeBomConsolidatedRow(c, cols) {
+        const length = c.length != null ? c.length : '';
+        const totalLength = c.hasLength ? this._fmtNumber(c.totalLength, 0) : '';
+        const totalWeight = c.hasWeight ? this._fmtNumber(c.totalWeight, 1) : '';
+        const clsLabel = c.classification
+            ? this._classificationLabel(c.classification.action, c.classification.origin, c.classification.mixed)
+            : '<span class="nb-pending">Pending</span>';
+
+        let groupCell = '';
+        if (cols.hasGroups) {
+            const names = [...c.groups];
+            if (names.length === 0) {
+                groupCell = '<td></td>';
+            } else if (names.length === 1) {
+                groupCell = `<td><span class="nb-group" title="${this._esc(names[0])}">${this._esc(names[0])}</span></td>`;
+            } else {
+                groupCell = `<td><span class="nb-group" title="${this._esc(names.join(', '))}">${this._esc(names[0])} (+${names.length - 1})</span></td>`;
+            }
+        }
+
+        return `<tr>
+            <td><span class="nb-entity">${this._esc(c.entity)}</span></td>
+            <td>${this._esc(c.profile)}</td>
+            <td>${this._esc(c.grade)}</td>
+            <td class="nb-num">${length}</td>
+            <td class="nb-num">${c.qty}</td>
+            <td class="nb-num">${totalLength}</td>
+            <td class="nb-num">${totalWeight}</td>
+            <td>${clsLabel}</td>
+            ${groupCell}
+        </tr>`;
+    }
+
+    /** Escape a single CSV field per RFC 4180. */
+    _csvField(v) {
+        if (v == null) return '';
+        const s = String(v);
+        if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+    }
+
+    _classificationLabelPlain(resolved) {
+        if (!resolved) return '';
+        if (resolved.mixed) return 'Mixed';
+        if (resolved.action === 'postprocess') return 'CNC';
+        if (resolved.action === 'bought-out') return 'BO';
+        if (resolved.action === 'exclude') return 'EXC';
+        return resolved.action || '';
+    }
+
+    /**
+     * Download a CSV of the Full BOM reflecting the active view.  Per-instance
+     * keeps one row per physical part with every column (including GUIDs and
+     * Tekla pset values when present); Consolidated rolls up identical rows
+     * with Qty + Total Length + Total Weight.
+     */
+    _downloadNativeBomCsv() {
+        const rows = Array.isArray(this._nativeBom) ? this._nativeBom : [];
+        if (rows.length === 0) {
+            alert('No BOM data to export.');
+            return;
+        }
+
+        let lines;
+        let tagSuffix;
+        if (this._nativeBomView === 'consolidated') {
+            const cons = this._consolidateNativeBom(rows);
+            const headers = [
+                'entity', 'profile', 'grade', 'length_mm',
+                'qty', 'total_length_mm', 'total_weight_kg',
+                'classification', 'groups',
+            ];
+            lines = [headers.join(',')];
+            for (const c of cons) {
+                const groups = [...c.groups].join('; ');
+                lines.push([
+                    this._csvField(c.entity),
+                    this._csvField(c.profile),
+                    this._csvField(c.grade),
+                    this._csvField(c.length ?? ''),
+                    this._csvField(c.qty),
+                    this._csvField(c.hasLength ? Math.round(c.totalLength) : ''),
+                    this._csvField(c.hasWeight ? c.totalWeight.toFixed(2) : ''),
+                    this._csvField(this._classificationLabelPlain(c.classification)),
+                    this._csvField(groups),
+                ].join(','));
+            }
+            tagSuffix = 'consolidated';
+        } else {
+            const headers = [
+                'node_id', 'guid', 'type_guid',
+                'entity', 'mark', 'profile',
+                'material', 'grade',
+                'length_mm', 'weight_kg', 'volume_m3', 'area_m2',
+                'assembly_mark', 'assembly_position',
+                'pour', 'phase', 'finish', 'part_class',
+                'source', 'classification', 'group',
+            ];
+            lines = [headers.join(',')];
+            for (const r of rows) {
+                const resolved = this._resolveClassification(r.node_id);
+                const grp = this._groupContainingNodeId(r.node_id);
+                lines.push([
+                    this._csvField(r.node_id),
+                    this._csvField(r.guid ?? ''),
+                    this._csvField(r.type_guid ?? ''),
+                    this._csvField(r.entity ?? ''),
+                    this._csvField(r.mark ?? ''),
+                    this._csvField(r.profile ?? ''),
+                    this._csvField(r.material ?? ''),
+                    this._csvField(r.grade ?? ''),
+                    this._csvField(r.length ?? ''),
+                    this._csvField(r.weight ?? ''),
+                    this._csvField(r.volume ?? ''),
+                    this._csvField(r.area ?? ''),
+                    this._csvField(r.assembly_mark ?? ''),
+                    this._csvField(r.assembly_position ?? ''),
+                    this._csvField(r.pour ?? ''),
+                    this._csvField(r.phase ?? ''),
+                    this._csvField(r.finish ?? ''),
+                    this._csvField(r.part_class ?? ''),
+                    this._csvField(r.source ?? ''),
+                    this._csvField(this._classificationLabelPlain(resolved)),
+                    this._csvField(grp ? grp.groupPath : ''),
+                ].join(','));
+            }
+            tagSuffix = 'per-instance';
+        }
+
+        // Prepend UTF-8 BOM so Excel opens accented / special chars cleanly.
+        const csv = '﻿' + lines.join('\r\n') + '\r\n';
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const stem = this._lastProjectNumber
+            || (this._currentFilename ? this._currentFilename.replace(/\.[^.]+$/, '') : 'project');
+        a.download = `${stem}-full-bom-${tagSuffix}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     _refreshNativeBomIfOpen() {
@@ -3520,7 +4029,7 @@ export class AnalysisPage {
 
         const allNestableItems = [...cncItems, ...unknownItems];
         panel.querySelector('.parts-nesting-btn')?.addEventListener('click', () => {
-            this._showNestingSettingsDialog(allNestableItems);
+            this._showNestingSettingsDialog(this._buildNestingItems(allNestableItems));
         });
 
         // Render existing cutting list if we have one
@@ -4231,12 +4740,63 @@ export class AnalysisPage {
     }
 
     /**
-     * Show the nesting settings dialog — stock length, qty, kerf, per-section overrides.
+     * Build nesting items straight from ``analysis.native_bom``.
+     *
+     * Criteria: the row's resolved classification is ``postprocess`` AND its
+     * entity is a length-cut profile (Section / HollowSection) AND it has
+     * both a profile designation and a length.  Works uniformly for STEP
+     * (populated post-CNC analysis) and IFC (populated at parse time from
+     * Tekla psets).
      */
-    _showNestingSettingsDialog(bomItems) {
-        const nestingItems = this._buildNestingItems(bomItems);
-        if (nestingItems.length === 0) {
-            alert('No section items available for nesting. Run CNC analysis first.');
+    /**
+     * Entities that are physically not nestable (no bar-stock concept).  Any
+     * BOM row whose entity is outside this set — STEP "Section"/"HollowSection"
+     * as well as IFC "IfcBeam"/"IfcColumn"/"IfcMember" etc. — is eligible if
+     * it carries a profile and a length.
+     */
+    static _NON_NESTABLE_ENTITIES = new Set([
+        'Plate', 'IfcPlate',
+        'MultiSolidPart',
+        'Part',
+        'IfcBuildingElementProxy',
+        'IfcFooting', 'IfcPile',
+    ]);
+
+    _buildNestingItemsFromNativeBom() {
+        const rows = Array.isArray(this._nativeBom) ? this._nativeBom : [];
+        const items = [];
+        let idx = 0;
+        for (const row of rows) {
+            const resolved = this._resolveClassification(row.node_id);
+            if (resolved?.action !== 'postprocess') continue;
+            if (AnalysisPage._NON_NESTABLE_ENTITIES.has(row.entity)) continue;
+            if (!row.profile || !row.length) continue;
+            items.push({
+                item_index: idx++,
+                ref_id: row.node_id,
+                section: row.profile,
+                length: Math.round(row.length),
+                parent: row.assembly_mark || '',
+                member_name: row.mark || '',
+            });
+        }
+        return items;
+    }
+
+    /** Count how many Full-BOM rows currently qualify for nesting. */
+    _nestableCountFromNativeBom() {
+        return this._buildNestingItemsFromNativeBom().length;
+    }
+
+    /**
+     * Show the nesting settings dialog — stock length, qty, kerf, per-section overrides.
+     * Accepts pre-built nesting items so both the Standard-BOM path (which
+     * synthesises from CNC analysis results) and the Full-BOM path (which
+     * reads native_bom directly) can share the dialog.
+     */
+    _showNestingSettingsDialog(nestingItems) {
+        if (!Array.isArray(nestingItems) || nestingItems.length === 0) {
+            alert('No CNC-classified section parts available for nesting.');
             return;
         }
 
