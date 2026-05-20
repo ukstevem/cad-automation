@@ -641,6 +641,45 @@
     font-size: 0.9rem;
 }
 
+/* ===== Viewer load status (BOM-vs-scene reconciliation) ===== */
+.viewer-load-status {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #f8fafc;
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+.viewer-load-status .vls-header {
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+.viewer-load-status .vls-header-ok    { color: #15803d; }
+.viewer-load-status .vls-header-warn  { color: #b45309; }
+.viewer-load-status .vls-icon         { margin-right: 0.25rem; }
+.viewer-load-status .vls-tally {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.9rem;
+    color: var(--cad-muted);
+}
+.viewer-load-status .vls-entity-fail  { color: #b45309; }
+.viewer-load-status .vls-fail-count   { color: #b45309; font-weight: 600; }
+.viewer-load-status .vls-failures {
+    margin-top: 0.4rem;
+    color: var(--cad-muted);
+}
+.viewer-load-status .vls-failures summary { cursor: pointer; }
+.viewer-load-status .vls-failures ul {
+    margin: 0.3rem 0 0;
+    padding-left: 1.2rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+.viewer-load-status .vls-failures code { font-size: 0.72rem; }
+.viewer-load-status .vls-fail-reason   { color: #b45309; }
+
 /* ===== Shape details ===== */
 details {
     margin-top: 1rem;
@@ -1016,6 +1055,48 @@ details summary {
 .parts-cnc-dl-btn:hover {
     background: #e2e8f0;
     color: #0f172a;
+}
+
+.parts-cnc-dl-btn.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Freshness banner above the BOM table — explains why the Analyse button
+   and downloads are gated.  Stale state uses amber, missing state blue. */
+.parts-list-state-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.5rem 0.85rem;
+    margin: 0 0.6rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+
+.parts-list-state-banner.missing {
+    background: #dbeafe;
+    color: #1e3a8a;
+    border: 1px solid #93c5fd;
+}
+
+.parts-list-state-banner.stale {
+    background: #fef3c7;
+    color: #78350f;
+    border: 1px solid #fcd34d;
+}
+
+.parts-state-consolidate-btn {
+    flex-shrink: 0;
+    padding: 0.18rem 0.7rem !important;
+    font-size: 0.75rem !important;
+    border-radius: 4px !important;
+    background: #fff !important;
+    color: inherit !important;
+    border: 1px solid currentColor !important;
 }
 
 /* BOM download button in the panel header */

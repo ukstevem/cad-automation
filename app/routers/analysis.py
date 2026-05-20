@@ -172,6 +172,11 @@ def _save_consolidation(filename: str, result: dict):
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Stamp the result so the CNC pipeline can detect when consolidation has
+    # been re-run since the last analysis (stale-CNC state).
+    result = dict(result)
+    result["consolidated_at"] = datetime.now(timezone.utc).isoformat()
+
     existing["consolidation"] = result
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     logger.info(

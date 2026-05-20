@@ -137,6 +137,10 @@ export class ApiClient {
         return this._get(`/api/v1/cnc-analysis/result/${encodeURIComponent(filename)}`);
     }
 
+    async getCncState(filename) {
+        return this._get(`/api/v1/cnc-analysis/state/${encodeURIComponent(filename)}`);
+    }
+
     async startCncAnalysis(filename, refIds, memberIds, parentNames = {}, projectNumber = '', steelGrade = '', force = false) {
         return this._postJson(
             `/api/v1/cnc-analysis/analyse/${encodeURIComponent(filename)}`,

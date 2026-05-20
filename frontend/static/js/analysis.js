@@ -128,6 +128,11 @@ export class AnalysisPage {
         /** @type {Object|null} CNC analysis results keyed by ref_id (null = not yet loaded) */
         this._cncAnalysisResults = null;
 
+        /** @type {{state:string, consolidated_at:string|null, analyzed_at:string|null,
+         *          cnc_ref_count:number, stale_cnc_refs:string[]}|null}
+         *  Consolidation/CNC freshness for gating the Analyse/Download buttons. */
+        this._cncState = null;
+
         /** @type {number|null} CNC analysis poll timer */
         this._cncPollTimer = null;
 
@@ -299,6 +304,7 @@ export class AnalysisPage {
                                 Click a node in the tree to preview its 3D model
                             </div>
                         </div>
+                        <div id="viewer-load-status" class="viewer-load-status" hidden></div>
                     </div>
                 </div>
 
@@ -1186,6 +1192,7 @@ export class AnalysisPage {
             this._groupMode = false;
             this._groupSelection.clear();
             this._isolatedGroupId = null;
+            this._renderViewerLoadStatus(null, []);
             // Revert: if a node is selected with an STL, show it alone; else placeholder.
             if (this._selectedNodeId && this.stlMap.has(this._selectedNodeId)) {
                 this._loadInViewer(this.stlMap.get(this._selectedNodeId));
@@ -1224,9 +1231,10 @@ export class AnalysisPage {
 
         panel.classList.add('loading');
         try {
-            await this._viewer.loadScene(items);
+            const summary = await this._viewer.loadScene(items);
             this._meshIndexByNodeId.clear();
             items.forEach((item, i) => this._meshIndexByNodeId.set(item.nodeId, i));
+            this._renderViewerLoadStatus(summary, items);
 
             // Paint each mesh in its classification colour so overall progress
             // is visible at a glance.
@@ -1259,6 +1267,71 @@ export class AnalysisPage {
         } finally {
             panel.classList.remove('loading');
         }
+    }
+
+    /**
+     * Render BOM-vs-scene reconciliation banner above the viewer panel.
+     *
+     * Shows: total loaded vs total requested, per-entity tally pulled from
+     * native_bom (so the user can sanity-check 'I expected 1542 IfcBeam, the
+     * scene rendered 1530 — 12 are missing'), and an expandable list of the
+     * actual failed URLs. Independent of the loader-failure root cause; its
+     * job is to make completeness observable.
+     */
+    _renderViewerLoadStatus(summary, items) {
+        const statusEl = this.container.querySelector('#viewer-load-status');
+        if (!statusEl) return;
+        if (!summary) { statusEl.hidden = true; statusEl.innerHTML = ''; return; }
+
+        const failedUrls = new Set(summary.failures.map(f => f.url));
+        const bomByNodeId = new Map();
+        if (Array.isArray(this._nativeBom)) {
+            for (const r of this._nativeBom) bomByNodeId.set(r.node_id, r);
+        }
+
+        // Tally loaded/failed per entity across the items we actually asked for.
+        const tally = new Map(); // entity -> {loaded, failed}
+        for (const item of items) {
+            const row = bomByNodeId.get(item.nodeId);
+            const ent = row?.entity || 'Unknown';
+            if (!tally.has(ent)) tally.set(ent, { loaded: 0, failed: 0 });
+            if (failedUrls.has(item.url)) tally.get(ent).failed++;
+            else tally.get(ent).loaded++;
+        }
+
+        const totalAsked = summary.total;
+        const totalLoaded = summary.loaded;
+        const totalFailed = summary.failures.length;
+
+        const tallyHtml = Array.from(tally.entries())
+            .sort((a, b) => (b[1].loaded + b[1].failed) - (a[1].loaded + a[1].failed))
+            .map(([ent, c]) => {
+                const cls = c.failed > 0 ? 'vls-entity vls-entity-fail' : 'vls-entity';
+                const failPart = c.failed > 0 ? ` <span class="vls-fail-count">(${c.failed} failed)</span>` : '';
+                return `<span class="${cls}"><strong>${this._esc(ent)}</strong> ${c.loaded}${failPart}</span>`;
+            }).join('');
+
+        const headerCls = totalFailed > 0 ? 'vls-header vls-header-warn' : 'vls-header vls-header-ok';
+        const headerIcon = totalFailed > 0 ? '⚠' : '✓';
+        const headerText = totalFailed > 0
+            ? `${totalLoaded} of ${totalAsked} parts rendered (${totalFailed} failed)`
+            : `${totalLoaded} of ${totalAsked} parts rendered`;
+
+        const failuresList = totalFailed > 0
+            ? `<details class="vls-failures">
+                 <summary>Show failed URLs (${totalFailed})</summary>
+                 <ul>${summary.failures.slice(0, 200).map(f =>
+                     `<li><code>${this._esc(f.url.split('/').pop())}</code> — <span class="vls-fail-reason">${this._esc(f.reason)}</span></li>`
+                 ).join('')}${totalFailed > 200 ? `<li>… ${totalFailed - 200} more</li>` : ''}</ul>
+               </details>`
+            : '';
+
+        statusEl.innerHTML = `
+            <div class="${headerCls}"><span class="vls-icon">${headerIcon}</span> ${headerText}</div>
+            <div class="vls-tally">${tallyHtml}</div>
+            ${failuresList}
+        `;
+        statusEl.hidden = false;
     }
 
     _highlightSelectedInAssembly(nodeId) {
@@ -3081,9 +3154,25 @@ export class AnalysisPage {
                         this._cncAnalysing = false;
                     }
                 }),
+            this._refreshCncState(filename),
         ]).finally(() => {
             this._renderPartsList(this._consolidationGroups);
         });
+    }
+
+    /**
+     * Refresh the CNC freshness state from the backend.  Sets this._cncState
+     * to ``{state, consolidated_at, analyzed_at, cnc_ref_count, stale_cnc_refs}``
+     * or null on failure.  Safe to call anytime — non-blocking, never throws.
+     */
+    async _refreshCncState(filename) {
+        if (!filename) return;
+        try {
+            const resp = await this.api.getCncState(filename);
+            this._cncState = resp || null;
+        } catch (e) {
+            this._cncState = null;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -3099,6 +3188,22 @@ export class AnalysisPage {
             if (btn) btn.textContent = 'Full BOM';
             return;
         }
+
+        // Best-effort: load any cached CNC results so DXF/NC1 download icons
+        // can appear on matching rows.  Non-blocking — if the fetch is slow
+        // or the file has no CNC analysis yet, the BOM still renders cleanly.
+        const filename = this._currentFilename;
+        if (filename && this._cncAnalysisResults == null && !this._cncLoading) {
+            this._cncLoading = true;
+            this.api.getCncResult(filename)
+                .then(resp => {
+                    if (resp?.results) this._cncAnalysisResults = resp.results;
+                    if (panel && !panel.hidden) this._renderNativeBom();
+                })
+                .catch(() => {})
+                .finally(() => { this._cncLoading = false; });
+        }
+
         this._renderNativeBom();
         if (btn) btn.textContent = 'Hide Full BOM';
     }
@@ -3153,6 +3258,7 @@ export class AnalysisPage {
                     <th class="nb-num">Qty</th>
                     <th class="nb-num">Total&nbsp;Length&nbsp;(mm)</th>
                     <th class="nb-num">Total&nbsp;Weight&nbsp;(kg)</th>
+                    <th>Used&nbsp;In</th>
                     <th>Classification</th>
                     ${hasGroups ? '<th>Groups</th>' : ''}
                 </tr>`;
@@ -3186,7 +3292,35 @@ export class AnalysisPage {
                 ? `<button class="outline native-bom-nest-btn" disabled>Nesting…</button>`
                 : `<button class="outline native-bom-nest-btn" title="Nest all CNC-classified sections from this BOM">✂ Nest Sections (${nestableCount})</button>`)
             : '';
+        // DXF / NC1 zip buttons only when there's a CNC analysis available.
+        const hasCncResults = this._cncAnalysisResults && Object.keys(this._cncAnalysisResults).length > 0;
+        const dxfZipBtn = hasCncResults
+            ? `<button class="outline native-bom-dxf-zip-btn" title="Download every generated DXF as a zip">↓ DXF&nbsp;zip</button>` : '';
+        const nc1ZipBtn = hasCncResults
+            ? `<button class="outline native-bom-nc1-zip-btn" title="Download every generated NC1 as a zip">↓ NC1&nbsp;zip</button>` : '';
         const csvBtn = `<button class="outline native-bom-csv-btn" title="Download this BOM as CSV (matches the current view)">↓ CSV</button>`;
+        const jsonBtn = `<button class="outline native-bom-json-btn" title="Download this BOM as JSON (matches the current view)">↓ JSON</button>`;
+        const xlsxBtn = hasCncResults
+            ? `<button class="outline native-bom-xlsx-btn" title="Download BOM workbook (.xlsx) with embedded thumbnails">↓ Excel</button>` : '';
+        const consolidateBtn = this._consolidating
+            ? `<button class="outline native-bom-consolidate-btn" disabled>Consolidating…</button>`
+            : (this._consolidationGroups
+                ? `<button class="outline native-bom-consolidate-btn" title="Re-run geometric consolidation">Re-consolidate</button>`
+                : `<button class="outline native-bom-consolidate-btn" title="Group identical-geometry parts across the whole tree">Consolidate</button>`);
+
+        // "Analyse CNC" is only relevant when there's at least one row marked
+        // as CNC (postprocess).  Re-analyse appears once some analysis has
+        // already been done; otherwise it says "Analyse".
+        const cncCount = (rows || []).reduce((n, r) => {
+            const c = this._resolveClassification(r.node_id);
+            return n + (c?.action === 'postprocess' ? 1 : 0);
+        }, 0);
+        const hasAnyCncResult = hasCncResults;
+        const analyseCncBtn = cncCount > 0
+            ? (this._cncAnalysing
+                ? `<button class="outline native-bom-cnc-analyse-btn" disabled>Analysing…</button>`
+                : `<button class="outline native-bom-cnc-analyse-btn" title="Run CNC geometric analysis on every CNC-classified part">${hasAnyCncResult ? 'Re-analyse CNC' : 'Analyse CNC'} (${cncCount})</button>`)
+            : '';
 
         const viewToggle = `
             <div class="nb-view-toggle" role="tablist" aria-label="BOM view">
@@ -3200,7 +3334,13 @@ export class AnalysisPage {
                     <span>Full BOM &middot; ${rows.length} parts &middot; ${sourceLabel} &middot; ${classifiedCount} classified${summaryExtras}</span>
                     <div class="parts-list-header-actions">
                         ${viewToggle}
+                        ${analyseCncBtn}
+                        ${consolidateBtn}
                         ${csvBtn}
+                        ${jsonBtn}
+                        ${xlsxBtn}
+                        ${dxfZipBtn}
+                        ${nc1ZipBtn}
                         ${nestBtn}
                         <button class="outline parts-list-close native-bom-close">&#x2715;</button>
                     </div>
@@ -3226,6 +3366,26 @@ export class AnalysisPage {
         });
         panel.querySelector('.native-bom-csv-btn')?.addEventListener('click', () => {
             this._downloadNativeBomCsv();
+        });
+        panel.querySelector('.native-bom-dxf-zip-btn')?.addEventListener('click', () => {
+            const f = this._currentFilename;
+            if (f) window.location.href = `/api/v1/cnc-analysis/download-all/${encodeURIComponent(f)}/dxf`;
+        });
+        panel.querySelector('.native-bom-nc1-zip-btn')?.addEventListener('click', () => {
+            const f = this._currentFilename;
+            if (f) window.location.href = `/api/v1/cnc-analysis/download-all/${encodeURIComponent(f)}/nc1`;
+        });
+        panel.querySelector('.native-bom-xlsx-btn')?.addEventListener('click', () => {
+            this._downloadBOMXlsx();  // reuses Standard BOM's existing implementation
+        });
+        panel.querySelector('.native-bom-json-btn')?.addEventListener('click', () => {
+            this._downloadNativeBomJson();
+        });
+        panel.querySelector('.native-bom-consolidate-btn')?.addEventListener('click', () => {
+            this._startConsolidation();
+        });
+        panel.querySelector('.native-bom-cnc-analyse-btn')?.addEventListener('click', () => {
+            this._startCncAnalysisFromNativeBom(false);
         });
 
         panel.querySelectorAll('.nb-view-btn').forEach(btn => {
@@ -3271,6 +3431,11 @@ export class AnalysisPage {
         const weight = row.weight != null ? this._fmtNumber(row.weight, 2) : '';
         const grade = row.grade || row.material || '';
 
+        // CNC badge + DXF/NC1 download link when a CNC result exists for the
+        // row's ref_id.  Rendered inline next to the part mark to match the
+        // Standard BOM layout.
+        const cncHtml = this._nativeBomCncHtml(row, this._currentFilename);
+
         let groupCell = '';
         if (cols.hasGroups) {
             const entry = this._groupContainingNodeId(nodeId);
@@ -3278,7 +3443,7 @@ export class AnalysisPage {
         }
 
         return `<tr data-node-id="${this._esc(nodeId)}">
-            <td>${this._esc(row.mark || '')}</td>
+            <td>${this._esc(row.mark || '')}${cncHtml ? ' ' + cncHtml : ''}</td>
             <td><span class="nb-entity">${this._esc(row.entity || '')}</span></td>
             <td>${this._esc(row.profile || '')}</td>
             <td>${this._esc(grade)}</td>
@@ -3400,6 +3565,8 @@ export class AnalysisPage {
                     hasWeight: false,
                     groups: new Set(),
                     nodeIds: [],
+                    parentNames: [],       // ordered list of distinct parents
+                    parentCounts: {},      // parent_name → occurrence count
                 };
                 buckets.set(key, b);
             }
@@ -3409,6 +3576,15 @@ export class AnalysisPage {
             const entry = this._groupContainingNodeId(row.node_id);
             if (entry) b.groups.add(entry.group.name);
             b.nodeIds.push(row.node_id);
+
+            // Used-In aggregation: row.assembly_mark is the immediate parent
+            // assembly. Track distinct parents + per-parent occurrence counts
+            // so the consolidated row can render "×4 in Weldment A, ×2 in …".
+            const parent = row.assembly_mark;
+            if (parent) {
+                if (!(parent in b.parentCounts)) b.parentNames.push(parent);
+                b.parentCounts[parent] = (b.parentCounts[parent] || 0) + 1;
+            }
         }
 
         // Sort: classification precedence, then by profile, then length
@@ -3431,6 +3607,14 @@ export class AnalysisPage {
             ? this._classificationLabel(c.classification.action, c.classification.origin, c.classification.mixed)
             : '<span class="nb-pending">Pending</span>';
 
+        // All rows in a consolidated bucket share (entity, profile, grade,
+        // length, classification) so they share the same CNC result.  Ask for
+        // the first member's CNC info to get the download link.
+        const firstNid = c.nodeIds?.[0];
+        const cncHtml = firstNid
+            ? this._nativeBomCncHtml({ node_id: firstNid }, this._currentFilename)
+            : '';
+
         let groupCell = '';
         if (cols.hasGroups) {
             const names = [...c.groups];
@@ -3444,13 +3628,14 @@ export class AnalysisPage {
         }
 
         return `<tr>
-            <td><span class="nb-entity">${this._esc(c.entity)}</span></td>
+            <td><span class="nb-entity">${this._esc(c.entity)}</span>${cncHtml ? ' ' + cncHtml : ''}</td>
             <td>${this._esc(c.profile)}</td>
             <td>${this._esc(c.grade)}</td>
             <td class="nb-num">${length}</td>
             <td class="nb-num">${c.qty}</td>
             <td class="nb-num">${totalLength}</td>
             <td class="nb-num">${totalWeight}</td>
+            <td class="parts-list-parents">${this._parentCellsHtml(c)}</td>
             <td>${clsLabel}</td>
             ${groupCell}
         </tr>`;
@@ -3561,6 +3746,68 @@ export class AnalysisPage {
         const stem = this._lastProjectNumber
             || (this._currentFilename ? this._currentFilename.replace(/\.[^.]+$/, '') : 'project');
         a.download = `${stem}-full-bom-${tagSuffix}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    /**
+     * Download the Full BOM as JSON.  Per-instance view dumps the raw rows
+     * (plus resolved classification + group path); Consolidated dumps the
+     * aggregated buckets.
+     */
+    _downloadNativeBomJson() {
+        const rows = Array.isArray(this._nativeBom) ? this._nativeBom : [];
+        if (rows.length === 0) {
+            alert('No BOM data to export.');
+            return;
+        }
+
+        const stem = this._lastProjectNumber
+            || (this._currentFilename ? this._currentFilename.replace(/\.[^.]+$/, '') : 'project');
+        let payload;
+        let tagSuffix;
+
+        if (this._nativeBomView === 'consolidated') {
+            const cons = this._consolidateNativeBom(rows);
+            tagSuffix = 'consolidated';
+            payload = {
+                view: 'consolidated',
+                generated_at: new Date().toISOString(),
+                project: stem,
+                rows: cons.map(c => ({
+                    entity: c.entity,
+                    profile: c.profile,
+                    grade: c.grade,
+                    length_mm: c.length,
+                    qty: c.qty,
+                    total_length_mm: c.hasLength ? Math.round(c.totalLength) : null,
+                    total_weight_kg: c.hasWeight ? +c.totalWeight.toFixed(2) : null,
+                    classification: this._classificationLabelPlain(c.classification),
+                    used_in: c.parentNames.map(p => ({ parent: p, qty: c.parentCounts[p] })),
+                    groups: [...c.groups],
+                })),
+            };
+        } else {
+            tagSuffix = 'per-instance';
+            payload = {
+                view: 'per-instance',
+                generated_at: new Date().toISOString(),
+                project: stem,
+                rows: rows.map(r => ({
+                    ...r,
+                    classification: this._classificationLabelPlain(this._resolveClassification(r.node_id)),
+                    group: this._groupContainingNodeId(r.node_id)?.groupPath || null,
+                })),
+            };
+        }
+
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${stem}-full-bom-${tagSuffix}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -3910,18 +4157,47 @@ export class AnalysisPage {
             }
         }
         const enc = encodeURIComponent(filename || '');
+        // Downloads share the consolidation freshness gate.  Render as
+        // disabled <span> chips when locked so the row layout stays stable.
+        const downloadsLocked = this._cncState && this._cncState.state !== 'fresh';
+        const lockTitle = downloadsLocked
+            ? (this._cncState?.state === 'missing'
+                ? 'Run consolidation before downloading'
+                : 'Outputs stale \u2014 re-run analysis first')
+            : '';
         const dxfZipLink = hasDxf
-            ? `<a href="/api/v1/cnc-analysis/download-all/${enc}/dxf" class="parts-cnc-dl-btn" download>\u2193\u00a0DXF</a>`
+            ? (downloadsLocked
+                ? `<span class="parts-cnc-dl-btn disabled" title="${lockTitle}">\u2193\u00a0DXF</span>`
+                : `<a href="/api/v1/cnc-analysis/download-all/${enc}/dxf" class="parts-cnc-dl-btn" download>\u2193\u00a0DXF</a>`)
             : '';
         const nc1ZipLink = hasNc1
-            ? `<a href="/api/v1/cnc-analysis/download-all/${enc}/nc1" class="parts-cnc-dl-btn" download>\u2193\u00a0NC1</a>`
+            ? (downloadsLocked
+                ? `<span class="parts-cnc-dl-btn disabled" title="${lockTitle}">\u2193\u00a0NC1</span>`
+                : `<a href="/api/v1/cnc-analysis/download-all/${enc}/nc1" class="parts-cnc-dl-btn" download>\u2193\u00a0NC1</a>`)
             : '';
 
         const hasAnyResults = Object.keys(this._cncAnalysisResults || {}).length > 0;
+        // Gate Analyse + Downloads on consolidation freshness (see _refreshCncState).
+        // - missing/stale-tree: hard-disable Analyse, prompt to consolidate
+        // - stale-cnc: Analyse stays enabled but auto-passes force=true so the
+        //   backend clears the stale outputs/cnc dir and re-runs
+        // - fresh: normal behaviour
+        // Downloads (.dxf/.nc1 ZIP) and the Excel BOM gate on the same state.
+        const cncState = this._cncState?.state || 'fresh';
+        const analyseDisabledReason = cncState === 'missing'
+            ? 'Run consolidation before CNC analysis'
+            : cncState === 'stale-tree'
+                ? 'Assembly was re-analysed \u2014 re-run consolidation first'
+                : '';
+        const analyseLabel = cncState === 'stale-cnc' ? 'Re-analyse (stale)' : 'Analyse';
         const analyseBtn = this._cncAnalysing
             ? `<button class="parts-cnc-analyse-btn outline" disabled>Analysing\u2026</button>`
-            : `<button class="parts-cnc-analyse-btn outline">Analyse</button>`
-              + (hasAnyResults ? `<button class="parts-cnc-reanalyse-btn outline" title="Clear cache and re-run analysis">\u21ba\u00a0Re-analyse</button>` : '');
+            : (analyseDisabledReason
+                ? `<button class="parts-cnc-analyse-btn outline" disabled title="${analyseDisabledReason}">${analyseLabel}</button>`
+                : `<button class="parts-cnc-analyse-btn outline"${cncState === 'stale-cnc' ? ' data-force="1"' : ''}>${analyseLabel}</button>`)
+              + (hasAnyResults && !analyseDisabledReason
+                  ? `<button class="parts-cnc-reanalyse-btn outline" title="Clear cache and re-run analysis">\u21ba Re-analyse</button>`
+                  : '');
 
         let tbody = '';
         if (unknownItems.length > 0) {
@@ -3959,8 +4235,11 @@ export class AnalysisPage {
                 ? `<button class="parts-consolidate-btn outline" title="Re-run consolidation">Consolidate</button>`
                 : `<button class="parts-consolidate-btn">Consolidate</button>`);
 
+        // BOM Excel download follows the same freshness gate as the NC/DXF ZIPs.
         const bomDlBtn = totalClassified > 0
-            ? `<button class="parts-bom-xlsx-btn outline" title="Download BOM as Excel with thumbnails">\u2193\u00a0BOM (.xlsx)</button>`
+            ? (downloadsLocked
+                ? `<button class="parts-bom-xlsx-btn outline" disabled title="${lockTitle}">\u2193\u00a0BOM (.xlsx)</button>`
+                : `<button class="parts-bom-xlsx-btn outline" title="Download BOM as Excel with thumbnails">\u2193\u00a0BOM (.xlsx)</button>`)
             + `<button class="parts-bom-dl-btn outline" title="Download BOM as JSON">\u2193\u00a0JSON</button>`
             : '';
 
@@ -3971,6 +4250,27 @@ export class AnalysisPage {
                 ? `<button class="parts-nesting-btn outline" disabled>Nesting\u2026</button>`
                 : `<button class="parts-nesting-btn outline">\u2702 Nesting</button>`)
             : '';
+
+        // Banner reflecting consolidation/CNC freshness state.  Shown above the
+        // table so the operator sees it before they reach the Analyse button
+        // (which is also gated, but the banner explains *why*).
+        let stateBanner = '';
+        if (cncState === 'missing') {
+            stateBanner = `<div class="parts-list-state-banner missing">
+                <span>Consolidation has not been run for this assembly. CNC analysis and downloads are locked until consolidation completes.</span>
+                <button class="parts-state-consolidate-btn">Consolidate now</button>
+            </div>`;
+        } else if (cncState === 'stale-tree') {
+            stateBanner = `<div class="parts-list-state-banner stale">
+                <span>The assembly was re-analysed after the last consolidation. Re-run consolidation before producing NC1 files.</span>
+                <button class="parts-state-consolidate-btn">Re-consolidate</button>
+            </div>`;
+        } else if (cncState === 'stale-cnc') {
+            const n = this._cncState?.stale_cnc_refs?.length || 0;
+            stateBanner = `<div class="parts-list-state-banner stale">
+                <span>${n} CNC result${n === 1 ? '' : 's'} predate the current consolidation. Re-analyse to clear stale NC files and refresh the BOM.</span>
+            </div>`;
+        }
 
         panel.innerHTML = `
             <div class="parts-list-card">
@@ -3983,6 +4283,7 @@ export class AnalysisPage {
                         <button id="parts-list-close-btn" class="outline parts-list-close">&#x2715;</button>
                     </div>
                 </div>
+                ${stateBanner}
                 <div class="parts-list-scroll">
                     <table class="parts-list-table">
                         <thead>
@@ -4010,9 +4311,16 @@ export class AnalysisPage {
             this._startConsolidation();
         });
 
+        panel.querySelector('.parts-state-consolidate-btn')?.addEventListener('click', () => {
+            this._startConsolidation();
+        });
+
         const allCncItems = [...unknownItems, ...cncItems];
-        panel.querySelector('.parts-cnc-analyse-btn')?.addEventListener('click', () => {
-            this._startCncAnalysis(allCncItems, false);
+        panel.querySelector('.parts-cnc-analyse-btn')?.addEventListener('click', (ev) => {
+            // When stale-cnc the button is rendered with data-force="1" so the
+            // click here picks that up and bypasses the cache automatically.
+            const forceFromState = ev.currentTarget?.dataset?.force === '1';
+            this._startCncAnalysis(allCncItems, forceFromState);
         });
 
         panel.querySelector('.parts-cnc-reanalyse-btn')?.addEventListener('click', () => {
@@ -4132,12 +4440,46 @@ export class AnalysisPage {
     }
 
     /**
+     * Resolve the CNC analysis result for a native_bom row.  Handles both
+     * direct rows (node_id === ref_id, which happens for IFC or for STEP
+     * placeholder rows) and per-solid rows ("<instance>:s<N>") by translating
+     * the instance-path node_id back to the XCAF ref_id via _nodeRefMap.
+     */
+    _cncResultForNativeBomRow(row) {
+        if (!this._cncAnalysisResults || !row?.node_id) return null;
+        const m = row.node_id.match(/^(.*):s(\d+)$/);
+        const instanceNodeId = m ? m[1] : row.node_id;
+        const solidIdx = m ? parseInt(m[2], 10) : null;
+        const xcafRefId = this._nodeRefMap?.get(instanceNodeId) || instanceNodeId;
+        const refResult = this._cncAnalysisResults[xcafRefId];
+        if (!refResult) return null;
+        if (refResult.type === 'multi_solid' && solidIdx != null) {
+            const solidResult = refResult.solids?.[solidIdx];
+            if (solidResult) return { result: solidResult, xcafRefId, solidIdx };
+            return { result: refResult, xcafRefId, solidIdx: null };
+        }
+        return { result: refResult, xcafRefId, solidIdx };
+    }
+
+    /** Native-BOM counterpart of _cncResultHtml: badge + optional DXF/NC1 link. */
+    _nativeBomCncHtml(row, filename) {
+        const info = this._cncResultForNativeBomRow(row);
+        if (!info) return '';
+        return this._renderCncInfo(info, filename);
+    }
+
+    /**
      * Return HTML string with result badge and optional download link for a CNC BOM item.
      */
     _cncResultHtml(item, filename) {
         const info = this._cncResultForItem(item);
         if (!info) return '';
+        return this._renderCncInfo(info, filename);
+    }
 
+    /** Shared render path used by both Standard and Full BOM for CNC badges. */
+    _renderCncInfo(info, filename) {
+        if (!info) return '';
         const { result, xcafRefId, solidIdx } = info;
         let badge = '';
         let downloadLink = '';
@@ -4477,6 +4819,83 @@ export class AnalysisPage {
      * starting CNC analysis.  Calls onConfirm(projectNumber, steelGrade) when
      * the user clicks Analyse; does nothing if the user cancels.
      */
+    /**
+     * Start CNC geometric analysis for every native_bom row whose resolved
+     * classification is 'postprocess'.  Reuses the settings dialog + backend
+     * POST flow but builds the `ref_ids / member_ids / parent_names` payload
+     * directly from native_bom rows (translating ":s<N>" suffixes back to
+     * the XCAF ref_id via _nodeRefMap).
+     */
+    _startCncAnalysisFromNativeBom(force = false) {
+        if (this._cncAnalysing) return;
+        const filename = this._currentFilename;
+        if (!filename) return;
+
+        const rows = (this._nativeBom || []).filter(r => {
+            const c = this._resolveClassification(r.node_id);
+            return c?.action === 'postprocess';
+        });
+        if (rows.length === 0) {
+            alert('No parts classified as CNC yet.');
+            return;
+        }
+
+        const refIdSet = new Set();
+        const memberIds = {};
+        const parentNames = {};
+        for (const row of rows) {
+            const m = row.node_id.match(/^(.*):s\d+$/);
+            const instanceNodeId = m ? m[1] : row.node_id;
+            const refId = this._nodeRefMap?.get(instanceNodeId) || instanceNodeId;
+            refIdSet.add(refId);
+            if (!memberIds[refId]) memberIds[refId] = row.mark || '';
+            if (!parentNames[refId]) parentNames[refId] = row.assembly_mark || row.mark || '';
+        }
+        if (refIdSet.size === 0) return;
+
+        this._showCncSettingsDialog((projectNumber, steelGrade) => {
+            this._cncAnalysing = true;
+            this._rerenderOpenBomPanels();
+
+            const url = `/api/v1/cnc-analysis/analyse/${encodeURIComponent(filename)}${force ? '?force=1' : ''}`;
+            const body = {
+                ref_ids: [...refIdSet],
+                member_ids: memberIds,
+                parent_names: parentNames,
+                project_number: projectNumber,
+                steel_grade: steelGrade,
+                force,
+            };
+            fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            })
+                .then(r => r.json())
+                .then(resp => {
+                    if (resp.cnc_task_id) {
+                        this._pollCncAnalysis(resp.cnc_task_id);
+                    } else if (resp.status === 'completed') {
+                        this._cncAnalysing = false;
+                        if (resp.results) {
+                            this._cncAnalysisResults = Object.assign(
+                                {}, this._cncAnalysisResults || {}, resp.results
+                            );
+                        }
+                        this._rerenderOpenBomPanels();
+                    } else {
+                        this._cncAnalysing = false;
+                        this._rerenderOpenBomPanels();
+                    }
+                })
+                .catch(err => {
+                    console.error('Failed to start CNC analysis:', err);
+                    this._cncAnalysing = false;
+                    this._rerenderOpenBomPanels();
+                });
+        });
+    }
+
     _showCncSettingsDialog(onConfirm) {
         // Remove any stale dialog left from a previous call
         const existing = document.getElementById('cnc-settings-dialog');
@@ -4554,10 +4973,9 @@ export class AnalysisPage {
                             {}, this._cncAnalysisResults || {}, resp.results || {}
                         );
 
-                        const panel = this.container?.querySelector('#parts-list-panel');
-                        if (panel && !panel.hidden) {
-                            this._renderPartsList(this._consolidationGroups);
-                        }
+                        // Refresh freshness — completion should move us to 'fresh'.
+                        this._refreshCncState(this._currentFilename)
+                            .finally(() => this._rerenderOpenBomPanels());
                     } else if (resp.status === 'failed') {
                         clearInterval(this._cncPollTimer);
                         this._cncPollTimer = null;
@@ -4602,7 +5020,7 @@ export class AnalysisPage {
         if (!filename) return;
 
         this._consolidating = true;
-        this._renderPartsList(null);  // Re-render to show "Consolidating…" button state
+        this._rerenderOpenBomPanels();  // show "Consolidating…" state in whichever panel is open
 
         this.api.startConsolidation(filename)
             .then(resp => {
@@ -4611,19 +5029,27 @@ export class AnalysisPage {
                     this._solidConsolidationGroups = resp.solid_groups || [];
                     this._intraSolidGroups = resp.intra_solid_groups || [];
                     this._consolidating = false;
-                    this._renderPartsList(this._consolidationGroups);
+                    this._rerenderOpenBomPanels();
                 } else if (resp.consolidation_task_id) {
                     this._pollConsolidation(resp.consolidation_task_id);
                 } else {
                     this._consolidating = false;
-                    this._renderPartsList(null);
+                    this._rerenderOpenBomPanels();
                 }
             })
             .catch(err => {
                 console.error('Failed to start consolidation:', err);
                 this._consolidating = false;
-                this._renderPartsList(null);
+                this._rerenderOpenBomPanels();
             });
+    }
+
+    /** Rerender whichever BOM panel (Standard or Full) is currently open. */
+    _rerenderOpenBomPanels() {
+        const standard = this.container?.querySelector('#parts-list-panel');
+        if (standard && !standard.hidden) this._renderPartsList(this._consolidationGroups);
+        const full = this.container?.querySelector('#native-bom-panel');
+        if (full && !full.hidden) this._renderNativeBom();
     }
 
     _pollConsolidation(taskId) {
@@ -4639,20 +5065,17 @@ export class AnalysisPage {
                         this._consolidationGroups = resp.groups;
                         this._solidConsolidationGroups = resp.solid_groups || [];
                         this._intraSolidGroups = resp.intra_solid_groups || [];
-
-                        const panel = this.container?.querySelector('#parts-list-panel');
-                        if (panel && !panel.hidden) {
-                            this._renderPartsList(this._consolidationGroups);
-                        }
+                        // Refresh freshness state so the banner reflects the
+                        // new consolidation (likely transitions missing → fresh
+                        // or fresh → stale-cnc if CNC results predate this run).
+                        this._refreshCncState(this._currentFilename)
+                            .finally(() => this._rerenderOpenBomPanels());
                     } else if (resp.status === 'failed') {
                         clearInterval(this._consolidatePollTimer);
                         this._consolidatePollTimer = null;
                         this._consolidating = false;
                         console.error('Consolidation failed:', resp.error);
-                        const panel = this.container?.querySelector('#parts-list-panel');
-                        if (panel && !panel.hidden) {
-                            this._renderPartsList(null);
-                        }
+                        this._rerenderOpenBomPanels();
                     }
                     // pending/running → keep polling
                 })

@@ -40,7 +40,11 @@ import structlog
 
 from app.config import settings
 from app.services.bom_builder import build_step_bom
-from app.services.bom_manifest import write_manifest_files
+from app.services.bom_manifest import (
+    canonical_ref_map,
+    finalize_cnc_outputs,
+    write_manifest_files,
+)
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker script
@@ -85,6 +89,64 @@ def _load_cache(filename: str) -> Optional[dict]:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("cnc_cache_read_failed", filename=filename, error=str(e))
     return None
+
+
+def _consolidation_state(cache: dict) -> str:
+    """Return the gate state for CNC analysis on this cache.
+
+    - ``"missing"``     – consolidation has never been run for this STEP file.
+    - ``"stale-tree"``  – the assembly was re-analysed after consolidation, so
+      the part_groups may not cover the current tree.  Block.
+    - ``"stale-cnc"``   – at least one cnc_analysis result predates the current
+      consolidation, so its grouping/canonical assignment may be wrong.  Block
+      unless caller passes force=true.
+    - ``"fresh"``       – good to go.
+    """
+    cons = cache.get("consolidation") or {}
+    if not cons or "consolidated_at" not in cons:
+        return "missing"
+
+    analysis_ts = ((cache.get("analysis") or {}).get("analyzed_at"))
+    if analysis_ts and cons["consolidated_at"] < analysis_ts:
+        return "stale-tree"
+
+    cons_ts = cons["consolidated_at"]
+    for result in (cache.get("cnc_analysis") or {}).values():
+        if not isinstance(result, dict):
+            continue
+        ts = result.get("analysed_at")
+        if ts and ts < cons_ts:
+            return "stale-cnc"
+
+    return "fresh"
+
+
+def _clear_cnc_outputs(filename: str, cache: dict) -> None:
+    """Wipe the run's outputs/cnc dir and clear cnc_analysis from the cache.
+
+    Called when the user passes force=true on a stale state so the rerun
+    starts from a clean slate (matches user intent: 'old NC1 locked out,
+    rebuilt only after fresh consolidation + analysis').
+    """
+    out_dir = _cnc_out_dir(filename)
+    for sub in ("nc1", "plates"):
+        sub_dir = out_dir / sub
+        if not sub_dir.is_dir():
+            continue
+        for f in sub_dir.iterdir():
+            if f.is_file():
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning("clear_cnc_file_failed", path=str(f), error=str(e))
+    for name in ("manifest.csv", "manifest.json"):
+        f = out_dir / name
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError as e:
+                logger.warning("clear_manifest_failed", path=str(f), error=str(e))
+    cache["cnc_analysis"] = {}
 
 
 def _count_ref_instances(tree: list) -> Dict[str, int]:
@@ -165,11 +227,23 @@ def _save_cnc_analysis(
         bom_rows=len(native_bom),
     )
 
-    # Emit the BOM↔NC manifest into the run's output directory so operators can
-    # tie every NC1/DXF file back to a BOM row.  Best-effort — a failure here
-    # must not break analysis caching.
+    # Reconcile filesystem with the canonical-per-BOM-Item invariant:
+    # prune non-canonical refs from cnc_analysis, delete orphan files, then
+    # rename surviving NC1/DXF files to <bom_item>[<-sN>].<ext> and rewrite
+    # NC1 line 5.  Best-effort — failures here must not break analysis caching.
+    out_dir = _cnc_out_dir(filename)
     try:
-        write_manifest_files(existing, _cnc_out_dir(filename))
+        finalize_cnc_outputs(existing, out_dir)
+        # Paths and hashes changed; re-serialise the sidecar before the
+        # manifest builder reads it back.
+        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("cnc_finalize_failed", filename=filename, error=str(e))
+
+    # Emit the BOM↔NC manifest into the run's output directory so operators can
+    # tie every NC1/DXF file back to a BOM row.
+    try:
+        write_manifest_files(existing, out_dir)
     except Exception as e:
         logger.warning("manifest_write_failed", filename=filename, error=str(e))
 
@@ -177,6 +251,39 @@ def _save_cnc_analysis(
 # ---------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------
+
+@router.get("/cnc-analysis/state/{filename}")
+async def get_cnc_state(filename: str) -> Dict[str, Any]:
+    """Report CNC pipeline freshness so the frontend can gate UI controls.
+
+    Returns ``{"state": "missing"|"stale-tree"|"stale-cnc"|"fresh", ...}``
+    plus timestamps and the count of stale refs.  Never raises — a missing
+    file still returns a state ("missing") rather than 404 so the UI doesn't
+    have to differentiate "file gone" from "no consolidation yet".
+    """
+    cache = _load_cache(filename) or {}
+    state = _consolidation_state(cache)
+    cons = cache.get("consolidation") or {}
+    analysis_ts = ((cache.get("analysis") or {}).get("analyzed_at"))
+    cons_ts = cons.get("consolidated_at")
+    cnc = cache.get("cnc_analysis") or {}
+
+    stale_refs: List[str] = []
+    if cons_ts:
+        for ref, result in cnc.items():
+            if isinstance(result, dict):
+                ts = result.get("analysed_at")
+                if ts and ts < cons_ts:
+                    stale_refs.append(ref)
+
+    return {
+        "state": state,
+        "analyzed_at": analysis_ts,
+        "consolidated_at": cons_ts,
+        "cnc_ref_count": len(cnc),
+        "stale_cnc_refs": stale_refs,
+    }
+
 
 @router.get("/cnc-analysis/result/{filename}")
 async def get_cnc_result(filename: str) -> Dict[str, Any]:
@@ -249,27 +356,84 @@ async def start_cnc_analysis(
             )
             return {"cnc_task_id": task.task_id, "status": task.status.value}
 
-    # Skip ref_ids that already have analysis results in the cache.
-    # This makes "Analyse" resumable: after a timeout the user clicks the button
-    # again and only the remaining unanalysed parts are processed.
-    # Pass force=True to bypass the cache and re-analyse everything.
-    cache = _load_cache(filename)
-    already_done: set = set() if force else set((cache or {}).get("cnc_analysis", {}).keys())
-    pending_ref_ids = [r for r in ref_ids if r not in already_done]
-    skipped = len(ref_ids) - len(pending_ref_ids)
+    cache = _load_cache(filename) or {}
+
+    # Consolidation gate: CNC analysis depends on a fresh consolidation so it
+    # can collapse multi-ref groups to a single canonical NC file per BOM Item.
+    state = _consolidation_state(cache)
+    if state == "missing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "consolidation_required",
+                "state": state,
+                "detail": "Run /analysis/consolidate before CNC analysis.",
+            },
+        )
+    if state == "stale-tree":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "consolidation_stale",
+                "state": state,
+                "detail": "Assembly was re-analysed; re-run consolidation before CNC.",
+            },
+        )
+    if state == "stale-cnc" and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "cnc_results_stale",
+                "state": state,
+                "detail": (
+                    "Consolidation was re-run after CNC analysis. "
+                    "Pass force=true to clear stale NC files and re-analyse."
+                ),
+            },
+        )
+    if state == "stale-cnc" and force:
+        _clear_cnc_outputs(filename, cache)
+
+    # Canonical filter: for any classified refs that fall in the same
+    # consolidation group, only the canonical (first) ref is analysed so the
+    # NC1 output ends up 1-to-1 with the BOM rows.
+    canonical = canonical_ref_map(cache)
+    seen_canons: set = set()
+    canonical_pending: List[str] = []
+    for r in ref_ids:
+        c = canonical.get(r, r)
+        if c not in seen_canons:
+            seen_canons.add(c)
+            canonical_pending.append(c)
+
+    # Skip canonicals that already have a (fresh) cached result.  force=true
+    # bypasses the cache; on stale-cnc the cache was just wiped above.
+    already_done: set = set() if force else set(cache.get("cnc_analysis", {}).keys())
+    pending_ref_ids = [r for r in canonical_pending if r not in already_done]
+    skipped = len(canonical_pending) - len(pending_ref_ids)
     if skipped:
         logger.info(
             "cnc_resuming",
             filename=filename,
             total=len(ref_ids),
+            canonical=len(canonical_pending),
             already_done=skipped,
             pending=len(pending_ref_ids),
         )
 
     if not pending_ref_ids:
-        # All ref_ids already have results — return the cached data immediately
-        cached_results = (cache or {}).get("cnc_analysis", {})
-        return {"status": "completed", "results": cached_results, "resumed": True}
+        # All canonical refs already have results — reconcile and return cache.
+        # finalize is idempotent, so running it on this "resumed" path catches
+        # any drift (e.g. files left behind from a prior failed rename).
+        try:
+            finalize_cnc_outputs(cache, _cnc_out_dir(filename))
+            _analysis_json_path(filename).write_text(
+                json.dumps(cache, indent=2), encoding="utf-8"
+            )
+            write_manifest_files(cache, _cnc_out_dir(filename))
+        except Exception as e:
+            logger.warning("cnc_resume_finalize_failed", filename=filename, error=str(e))
+        return {"status": "completed", "results": cache.get("cnc_analysis", {}), "resumed": True}
 
     # Prepare paths and arguments
     analysis_json_path = str(_analysis_json_path(filename))
@@ -416,6 +580,19 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": "CNC analysis not yet run for this file", "filename": filename},
+        )
+
+    # Refuse downloads when results are stale w.r.t. the current consolidation —
+    # the operator should never receive files that don't match the latest BOM.
+    state = _consolidation_state(cache)
+    if state in ("missing", "stale-tree", "stale-cnc"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "cnc_outputs_stale",
+                "state": state,
+                "detail": "Re-run consolidation and CNC analysis before downloading.",
+            },
         )
 
     cnc_results: dict = cache["cnc_analysis"]
@@ -622,6 +799,21 @@ async def download_bom_xlsx(filename: str) -> Response:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": "File not found", "filename": filename},
         )
+
+    # Same staleness gate as the NC1/DXF ZIP download — the BOM is the system
+    # of record for what was machined; serving it from stale data would lie.
+    cache = _load_cache(filename)
+    if cache:
+        state = _consolidation_state(cache)
+        if state in ("missing", "stale-tree", "stale-cnc"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "bom_stale",
+                    "state": state,
+                    "detail": "Re-run consolidation and CNC analysis before downloading the BOM.",
+                },
+            )
 
     from app.services.bom_excel import generate_bom_xlsx
 

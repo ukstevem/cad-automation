@@ -17,9 +17,10 @@ across the manifest files and the Excel workbook.
 """
 import csv
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
@@ -240,6 +241,242 @@ MANIFEST_HEADERS: List[str] = [
     "L_mm", "H_mm", "W_mm", "T_mm",
     "qty", "bom_total_qty", "mass_kg", "stl_url",
 ]
+
+
+def canonical_ref_map(cache: dict) -> Dict[str, str]:
+    """{ref_id: canonical_ref_id} — the first ref in each consolidation group.
+
+    Refs not present in any consolidation group map to themselves.  Used by
+    the CNC pipeline to ensure only one ref per group is analysed, and by
+    cache readers to dereference non-canonical refs to their canonical entry.
+    """
+    out: Dict[str, str] = {}
+    for g in (cache.get("consolidation") or {}).get("part_groups", []):
+        refs = g.get("ref_ids") or []
+        if not refs:
+            continue
+        canon = refs[0]
+        for r in refs:
+            out[r] = canon
+    return out
+
+
+def prune_non_canonical_refs(cache: dict) -> List[str]:
+    """Drop non-canonical cnc_analysis entries (consolidation-aware cleanup).
+
+    After the CNC submit filter, only canonical refs are re-analysed.  Stale
+    entries from older runs that pre-date the consolidation gate get removed
+    here so the sidecar mirrors the new one-NC-per-BOM-Item invariant.
+    """
+    canonical = canonical_ref_map(cache)
+    if not canonical:
+        return []
+    cnc = cache.get("cnc_analysis") or {}
+    dropped: List[str] = []
+    for ref in list(cnc.keys()):
+        canon = canonical.get(ref, ref)
+        if canon != ref:
+            cnc.pop(ref, None)
+            dropped.append(ref)
+    if dropped:
+        logger.info("pruned_non_canonical_refs", count=len(dropped))
+    return dropped
+
+
+def prune_non_postprocess_outputs(cache: dict, out_dir: Path) -> List[str]:
+    """Drop NC1/DXF files for refs that aren't classified as postprocess.
+
+    Defensive: the frontend only submits postprocess refs to CNC analysis,
+    but if any leak through (e.g. force=true with an unfiltered ref list,
+    or a re-classification after analysis) the resulting files would not be
+    in the BOM manifest and would never get renamed.  Clear them here.
+    """
+    assignments = assign_bom_items(cache)
+    cnc = cache.get("cnc_analysis") or {}
+    removed: List[str] = []
+
+    def _clear(target: dict) -> None:
+        for key in ("nc1_path", "dxf_path"):
+            p = target.get(key)
+            if not p:
+                continue
+            f = Path(p)
+            if f.exists():
+                try:
+                    f.unlink()
+                    removed.append(f.name)
+                except OSError as e:
+                    logger.warning("non_pp_delete_failed", path=str(f), error=str(e))
+            target.pop(key, None)
+            target.pop("nc1_hash", None)
+
+    for ref, result in cnc.items():
+        if not isinstance(result, dict):
+            continue
+        action = (assignments.get(ref) or {}).get("action")
+        if action == "postprocess":
+            continue
+        if result.get("type") == "multi_solid":
+            for solid in result.get("solids") or []:
+                if isinstance(solid, dict):
+                    _clear(solid)
+        else:
+            _clear(result)
+
+    if removed:
+        logger.info("pruned_non_postprocess_files", count=len(removed))
+    return removed
+
+
+def prune_orphan_files(cache: dict, out_dir: Path) -> List[str]:
+    """Delete NC1/DXF files under out_dir that no cnc_analysis entry points at.
+
+    Catches files left over from earlier runs after refs were pruned or the
+    consolidation grouping changed.  Walks both single-body results and the
+    nested ``solids`` list for multi-solid parts.
+    """
+    referenced: set = set()
+
+    def _add(p: Optional[str]) -> None:
+        if p:
+            referenced.add(Path(p).name)
+
+    for ref, result in (cache.get("cnc_analysis") or {}).items():
+        if not isinstance(result, dict):
+            continue
+        if result.get("type") == "multi_solid":
+            for solid in result.get("solids") or []:
+                _add(solid.get("nc1_path"))
+                _add(solid.get("dxf_path"))
+        else:
+            _add(result.get("nc1_path"))
+            _add(result.get("dxf_path"))
+
+    deleted: List[str] = []
+    for sub in ("nc1", "plates"):
+        sub_dir = out_dir / sub
+        if not sub_dir.is_dir():
+            continue
+        for f in sub_dir.iterdir():
+            if f.is_file() and f.name not in referenced:
+                try:
+                    f.unlink()
+                    deleted.append(f.name)
+                except OSError as e:
+                    logger.warning("orphan_delete_failed", file=str(f), error=str(e))
+    if deleted:
+        logger.info("pruned_orphan_files", count=len(deleted))
+    return deleted
+
+
+def _rewrite_nc1_member_id_and_qty(path: Path, new_id: str, qty: int) -> None:
+    """Rewrite NC1 line 5 (out_filename) and line 7 (qty) in-place.
+
+    After the canonical filter collapses a consolidation group to a single
+    surviving NC file, qty must reflect the whole BOM Item count (not just
+    the per-ref instance count the worker computed from the canonical ref).
+    """
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    lines = text.split("\n")
+    if len(lines) >= 5:
+        lines[4] = f"  {new_id}"
+    if len(lines) >= 7 and qty and qty > 0:
+        lines[6] = f"  {int(qty)}"
+    path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+
+def rename_files_to_bom_ids(cache: dict, out_dir: Path) -> List[Tuple[str, str]]:
+    """Rename surviving NC1/DXF files to ``<bom_item>[<-sN>].<ext>``.
+
+    Single-body parts → ``B042.nc1``.  Multi-solid parts → ``B042-s0.nc1``,
+    ``B042-s1.nc1`` etc.  Mutates cache.cnc_analysis paths + nc1_hash in
+    place; the caller is expected to re-serialise the sidecar afterwards.
+    """
+    from app.pipeline.dstv_writer import nc1_group_key  # local import — avoids circular
+
+    rows = build_manifest_rows(cache)
+    cnc_results = cache.get("cnc_analysis") or {}
+    renames: List[Tuple[str, str]] = []
+
+    for row in rows:
+        ref_id = row["ref_id"]
+        ext = row["ext"]
+        solid_idx = row["solid_idx"]
+        bom_item = row["bom_item"]
+        if not bom_item:
+            continue
+
+        new_stem = f"{bom_item}-s{solid_idx}" if isinstance(solid_idx, int) else bom_item
+        new_name = f"{new_stem}.{ext}"
+
+        # Locate the result dict that owns the path we're renaming.
+        ref_result = cnc_results.get(ref_id) or {}
+        if isinstance(solid_idx, int):
+            solids = ref_result.get("solids") or []
+            if solid_idx >= len(solids):
+                continue
+            target = solids[solid_idx]
+        else:
+            target = ref_result
+        if not isinstance(target, dict):
+            continue
+
+        key = "nc1_path" if ext == "nc1" else "dxf_path"
+        old_path_str = target.get(key)
+        if not old_path_str:
+            continue
+        old_path = Path(old_path_str)
+        if not old_path.exists():
+            continue
+        new_path = old_path.parent / new_name
+        if new_path != old_path:
+            if new_path.exists():
+                # Stale survivor from a previous run — overwrite
+                try:
+                    new_path.unlink()
+                except OSError as e:
+                    logger.warning("bom_rename_clear_failed", path=str(new_path), error=str(e))
+                    continue
+            try:
+                shutil.move(str(old_path), str(new_path))
+            except OSError as e:
+                logger.warning("bom_rename_failed", old=str(old_path), new=str(new_path), error=str(e))
+                continue
+            target[key] = str(new_path)
+            renames.append((str(old_path), str(new_path)))
+
+        # Always re-stamp NC1 header (cheap, idempotent) — keeps line 5
+        # and line 7 in sync with the current BOM Item + total qty even on
+        # resumed runs where the file is already at its B### name.
+        if ext == "nc1":
+            _rewrite_nc1_member_id_and_qty(new_path, new_stem, row.get("bom_total_qty") or 1)
+            try:
+                target["nc1_hash"] = nc1_group_key(new_path)
+            except Exception as e:
+                logger.warning("nc1_rehash_failed", path=str(new_path), error=str(e))
+
+    if renames:
+        logger.info("renamed_to_bom_ids", count=len(renames))
+    return renames
+
+
+def finalize_cnc_outputs(cache: dict, out_dir: Path) -> None:
+    """Reconcile sidecar + filesystem with the canonical-per-BOM-Item model.
+
+    Order matters:
+      1. Drop non-canonical cnc_analysis entries (multi-ref groups collapse
+         to a single canonical result).
+      2. Delete files no surviving entry points at (orphans from the prune
+         above or from earlier consolidation grouping changes).
+      3. Rename survivors to ``<bom_item>[<-sN>].<ext>`` and update sidecar
+         paths + nc1_hash.
+
+    Caller writes the sidecar JSON after this returns.
+    """
+    prune_non_canonical_refs(cache)
+    prune_non_postprocess_outputs(cache, out_dir)
+    prune_orphan_files(cache, out_dir)
+    rename_files_to_bom_ids(cache, out_dir)
 
 
 def write_manifest_files(cache: dict, out_dir: Path) -> Optional[Path]:
