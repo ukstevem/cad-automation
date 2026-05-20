@@ -21,6 +21,12 @@ from openpyxl.drawing.image import Image as XlImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.bom_manifest import (
+    MANIFEST_HEADERS,
+    _build_node_to_ref,
+    assign_bom_items,
+    build_manifest_rows,
+)
 from app.services.stl_thumbnail import render_stl_thumbnail
 
 logger = structlog.get_logger()
@@ -96,16 +102,30 @@ def _build_bom_data(cache: dict) -> dict:
         for rid in g.get("ref_ids", []):
             ref_to_group[rid] = g
 
+    # Shared BOM Item numbering — same source of truth as manifest.csv so the
+    # 'BOM Item' column on this sheet matches the manifest row IDs.
+    bom_assignments = assign_bom_items(cache)
+    # Resolve instance node IDs (e.g. 0:1:1:3:1) → prototype ref_id so the
+    # row iteration below finds cnc_results/member_names entries that are
+    # keyed by ref_id.
+    tree = ((cache.get("analysis") or {}).get("assembly_tree") or [])
+    node_to_ref = _build_node_to_ref(tree)
+
     # Categorise classified refs
     cnc_items: List[dict] = []
     unknown_items: List[dict] = []
     bo_items: List[dict] = []
     excluded_items: List[dict] = []
 
-    seen_groups = set()  # track consolidated group ids
+    seen_refs: set = set()  # track refs we've already emitted a row for
 
     for node_id, action in classifications.items():
-        ref_id = node_id  # in this codebase node_id == ref_id for parts
+        # Classifications are stored against instance node IDs; resolve to the
+        # prototype ref_id so the lookups against cnc_results, member_names,
+        # parent_names, and stl_map (all keyed by ref_id) succeed.
+        ref_id = node_to_ref.get(node_id, node_id)
+        if ref_id in seen_refs:
+            continue
         name = member_names.get(ref_id, ref_id)
         parent = parent_names.get(ref_id, "")
         stl_url = stl_map.get(ref_id, "")
@@ -114,10 +134,10 @@ def _build_bom_data(cache: dict) -> dict:
         # Check consolidation group
         group = ref_to_group.get(ref_id)
         if group:
-            gid = id(group)
-            if gid in seen_groups:
-                continue  # already merged into canonical entry
-            seen_groups.add(gid)
+            # Mark all refs in the group as seen so later instance
+            # classifications for any group member don't double-count.
+            for rid in group["ref_ids"]:
+                seen_refs.add(rid)
             # Use canonical name and sum qty across group
             name = group.get("canonical_name", name)
             qty = group.get("total_count", len(group.get("ref_ids", [])))
@@ -126,9 +146,14 @@ def _build_bom_data(cache: dict) -> dict:
             stl_url = stl_map.get(first_ref, stl_url)
             cnc_res = cnc_results.get(first_ref, cnc_res)
         else:
-            qty = 1
+            seen_refs.add(ref_id)
+            # Singleton ref — qty comes from the BOM assignment (per-ref
+            # instance count from the tree), keeping the BOM in lockstep with
+            # the manifest and the NC1 quantity field.
+            qty = (bom_assignments.get(ref_id) or {}).get("bom_total_qty", 1)
 
         item = {
+            "bom_item": (bom_assignments.get(ref_id) or {}).get("bom_item", ""),
             "name": name,
             "ref_id": ref_id,
             "qty": qty,
@@ -202,7 +227,7 @@ def _write_cnc_sheet(
     ws = wb.create_sheet(sheet_name)
 
     headers = [
-        "Thumbnail", "Name", "Qty", "Type", "Category", "Designation",
+        "Thumbnail", "BOM Item", "Name", "Qty", "Type", "Category", "Designation",
         "Profile", "L (mm)", "H (mm)", "W (mm)", "T (mm)",
         "Mass Each (kg)", "Total Mass (kg)", "Confidence",
         "Holes", "End Cuts",
@@ -213,7 +238,7 @@ def _write_cnc_sheet(
     _style_header(ws, len(headers))
 
     # Column widths
-    col_widths = [30, 30, 6, 8, 12, 18, 6, 10, 10, 10, 8, 12, 12, 12, 6, 8, 16, 16, 25]
+    col_widths = [30, 9, 30, 6, 8, 12, 18, 6, 10, 10, 10, 8, 12, 12, 12, 6, 8, 16, 16, 25]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -247,6 +272,7 @@ def _write_cnc_sheet(
 
         values = [
             None,  # thumbnail column — filled separately
+            item.get("bom_item", ""),
             item["name"],
             item["qty"],
             cnc.get("type", ""),
@@ -267,11 +293,11 @@ def _write_cnc_sheet(
             item.get("parent", ""),
         ]
 
-        confidence_col = 14  # 1-based column index for Confidence
+        confidence_col = 15  # 1-based column index for Confidence
 
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
-            _style_cell(cell, align=_ALIGN_RIGHT if col >= 3 and col <= 13 else _ALIGN_LEFT)
+            _style_cell(cell, align=_ALIGN_RIGHT if col >= 4 and col <= 14 else _ALIGN_LEFT)
             if col >= 2:
                 cell.fill = category_fill
             # Override confidence cell with colour-coded styling
@@ -311,20 +337,20 @@ def _write_simple_sheet(
     """Write a sheet for bought-out or excluded items (minimal columns)."""
     ws = wb.create_sheet(sheet_name)
 
-    headers = ["Thumbnail", "Name", "Qty", "Parent Assembly"]
+    headers = ["Thumbnail", "BOM Item", "Name", "Qty", "Parent Assembly"]
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
     _style_header(ws, len(headers))
 
-    col_widths = [30, 35, 8, 30]
+    col_widths = [30, 9, 35, 8, 30]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     for row_idx, item in enumerate(items, 2):
-        values = [None, item["name"], item["qty"], item.get("parent", "")]
+        values = [None, item.get("bom_item", ""), item["name"], item["qty"], item.get("parent", "")]
         for col, val in enumerate(values, 1):
             cell = ws.cell(row=row_idx, column=col, value=val)
-            _style_cell(cell, align=_ALIGN_RIGHT if col == 3 else _ALIGN_LEFT)
+            _style_cell(cell, align=_ALIGN_RIGHT if col == 4 else _ALIGN_LEFT)
             if col >= 2:
                 cell.fill = category_fill
 
@@ -343,6 +369,63 @@ def _write_simple_sheet(
                 ws.add_image(img, f"A{row_idx}")
 
     ws.freeze_panes = "B2"
+
+
+def _write_nc_index_sheet(wb: Workbook, manifest_rows: List[dict]) -> None:
+    """One row per generated NC1/DXF file linking back to BOM Item #."""
+    ws = wb.create_sheet("NC Index")
+
+    headers = [
+        "BOM Item", "Filename", "Ext", "Qty",
+        "BOM Total Qty", "Hash",
+        "Consolidation Group", "Member Name", "Parent Assembly",
+        "Type", "Category", "Designation", "Profile",
+        "L (mm)", "H (mm)", "W (mm)", "T (mm)",
+        "Mass Each (kg)", "Ref ID", "Solid Idx",
+    ]
+    for col, h in enumerate(headers, 1):
+        ws.cell(row=1, column=col, value=h)
+    _style_header(ws, len(headers))
+
+    col_widths = [9, 38, 5, 6, 12, 32, 24, 28, 25, 10, 9, 18, 8, 9, 9, 9, 8, 12, 12, 8]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # Default fill colour matches CNC sheet so it reads as part of the BOM
+    fill = _CAT_FILLS["cnc"]
+
+    for row_idx, r in enumerate(manifest_rows, 2):
+        values = [
+            r.get("bom_item", ""),
+            r.get("filename", ""),
+            r.get("ext", ""),
+            r.get("qty", ""),
+            r.get("bom_total_qty", ""),
+            r.get("nc1_hash", ""),
+            r.get("consolidation_group", ""),
+            r.get("member_name", ""),
+            r.get("parent_assembly", ""),
+            r.get("type", ""),
+            r.get("category", ""),
+            r.get("designation", ""),
+            r.get("profile_type", ""),
+            _round(r.get("L_mm")),
+            _round(r.get("H_mm")),
+            _round(r.get("W_mm")),
+            _round(r.get("T_mm")),
+            _round(r.get("mass_kg"), 3),
+            r.get("ref_id", ""),
+            r.get("solid_idx", ""),
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            _style_cell(cell, align=_ALIGN_RIGHT if col in (4, 5, 14, 15, 16, 17, 18, 20) else _ALIGN_LEFT)
+            cell.fill = fill
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = (
+        f"A1:{get_column_letter(len(headers))}{max(2, len(manifest_rows) + 1)}"
+    )
 
 
 def _compute_assembly_bbox(stl_dir: Path) -> Optional[Tuple[float, float, float]]:
@@ -494,6 +577,11 @@ def generate_bom_xlsx(filename: str) -> Optional[bytes]:
     if bom["excluded_items"]:
         _write_simple_sheet(wb, "Excluded", bom["excluded_items"],
                             _CAT_FILLS["excluded"], thumb_cache)
+
+    # NC Index — one row per generated NC1/DXF file with BOM linkage
+    manifest_rows = build_manifest_rows(cache)
+    if manifest_rows:
+        _write_nc_index_sheet(wb, manifest_rows)
 
     # Resolve assembly thumbnail and STL directory for bounding box
     run_id = filename[:8]

@@ -3,7 +3,10 @@ Standalone subprocess worker for CNC shape analysis.
 
 Run as:
     python analyse_cnc_parts.py <file_path> <analysis_json_path> \\
-                                <ref_ids_json> <out_dir> [member_ids_json]
+                                <ref_ids_json> <out_dir> \\
+                                [member_ids_json] [parent_names_json] \\
+                                [project_number] [steel_grade] \\
+                                [instance_counts_json]
 
 For each ref_id in ref_ids_json, opens the STEP file via XCAF, runs the
 full plate/section detection pipeline, and emits the results as JSON.
@@ -56,6 +59,7 @@ def main() -> None:
     parent_names_json = sys.argv[6] if len(sys.argv) > 6 else "{}"
     project_number = sys.argv[7] if len(sys.argv) > 7 else ""
     steel_grade = sys.argv[8] if len(sys.argv) > 8 else ""
+    instance_counts_json = sys.argv[9] if len(sys.argv) > 9 else "{}"
 
     # Ensure the project root is on sys.path so 'app' package is importable.
     project_root = Path(__file__).parent.parent.parent
@@ -65,6 +69,7 @@ def main() -> None:
     ref_ids = json.loads(ref_ids_json)
     member_ids = json.loads(member_ids_json)
     parent_names = json.loads(parent_names_json)
+    instance_counts = json.loads(instance_counts_json) or {}
 
     result_holder: list = [None]
     error_holder: list = [None]
@@ -104,10 +109,12 @@ def main() -> None:
                 parent_name = parent_names.get(ref_id)
                 print(f"[{i+1}/{len(ref_ids)}] Analysing {ref_id}", file=sys.stderr)
                 try:
+                    inst_count = int(instance_counts.get(ref_id, 1) or 1)
                     result = analyse_ref(file_path, ref_id, out_dir,
                                         member_id, parent_name,
                                         project_number or None,
                                         steel_grade or None,
+                                        inst_count,
                                         _doc=doc,
                                         _shape_tool=shape_tool)
                 except Exception as exc:

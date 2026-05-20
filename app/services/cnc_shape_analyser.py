@@ -329,7 +329,8 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                     file_path: str, out_dir: Path,
                     parent_name: Optional[str] = None,
                     project_number: Optional[str] = None,
-                    steel_grade: Optional[str] = None) -> Dict[str, Any]:
+                    steel_grade: Optional[str] = None,
+                    instance_count: int = 1) -> Dict[str, Any]:
     """
     Run the full pipeline on one solid shape.
     Returns a result dict with type='plate', 'section', or 'unknown'.
@@ -479,7 +480,8 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                             return _process_section(
                                 _aligned_obb, _obb_obb, _match_o, ref_id,
                                 member_id, solid_idx, file_path, out_dir,
-                                parent_name, project_number, steel_grade)
+                                parent_name, project_number, steel_grade,
+                                instance_count)
             except Exception as e:
                 logger.debug("obb_realign_failed", ref_id=ref_id, error=str(e))
             if not _obb_fallback_ok:
@@ -492,7 +494,7 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                     score=profile_match.get("Match_score"))
         return _process_section(aligned, obb, profile_match, ref_id, member_id,
                                 solid_idx, file_path, out_dir, parent_name,
-                                project_number, steel_grade)
+                                project_number, steel_grade, instance_count)
 
     logger.info("no_section_match", ref_id=ref_id,
                 L=round(L, 1), H=round(H, 1), W=round(W, 1),
@@ -541,7 +543,8 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                      score=best_match.get("Match_score"))
         return _process_section(best_shape, best_obb, best_match, ref_id,
                                 member_id, solid_idx, file_path, out_dir,
-                                parent_name, project_number, steel_grade)
+                                parent_name, project_number, steel_grade,
+                                instance_count)
 
     # Step 4c: AABB-axis retry for mesh-converted shapes.
     # Mesh triangulation creates diagonal edges longer than the actual extrusion
@@ -624,7 +627,8 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                              score=best_match.get("Match_score"))
                 return _process_section(best_shape, best_obb, best_match, ref_id,
                                         member_id, solid_idx, file_path, out_dir,
-                                        parent_name, project_number, steel_grade)
+                                        parent_name, project_number, steel_grade,
+                                        instance_count)
       except Exception as e:
         logger.debug("aabb_retry_skipped", ref_id=ref_id, error=str(e))
 
@@ -673,7 +677,8 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                     match_a.setdefault("Diagnostics", {})["area_priority"] = True
                     return _process_section(aligned, obb, match_a, ref_id,
                                             member_id, solid_idx, file_path, out_dir,
-                                            parent_name, project_number, steel_grade)
+                                            parent_name, project_number, steel_grade,
+                                            instance_count)
                 else:
                     logger.debug("area_priority_rejected",
                                  ref_id=ref_id,
@@ -734,7 +739,8 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
                      solid_idx: int, file_path: str, out_dir: Path,
                      parent_name: Optional[str] = None,
                      project_number: Optional[str] = None,
-                     steel_grade: Optional[str] = None) -> Dict[str, Any]:
+                     steel_grade: Optional[str] = None,
+                     instance_count: int = 1) -> Dict[str, Any]:
     """Run the section pipeline: DSTV pose → holes → end cuts → NC1."""
     proj_num = project_number or _DEFAULT_PROJECT
     matl = steel_grade or _DEFAULT_MATERIAL
@@ -819,6 +825,7 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
             matl_grade=matl,
             member_id=nc1_name,
             profile_match=profile_match,
+            quantity=instance_count,
         )
 
         nc1_path, nc1_hash = generate_nc1_file(df_holes, header_data, nc1_dir, web_cut)
@@ -900,6 +907,7 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
                 parent_name: Optional[str] = None,
                 project_number: Optional[str] = None,
                 steel_grade: Optional[str] = None,
+                instance_count: int = 1,
                 *,
                 _doc=None,
                 _shape_tool=None) -> Dict[str, Any]:
@@ -933,7 +941,8 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
         for idx, solid in enumerate(_iter_solids(shape)):
             solid_member = f"{safe_member}-s{idx}"
             r = _analyse_single(solid, idx, ref_id, solid_member, file_path, out_dir,
-                                parent_name, project_number, steel_grade)
+                                parent_name, project_number, steel_grade,
+                                instance_count)
             results.append(r)
         return {
             "type": "multi_solid",
@@ -943,4 +952,5 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
         }
     else:
         return _analyse_single(shape, 0, ref_id, safe_member, file_path, out_dir,
-                               parent_name, project_number, steel_grade)
+                               parent_name, project_number, steel_grade,
+                               instance_count)

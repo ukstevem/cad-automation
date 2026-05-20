@@ -2,9 +2,14 @@ import hashlib
 from pathlib import Path
 
 
-def assemble_dstv_header_data(project_number, step_path, matl_grade, member_id, profile_match):
+def assemble_dstv_header_data(project_number, step_path, matl_grade, member_id, profile_match,
+                              quantity: int = 1):
     """
     Assembles header data dictionary for DSTV NC1 file.
+
+    ``quantity`` is written to NC1 line 7 (the DSTV qty field). Defaults to 1
+    so legacy callers continue to behave as before; the CNC pipeline passes the
+    per-ref instance count from the assembly tree.
     """
     filename_stem = Path(step_path).stem
     out_filename = f"{member_id}"
@@ -16,7 +21,7 @@ def assemble_dstv_header_data(project_number, step_path, matl_grade, member_id, 
         "project_number": project_number,
         "model_filename": model_filename,
         "material_grade": matl_grade,
-        "quantity": 1,
+        "quantity": max(int(quantity or 1), 1),
         "Designation": f'{profile_match["Category"]}{profile_match["Designation"]}',
         "Mass": step_vals["mass"],
         "Height": step_vals["height"],

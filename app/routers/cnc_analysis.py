@@ -40,6 +40,7 @@ import structlog
 
 from app.config import settings
 from app.services.bom_builder import build_step_bom
+from app.services.bom_manifest import write_manifest_files
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker script
@@ -84,6 +85,28 @@ def _load_cache(filename: str) -> Optional[dict]:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("cnc_cache_read_failed", filename=filename, error=str(e))
     return None
+
+
+def _count_ref_instances(tree: list) -> Dict[str, int]:
+    """Walk the assembly tree and return {ref_id: instance_count} for every leaf part.
+
+    Matches PartsConsolidator._collect_parts traversal: assemblies are
+    recursed into, leaf nodes contribute one count per occurrence under their
+    ref_id (which is shared across all placements of the same prototype).
+    """
+    counts: Dict[str, int] = {}
+
+    def _walk(nodes: list) -> None:
+        for node in nodes or []:
+            if node.get("node_type") == "assembly":
+                _walk(node.get("children", []))
+            else:
+                ref_id = node.get("ref_id") or node.get("id")
+                if ref_id:
+                    counts[ref_id] = counts.get(ref_id, 0) + 1
+
+    _walk(tree)
+    return counts
 
 
 def _save_cnc_analysis(
@@ -141,6 +164,14 @@ def _save_cnc_analysis(
         n_refs=len(results),
         bom_rows=len(native_bom),
     )
+
+    # Emit the BOM↔NC manifest into the run's output directory so operators can
+    # tie every NC1/DXF file back to a BOM row.  Best-effort — a failure here
+    # must not break analysis caching.
+    try:
+        write_manifest_files(existing, _cnc_out_dir(filename))
+    except Exception as e:
+        logger.warning("manifest_write_failed", filename=filename, error=str(e))
 
 
 # ---------------------------------------------------------------
@@ -250,6 +281,13 @@ async def start_cnc_analysis(
     parent_names_json = json.dumps(parent_names)
     # project_number / steel_grade are plain strings — pass directly as argv
 
+    # Per-ref instance counts from the cached assembly tree.  Each NC1 file is
+    # written with the count of its own ref_id (chirality-safe — mirror twins
+    # already live in separate consolidation groups via the fingerprint).
+    tree = ((cache or {}).get("analysis") or {}).get("assembly_tree") or []
+    instance_counts = _count_ref_instances(tree)
+    instance_counts_json = json.dumps(instance_counts)
+
     async def run_cnc_async(_progress_callback):
         """Run the CNC worker in a subprocess."""
         try:
@@ -264,6 +302,7 @@ async def start_cnc_analysis(
                 parent_names_json,
                 project_number,
                 steel_grade,
+                instance_counts_json,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
