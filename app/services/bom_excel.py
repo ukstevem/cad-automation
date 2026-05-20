@@ -26,6 +26,7 @@ from app.services.bom_manifest import (
     _build_node_to_ref,
     assign_bom_items,
     build_manifest_rows,
+    build_ref_to_stl,
 )
 from app.services.stl_thumbnail import render_stl_thumbnail
 
@@ -90,7 +91,7 @@ def _build_bom_data(cache: dict) -> dict:
     member_names: Dict[str, str] = cache.get("cnc_member_names", {})
     parent_names: Dict[str, str] = cache.get("cnc_parent_names", {})
     classifications: Dict[str, str] = cache.get("project_state", {}).get("classifications", {})
-    stl_map: Dict[str, str] = cache.get("project_state", {}).get("stl_map", {})
+    stl_map_raw: Dict[str, str] = cache.get("project_state", {}).get("stl_map", {}) or {}
     consolidation: List[dict] = cache.get("consolidation", {}).get("part_groups", [])
 
     project_number = cache.get("cnc_project_number", "")
@@ -107,9 +108,11 @@ def _build_bom_data(cache: dict) -> dict:
     bom_assignments = assign_bom_items(cache)
     # Resolve instance node IDs (e.g. 0:1:1:3:1) → prototype ref_id so the
     # row iteration below finds cnc_results/member_names entries that are
-    # keyed by ref_id.
+    # keyed by ref_id.  stl_map is the same shape — invert it once for the
+    # thumbnail lookup.
     tree = ((cache.get("analysis") or {}).get("assembly_tree") or [])
     node_to_ref = _build_node_to_ref(tree)
+    stl_map = build_ref_to_stl(stl_map_raw, tree)
 
     # Categorise classified refs
     cnc_items: List[dict] = []

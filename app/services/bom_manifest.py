@@ -67,6 +67,21 @@ def _build_node_to_ref(tree: list) -> Dict[str, str]:
     return out
 
 
+def build_ref_to_stl(stl_map: Dict[str, str], tree: list) -> Dict[str, str]:
+    """Invert the instance-keyed stl_map to a ref_id → STL URL lookup.
+
+    ``stl_map`` is populated by the frontend with one entry per placed
+    instance.  Multiple instances of the same prototype share an identical
+    mesh, so the first URL seen for each ref_id is fine.
+    """
+    node_to_ref = _build_node_to_ref(tree)
+    out: Dict[str, str] = {}
+    for nid, url in (stl_map or {}).items():
+        rid = node_to_ref.get(nid, nid)
+        out.setdefault(rid, url)
+    return out
+
+
 def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     """
     Walk classifications in insertion order and assign a BOM Item ID (B001…)
@@ -142,9 +157,13 @@ def build_manifest_rows(cache: dict) -> List[Dict[str, Any]]:
     cnc_results: Dict[str, dict] = cache.get("cnc_analysis", {}) or {}
     member_names: Dict[str, str] = cache.get("cnc_member_names", {}) or {}
     parent_names: Dict[str, str] = cache.get("cnc_parent_names", {}) or {}
-    stl_map: Dict[str, str] = (cache.get("project_state") or {}).get("stl_map", {}) or {}
+    stl_map_raw: Dict[str, str] = (cache.get("project_state") or {}).get("stl_map", {}) or {}
     consolidation: List[dict] = (cache.get("consolidation") or {}).get("part_groups", [])
     tree = ((cache.get("analysis") or {}).get("assembly_tree") or [])
+
+    # stl_map is keyed by instance node IDs; invert to ref_id so the manifest
+    # rows (and the Excel BOM thumbnails) resolve correctly.
+    ref_to_stl = build_ref_to_stl(stl_map_raw, tree)
 
     # Per-ref canonical name from the consolidation groups — covers singletons
     # where cnc_member_names is empty but consolidation always supplies a name.
@@ -193,7 +212,7 @@ def build_manifest_rows(cache: dict) -> List[Dict[str, Any]]:
                 "qty": instance_counts.get(ref_id, 1),
                 "bom_total_qty": assignment["bom_total_qty"],
                 "mass_kg": r.get("mass_kg"),
-                "stl_url": stl_map.get(ref_id, ""),
+                "stl_url": ref_to_stl.get(ref_id, ""),
             }
 
         if result.get("type") == "multi_solid":
