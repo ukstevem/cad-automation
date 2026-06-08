@@ -590,13 +590,19 @@ class STLGenerator:
 
     @staticmethod
     def _unique_stl_path(directory: Path, name: str, node_id: str, seen: set) -> Path:
-        """Return a unique STL path in *directory* for *name*, appending the node_id when the
-        base filename has already been used in this generation run."""
+        """Return a unique STL path in *directory* for the given (name, node_id).
+
+        The node_id is always appended so distinct XCAF prototypes with the
+        same display name (very common — STEP files frequently reuse names
+        like "SOLID" for unrelated parts) never collide on disk.  Previously
+        the deduper only checked the per-call ``seen`` set, so two STL-gen
+        calls for different prototypes both wrote to ``<name>.stl`` and the
+        second silently clobbered the first — every BOM thumbnail derived
+        from that file would then show the surviving (wrong) mesh.
+        """
         base = _safe_filename(name) or "part"
-        candidate = f"{base}.stl"
-        if candidate in seen:
-            node_safe = _safe_filename(node_id.replace(":", "-"))
-            candidate = f"{base}_{node_safe}.stl"
+        node_safe = _safe_filename(node_id.replace(":", "-")) or "node"
+        candidate = f"{base}_{node_safe}.stl"
         seen.add(candidate)
         return directory / candidate
 
