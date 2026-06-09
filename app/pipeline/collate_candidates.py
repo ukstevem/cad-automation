@@ -296,13 +296,12 @@ const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECT
 // (no feature) — those will count as misses, which is the point (shows gaps).
 function predict(it){
   const num=v=>(v===''||v==null)?null:parseFloat(v);
-  const fill=num(it.fill_ratio), holes=num(it.n_holes), thk=num(it.thk_max_over_teff), dev=num(it.developed_ratio);
+  const holes=num(it.n_holes), thk=num(it.thk_max_over_teff), tthin=num(it.t_eff_thin_ratio);
   if(holes!=null && holes>=1) return 'SECTION';          // hollow box (RHS/SHS/CHS)
-  if(fill!=null && fill>=0.8) return 'PLATE';             // flat plate
-  if(thk!=null && thk>1.6) return 'SECTION';              // open rolled (I/UC/PFC: thick flanges)
-  if(dev!=null){ if(dev<=1.05) return 'FORMED_PLATE'; if(dev>=1.5) return 'SECTION'; }
-  if(fill!=null) return fill>=0.5?'PLATE':'SECTION';
-  return null;
+  if(tthin!=null && tthin>=0.45) return 'PLATE';          // flat-ish plate (gauge ~ thinnest dim)
+  if(it.rule_type==='section') return 'SECTION';          // matched a standard section in the library
+  if(thk!=null && thk>=1.5) return 'SECTION';             // open profile w/ distinct flanges (I/UC/PFC)
+  return 'FORMED_PLATE';                                  // thin uniform open wall (formed/angle/bent — bend feature TBD)
 }
 const KEY='fp_labels_v1';
 let labels=JSON.parse(localStorage.getItem(KEY)||'{}');

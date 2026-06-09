@@ -8,38 +8,303 @@ job,ref_id,solid_index,category,designation,issue,note
 #                  SECTION (incl. straight RHS/SHS/CHS/UB/UC/PFC/EA),
 #                  PLATE, FORMED_PLATE, BENT_SECTION (in-house bent tube/section),
 #                  BOUGHT_OUT, EXCLUDE  (or a specific designation for sections)
-#   designation  - verified designation, e.g. "203x102x23" (blank for plates)
 #   issue        - 1 if this part is a known-bad / mis-detected case, else blank
 #   note         - free-text reason / context
 # Lines beginning with '#' and blank lines are ignored by the exporter.
-# --- 2026-06-08: first batch from the formed-plate gallery review (29 parts
-#     flagged as 'filed as plate but not flat'). 9 formed, 6 section, 14 plate.
+# --- 2026-06-09: broadened gallery review (~290 parts across 40 jobs, all classes).
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:146,0,FORMED_PLATE,,1,gallery: formed plate
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:114,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:70,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:67,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:59,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:24,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:119,0,SECTION,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:144,0,PLATE,,,gallery
+"10284 LATEST FRAME + SUPP PLATES",0:1:1:3,0,PLATE,,,gallery
 "10296 CIV-006 ASS",0:1:1:43,0,FORMED_PLATE,,1,gallery: formed plate
-"10296 CIV-006 ASS",0:1:1:20,0,SECTION,,,gallery
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:623,0,FORMED_PLATE,,1,gallery: formed plate
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:224,0,SECTION,,,gallery
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:239,0,SECTION,,,gallery
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:619,0,FORMED_PLATE,,1,gallery: formed plate
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:618,0,FORMED_PLATE,,1,gallery: formed plate
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:816,0,PLATE,,,gallery
-"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:621,0,PLATE,,,gallery
-"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:24,0,SECTION,,,gallery
-"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:301,0,PLATE,,,gallery
-"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:283,0,SECTION,,,gallery
-"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:284,0,SECTION,,,gallery
-"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:5,0,PLATE,,,gallery
-"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:26,0,PLATE,,,gallery
-"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:27,0,PLATE,,,gallery
+"10296 CIV-006 ASS",0:1:1:7,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:31,0,SECTION,,,gallery
+"10296 CIV-006 ASS",0:1:1:17,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:25,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:27,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:8,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:32,0,PLATE,,,gallery
+"10296 CIV-006 ASS",0:1:1:9,0,PLATE,,,gallery
+"10296 CIV-009",0:1:1:9,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-009",0:1:1:8,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-009",0:1:1:14,0,SECTION,,,gallery
+"10296 CIV-009",0:1:1:4,0,SECTION,,,gallery
+"10296 CIV-009",0:1:1:11,0,SECTION,,,gallery
+"10296 CIV-009",0:1:1:7,0,PLATE,,,gallery
+"10296 CIV-009",0:1:1:2,0,PLATE,,,gallery
+"10296 CIV-009",0:1:1:12,0,PLATE,,,gallery
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:22,0,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:24,0,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:47,4,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:47,5,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:47,3,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:34,6,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:47,1,BENT_SECTION,,1,gallery: bent section
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:469,0,BOUGHT_OUT,,,gallery
+"2025 12-15 C25001-PSS-INTERNALS",0:1:1:472,0,BOUGHT_OUT,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:567,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:389,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:518,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:411,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:664,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:690,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:663,0,SECTION,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:143,0,PLATE,,,gallery
+"3D SERVICE STAIR FROM +41.950 to +48.430",0:1:1:140,0,PLATE,,,gallery
+"C25001-1-0101 Rev A",0:1:1:6,20,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:7,20,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:8,10,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:10,10,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:12,19,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:13,19,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:11,19,SECTION,,,gallery
+"C25001-1-0101 Rev A",0:1:1:8,0,PLATE,,,gallery
+"C25001-1-0101 Rev A",0:1:1:3,0,PLATE,,,gallery
+"C25001-MIN INTERNALS",0:1:1:11,0,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:12,0,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:15,2,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:6,2,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:2,5,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:3,2,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:5,5,SECTION,,,gallery
+"C25001-MIN INTERNALS",0:1:1:4,5,PLATE,,,gallery
+"C25001-MIN INTERNALS",0:1:1:25,3,PLATE,,,gallery
+"G8702-P5-001",0:1:1:814,0,SECTION,,,gallery
+"G8702-P5-001",0:1:1:716,0,SECTION,,,gallery
+"G8702-P5-001",0:1:1:704,0,PLATE,,,gallery
+"G8702-P5-001",0:1:1:883,0,PLATE,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:46,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:168,0,FORMED_PLATE,,1,gallery: formed plate
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:161,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:159,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:152,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:81,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:6,0,SECTION,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:177,0,PLATE,,,gallery
+"GT 132-33kV__G8702-C6-001-3D Rev02",0:1:1:164,0,PLATE,,,gallery
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:186,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:148,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:143,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:185,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:145,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:187,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:181,0,EXCLUDE,,,gallery: artifact/excluded
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:520,0,PLATE,,,gallery
+"GT 132-33kV__G8702-P3-001-3D",0:1:1:525,0,PLATE,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:134,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:135,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:572,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:573,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:438,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:439,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:41,0,SECTION,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:754,0,PLATE,,,gallery
+"GT 132-33kV__G8702-P7-001 rev 03 3D",0:1:1:722,0,PLATE,,,gallery
+"LATEST FULL FRAME",0:1:1:121,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:115,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:54,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:79,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:81,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:64,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:11,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:5,0,SECTION,,,gallery
+"LATEST FULL FRAME",0:1:1:93,0,PLATE,,,gallery
+"Portal Assembly",0:1:1:14,0,EXCLUDE,,,gallery: artifact/excluded
+"Portal Assembly",0:1:1:9,14,EXCLUDE,,,gallery: artifact/excluded
+"Portal Assembly",0:1:1:9,19,EXCLUDE,,,gallery: artifact/excluded
+"Portal Assembly",0:1:1:16,0,SECTION,,,gallery
+"Portal Assembly",0:1:1:6,0,SECTION,,,gallery
+"Portal Assembly",0:1:1:11,0,SECTION,,,gallery
+"Portal Assembly",0:1:1:18,0,SECTION,,,gallery
+"Portal Assembly",0:1:1:12,0,PLATE,,,gallery
+"Portal Assembly",0:1:1:7,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:32,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:44,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:43,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:31,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:116,0,FORMED_PLATE,,1,gallery: formed plate
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:126,0,FORMED_PLATE,,1,gallery: formed plate
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:103,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:107,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-C8-001 rev 01 3D",0:1:1:110,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:663,0,EXCLUDE,,,gallery: artifact/excluded
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:811,0,EXCLUDE,,,gallery: artifact/excluded
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:725,0,EXCLUDE,,,gallery: artifact/excluded
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:311,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:330,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:331,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:332,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:359,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:369,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-P6-001 rev 02 3D",0:1:1:93,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-P6-001 rev 02 3D",0:1:1:71,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-P6-001 rev 02 3D",0:1:1:73,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:38,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:39,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:40,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:33,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:23,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:1,0,SECTION,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:51,0,FORMED_PLATE,,1,gallery: formed plate
+"SCT 132kV__G8702-C3-001-3D",0:1:1:20,0,PLATE,,,gallery
+"SCT 132kV__G8702-C3-001-3D",0:1:1:16,0,PLATE,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:47,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:13,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:15,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:43,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:153,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:44,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:151,0,SECTION,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:175,0,PLATE,,,gallery
+"SCT 132kV__G8702-C6-001-3D Rev02",0:1:1:185,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:28,0,FORMED_PLATE,,1,gallery: formed plate
 "SCT 132kV__G8702-S2-001-3D",0:1:1:5,0,PLATE,,,gallery
-"SCT 132kV__G8702-S2-001-3D",0:1:1:2,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:3,0,SECTION,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:40,0,SECTION,,,gallery
 "SCT 132kV__G8702-S2-001-3D",0:1:1:25,0,PLATE,,,gallery
-"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:6,0,PLATE,,,gallery
-"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:83,0,PLATE,,,gallery
-"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:84,0,PLATE,,,gallery
-"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:934,0,FORMED_PLATE,,1,gallery: formed plate
-"SGT 132kV__G8702-P1-001-3D",0:1:1:5,0,PLATE,,,gallery
-"SSSC2 Assembly",0:1:1:27,0,FORMED_PLATE,,1,gallery: formed plate
-"SSSC2 Assembly",0:1:1:26,0,FORMED_PLATE,,1,gallery: formed plate
-"SSSC2 Assembly",0:1:1:39,0,FORMED_PLATE,,1,gallery: formed plate
-"SSSC2 Assembly",0:1:1:40,0,FORMED_PLATE,,1,gallery: formed plate
-"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:14,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:2,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:1,0,PLATE,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:7,0,EXCLUDE,,,gallery: artifact/excluded
+"SGT 132kV__G8702-C4-001-3D",0:1:1:1,0,EXCLUDE,,,gallery: artifact/excluded
+"SGT 132kV__G8702-C4-001-3D",0:1:1:147,0,SECTION,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:146,0,SECTION,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:137,0,SECTION,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:154,0,SECTION,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:151,0,SECTION,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:170,0,PLATE,,,gallery
+"SGT 132kV__G8702-C4-001-3D",0:1:1:167,0,PLATE,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:158,0,EXCLUDE,,,gallery: artifact/excluded
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:19,0,SECTION,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:28,0,SECTION,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:30,0,SECTION,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:57,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:55,0,SECTION,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:54,0,SECTION,,,gallery
+"SGT 132kV__G8702-C5-001-3D Rev02",0:1:1:58,0,PLATE,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:37,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:49,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:43,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:42,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:44,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:40,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:46,0,SECTION,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:16,0,PLATE,,,gallery
+"SGT 132kV__G8702-C7-001-3D",0:1:1:9,0,PLATE,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:12,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:15,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:6,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:30,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:25,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:37,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:32,0,SECTION,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:22,0,PLATE,,,gallery
+"SGT 132kV__G8702-P1-001-3D",0:1:1:43,0,PLATE,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:34,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:39,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:10,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:11,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:31,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:41,0,SECTION,,,gallery
+"SGT 132kV__G8702-S2-001-3D",0:1:1:37,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:12,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:9,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:13,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:15,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:17,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:19,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:30,0,SECTION,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:49,0,PLATE,,,gallery
+"SGT 220kV__G8702-C1-001 rev 03 3D",0:1:1:1,0,PLATE,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:250,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:268,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:229,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:244,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:317,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:316,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:210,0,SECTION,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:788,0,PLATE,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:785,0,PLATE,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:4,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:1,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:28,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:70,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:26,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:19,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:8,0,SECTION,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:97,0,PLATE,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:96,0,PLATE,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:19,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:2,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:3,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:8,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:17,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:21,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:32,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:39,0,PLATE,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:37,0,PLATE,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:18,0,SECTION,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:14,0,SECTION,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:23,0,SECTION,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:13,0,SECTION,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:41,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:40,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:10,0,SECTION,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:36,0,PLATE,,,gallery
+"SGT 220kV__G8702-V1-001 rev 02 3D",0:1:1:37,0,PLATE,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:32,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:35,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:31,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:49,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 33kV__G8702-C9-001 3D",0:1:1:22,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:51,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:50,0,SECTION,,,gallery
+"SGT 33kV__G8702-C9-001 3D",0:1:1:76,0,PLATE,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:70,0,EXCLUDE,,,gallery: artifact/excluded
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:39,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:38,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:30,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:37,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:36,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:35,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:321,0,PLATE,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:37,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:24,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:23,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:16,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:15,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:10,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:11,0,SECTION,,,gallery
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:60,0,PLATE,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:233,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:178,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:207,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:208,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:256,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:258,0,SECTION,,,gallery
+"SGT 33kV__G8702-P5-001 rev 03 3D",0:1:1:917,0,PLATE,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:7,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:36,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:94,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:85,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:81,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:83,0,SECTION,,,gallery
+"SGT 33kV__G8702-P6-001 rev 02 3D",0:1:1:107,0,PLATE,,,gallery
+"SSSC2 Assembly",0:1:1:53,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:48,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:50,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:62,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:42,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:58,0,SECTION,,,gallery
+"SSSC2 Assembly",0:1:1:7,0,PLATE,,,gallery
+"TES1E300Q - 2607562 - 2033126",0:1:1:4,0,SECTION,,,gallery
+"TES1E300Q - 2607562 - 2033126",0:1:1:6,0,EXCLUDE,,,gallery: artifact/excluded
+"TES1E300Q - 2607562 - 2033126",0:1:1:2,0,EXCLUDE,,,gallery: artifact/excluded
+"TES1E300Q - 2607562 - 2033126",0:1:1:17,0,FORMED_PLATE,,1,gallery: formed plate
+"TES1E300Q - 2607562 - 2033126",0:1:1:17,1,FORMED_PLATE,,1,gallery: formed plate
+"TES1E300Q - 2607562 - 2033126",0:1:1:14,2,EXCLUDE,,,gallery: artifact/excluded
+"TES1E300Q - 2607562 - 2033126",0:1:1:9,3,BOUGHT_OUT,,,gallery
