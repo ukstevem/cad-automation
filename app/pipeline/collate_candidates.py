@@ -143,7 +143,7 @@ def main() -> None:
         for r in manifest:  # csv reads all as str; coerce numerics for the JS
             for k in ("t_eff", "t_eff_thin_ratio", "fill_ratio", "dim_long",
                       "dim_mid", "dim_thin", "n_holes", "thk_max_over_teff",
-                      "developed_ratio", "solid_index"):
+                      "n_convex_bends", "developed_ratio", "solid_index"):
                 if r.get(k) not in (None, ""):
                     try:
                         r[k] = float(r[k])
@@ -221,6 +221,7 @@ def main() -> None:
                 "rule_type": row.get("rule_type"),
                 "n_holes": f.get("n_holes"),
                 "thk_max_over_teff": f.get("thk_max_over_teff"),
+                "n_convex_bends": f.get("n_convex_bends"),
                 "developed_ratio": f.get("developed_ratio", row.get("developed_ratio")),
             })
             _log(f"  ok {fname}")
@@ -296,12 +297,14 @@ const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECT
 // (no feature) — those will count as misses, which is the point (shows gaps).
 function predict(it){
   const num=v=>(v===''||v==null)?null:parseFloat(v);
-  const holes=num(it.n_holes), thk=num(it.thk_max_over_teff), tthin=num(it.t_eff_thin_ratio);
+  const holes=num(it.n_holes), thk=num(it.thk_max_over_teff), tthin=num(it.t_eff_thin_ratio), nb=num(it.n_convex_bends);
+  if(nb!=null && nb>=5) return 'BENT_SECTION';            // curved tube => many bend faces
   if(holes!=null && holes>=1) return 'SECTION';          // hollow box (RHS/SHS/CHS)
   if(tthin!=null && tthin>=0.45) return 'PLATE';          // flat-ish plate (gauge ~ thinnest dim)
+  if(nb!=null && nb>=1) return 'FORMED_PLATE';            // convex bend (R>=gauge) => formed
   if(it.rule_type==='section') return 'SECTION';          // matched a standard section in the library
   if(thk!=null && thk>=1.5) return 'SECTION';             // open profile w/ distinct flanges (I/UC/PFC)
-  return 'FORMED_PLATE';                                  // thin uniform open wall (formed/angle/bent — bend feature TBD)
+  return 'FORMED_PLATE';                                  // thin uniform open wall
 }
 const KEY='fp_labels_v1';
 let labels=JSON.parse(localStorage.getItem(KEY)||'{}');

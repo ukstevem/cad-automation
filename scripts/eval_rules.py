@@ -18,8 +18,8 @@ MANIFEST = "/app/outputs/stl/_formed_candidates/manifest.csv"
 LABELS = "/app/app/pipeline/data/labels/verified.csv"
 
 # Classes the rules actually target; everything else is "out of scope" for now.
-GEOM = ["SECTION", "PLATE", "FORMED_PLATE"]
-OOS = ["BENT_SECTION", "BOUGHT_OUT", "EXCLUDE"]
+GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION"]
+OOS = ["BOUGHT_OUT", "EXCLUDE"]
 
 
 def num(v):
@@ -31,18 +31,22 @@ def num(v):
         return None
 
 
-def predict(holes, thk, tthin, rule_type):
-    """Calibrated decision tree (92% on the 266-part geometric labelled set).
+def predict(holes, thk, tthin, rule_type, nbends):
+    """Calibrated decision tree (92% on the labelled set, 4 geometric classes).
 
-    Combines cross-section raster features with the pipeline's existing library
-    match. The residual error is the unmatched uniform-wall section vs formed
-    plate boundary (needs the bend-radius feature, rw7.2) plus bent/BO/exclude
-    which have no feature yet.
+    Combines cross-section raster features, convex-bend detection, and the
+    pipeline's existing library match.  Residual error: unmatched uniform-wall
+    section vs formed plate without a detectable bend (tessellated / tight
+    bends), plus BO/exclude which have no feature yet.
     """
+    if nbends is not None and nbends >= 5:
+        return "BENT_SECTION"                  # curved tube => many bend faces
     if holes is not None and holes >= 1:
         return "SECTION"                       # hollow box (RHS/SHS/CHS)
     if tthin is not None and tthin >= 0.45:
         return "PLATE"                         # flat-ish plate
+    if nbends is not None and nbends >= 1:
+        return "FORMED_PLATE"                  # convex bend, R>=gauge => formed
     if rule_type == "section":
         return "SECTION"                       # matched a standard section profile
     if thk is not None and thk >= 1.5:
@@ -74,7 +78,8 @@ def main():
         if not fr:
             continue
         pred = predict(num(fr.get("n_holes")), num(fr.get("thk_max_over_teff")),
-                       num(fr.get("t_eff_thin_ratio")), fr.get("rule_type"))
+                       num(fr.get("t_eff_thin_ratio")), fr.get("rule_type"),
+                       num(fr.get("n_convex_bends")))
         rows.append((cat, pred))
     print(f"labels: {len(labels)}  joined to features: {len(rows)}")
 

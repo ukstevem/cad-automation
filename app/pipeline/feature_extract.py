@@ -52,6 +52,9 @@ FEATURE_KEYS = [
     # cross-section raster features (only populated when section=True; the
     # raster is expensive so it runs on thin-walled candidates only):
     "n_holes", "thk_max", "thk_cov", "thk_max_over_teff",
+    # convex cylindrical bend faces with R/t_eff>=0.9 (excludes rolled toe
+    # radii and holes): >=1 => formed plate; >=5 (curved tube) => bent section:
+    "n_convex_bends",
 ]
 
 
@@ -145,6 +148,11 @@ def extract_solid_features(shape, fast: bool = True,
                     feats["thk_max_over_teff"] = round(feats["thk_max"] / feats["t_eff"], 3)
         except Exception as exc:
             logger.debug("feature_section_raster_failed", error=str(exc))
+        try:
+            if feats.get("t_eff"):
+                feats["n_convex_bends"] = _count_convex_bends(shape, feats["t_eff"])
+        except Exception as exc:
+            logger.debug("feature_bend_count_failed", error=str(exc))
 
     if fast:
         return feats
@@ -268,6 +276,60 @@ def _count_holes(mask):
                         if 0 <= ni < H and 0 <= nj < W and enc[ni, nj] and lbl[ni, nj] == 0:
                             lbl[ni, nj] = cur; dq.append((ni, nj))
     return sum(1 for k in range(1, cur+1) if (lbl == k).sum() > 3)
+
+
+def _count_convex_bends(solid, t_eff):
+    """Count convex cylindrical faces that look like sheet/section bends.
+
+    A formed-plate bend is a CONVEX cylinder (material on the axis side) whose
+    radius is at least the metal gauge (R/t_eff >= 0.9) spanning a partial arc
+    (30-270 deg).  This excludes drilled holes (concave) and rolled-section toe
+    radii (R < gauge).  Empirically: 0 for plates/straight sections, >=1 for
+    formed plates, and a large count for curved tubes (bent section).
+    """
+    import numpy as np
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopAbs import TopAbs_FACE, TopAbs_IN
+    from OCP.TopoDS import TopoDS
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Cylinder
+    from OCP.gp import gp_Pnt
+    from OCP.BRepClass3d import BRepClass3d_SolidClassifier
+
+    if not t_eff or t_eff <= 0:
+        return 0
+    cls = BRepClass3d_SolidClassifier(solid)
+
+    def inside(p):
+        cls.Perform(gp_Pnt(float(p[0]), float(p[1]), float(p[2])), 1e-7)
+        return cls.State() == TopAbs_IN
+
+    n = 0
+    exp = TopExp_Explorer(solid, TopAbs_FACE)
+    while exp.More():
+        s = BRepAdaptor_Surface(TopoDS.Face_s(exp.Current()))
+        if s.GetType() == GeomAbs_Cylinder:
+            cyl = s.Cylinder()
+            R = cyl.Radius()
+            ax = cyl.Axis()
+            D = np.array([ax.Direction().X(), ax.Direction().Y(), ax.Direction().Z()])
+            C = np.array([ax.Location().X(), ax.Location().Y(), ax.Location().Z()])
+            uu = (s.FirstUParameter() + s.LastUParameter()) / 2
+            vv = (s.FirstVParameter() + s.LastVParameter()) / 2
+            arc = np.degrees(abs(s.LastUParameter() - s.FirstUParameter()))
+            pv = s.Value(uu, vv)
+            P = np.array([pv.X(), pv.Y(), pv.Z()])
+            foot = C + np.dot(P - C, D) * D
+            rad = P - foot
+            nn = np.linalg.norm(rad)
+            if nn > 1e-6:
+                rad /= nn
+                # step from the face toward the axis: inside => material on the
+                # axis side => convex outer surface (a bend, not a hole/fillet).
+                if inside(P - 0.15 * rad) and 30 <= arc <= 270 and R / t_eff >= 0.9:
+                    n += 1
+        exp.Next()
+    return n
 
 
 def _cross_section_raster(solid):
