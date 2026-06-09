@@ -1,0 +1,45 @@
+job,ref_id,solid_index,category,designation,issue,note
+# Manual ground-truth overrides for the ML feature dataset.
+# One row per (job, ref_id, solid_index). Fields:
+#   job          - sidecar stem WITHOUT the hex prefix, e.g. "10296 CIV-009"
+#   ref_id       - XCAF ref_id of the prototype, e.g. "0:1:1:7"
+#   solid_index  - 0 for single-solid parts; 0..n for multi-solid parts
+#   category     - routing/steel class. Gallery labels use:
+#                  SECTION (incl. straight RHS/SHS/CHS/UB/UC/PFC/EA),
+#                  PLATE, FORMED_PLATE, BENT_SECTION (in-house bent tube/section),
+#                  BOUGHT_OUT, EXCLUDE  (or a specific designation for sections)
+#   designation  - verified designation, e.g. "203x102x23" (blank for plates)
+#   issue        - 1 if this part is a known-bad / mis-detected case, else blank
+#   note         - free-text reason / context
+# Lines beginning with '#' and blank lines are ignored by the exporter.
+# --- 2026-06-08: first batch from the formed-plate gallery review (29 parts
+#     flagged as 'filed as plate but not flat'). 9 formed, 6 section, 14 plate.
+"10296 CIV-006 ASS",0:1:1:43,0,FORMED_PLATE,,1,gallery: formed plate
+"10296 CIV-006 ASS",0:1:1:20,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:623,0,FORMED_PLATE,,1,gallery: formed plate
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:224,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:239,0,SECTION,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:619,0,FORMED_PLATE,,1,gallery: formed plate
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:618,0,FORMED_PLATE,,1,gallery: formed plate
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:816,0,PLATE,,,gallery
+"REACTORS 33kV__G8702-E1-001 rev 01 3D",0:1:1:621,0,PLATE,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:24,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:301,0,PLATE,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:283,0,SECTION,,,gallery
+"SGT 33kV__G8702-D2-001 rev 01 3D",0:1:1:284,0,SECTION,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:5,0,PLATE,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:26,0,PLATE,,,gallery
+"SGT 220kV__G8702-S1-001 rev02 3D",0:1:1:27,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:5,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:2,0,PLATE,,,gallery
+"SCT 132kV__G8702-S2-001-3D",0:1:1:25,0,PLATE,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:6,0,PLATE,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:83,0,PLATE,,,gallery
+"SGT 220kV__G8702-P2-001 rev 02 3D",0:1:1:84,0,PLATE,,,gallery
+"SGT 220kV__G8702-D1-001 rev02 3D",0:1:1:934,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 132kV__G8702-P1-001-3D",0:1:1:5,0,PLATE,,,gallery
+"SSSC2 Assembly",0:1:1:27,0,FORMED_PLATE,,1,gallery: formed plate
+"SSSC2 Assembly",0:1:1:26,0,FORMED_PLATE,,1,gallery: formed plate
+"SSSC2 Assembly",0:1:1:39,0,FORMED_PLATE,,1,gallery: formed plate
+"SSSC2 Assembly",0:1:1:40,0,FORMED_PLATE,,1,gallery: formed plate
+"SGT 33kV__G8702-P4-001 rev 02 3D",0:1:1:14,0,PLATE,,,gallery

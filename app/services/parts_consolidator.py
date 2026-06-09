@@ -183,6 +183,70 @@ def _canonical_chirality(shape, vol_props, pp) -> int:
         return 1  # graceful fallback
 
 
+def fingerprint_shape(shape) -> Optional[Tuple]:
+    """
+    Compute a geometric fingerprint for any TopoDS_Shape.
+
+    Returns ``(volume, surface_area, dim0, dim1, dim2, I0, I1, I2, chirality)``
+    or ``None`` if the shape has negligible volume.
+
+    Module-level so it can be reused outside consolidation (e.g. the ML
+    feature exporter).  ``PartsConsolidator._fingerprint_shape`` delegates here
+    so the two never drift.  See the class docstring and ``_canonical_chirality``
+    for the meaning of each component.
+    """
+    try:
+        vol_props = GProp_GProps()
+        BRepGProp.VolumeProperties_s(shape, vol_props)
+        volume = round(vol_props.Mass(), _ROUND_DP)
+
+        if abs(volume) < _MIN_VOLUME:
+            return None
+
+        surf_props = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(shape, surf_props)
+        surface = round(surf_props.Mass(), _ROUND_DP)
+
+        # Use SetGap(0) + AddClose for a tight bounding box that is not
+        # inflated by per-face tolerances.  Without this, two geometrically
+        # identical shapes with different STEP tolerances can produce
+        # different bounding-box sizes and therefore different fingerprints.
+        bbox = Bnd_Box()
+        bbox.SetGap(0.0)
+        BRepBndLib.AddClose_s(shape, bbox)
+        xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
+        dims = tuple(
+            sorted(
+                [
+                    round(xmax - xmin, _ROUND_DP),
+                    round(ymax - ymin, _ROUND_DP),
+                    round(zmax - zmin, _ROUND_DP),
+                ]
+            )
+        )
+
+        # Principal moments of inertia: eigenvalues of the inertia tensor
+        # computed relative to the centre of mass by OCC.  Invariant under
+        # rigid-body transformations but sensitive to internal mass
+        # distribution (e.g. holes at different positions).
+        #
+        # Rounded to the nearest 1000 mm⁵ to absorb the small numerical
+        # noise (~5 units on 10^13-scale values) that arises when the same
+        # geometry is stored with different face topology in STEP.  A
+        # realistic engineering difference (10 mm hole moved 5 mm) produces
+        # a ~40 000 mm⁵ change — 40× the rounding unit.
+        pp = vol_props.PrincipalProperties()
+        moments = tuple(sorted(round(v, -3) for v in pp.Moments()))
+
+        chirality = _canonical_chirality(shape, vol_props, pp)
+
+        return (volume, surface, *dims, *moments, chirality)
+
+    except Exception as exc:
+        logger.warning("fingerprint_shape_failed", error=str(exc))
+        return None
+
+
 class PartsConsolidator:
     """Group geometrically identical parts across XCAF ref_id boundaries."""
 
@@ -476,56 +540,7 @@ class PartsConsolidator:
         produce opposite chirality values.  See ``_canonical_chirality`` for
         details and the symmetric-part tiebreaker.
         """
-        try:
-            vol_props = GProp_GProps()
-            BRepGProp.VolumeProperties_s(shape, vol_props)
-            volume = round(vol_props.Mass(), _ROUND_DP)
-
-            if abs(volume) < _MIN_VOLUME:
-                return None
-
-            surf_props = GProp_GProps()
-            BRepGProp.SurfaceProperties_s(shape, surf_props)
-            surface = round(surf_props.Mass(), _ROUND_DP)
-
-            # Use SetGap(0) + AddClose for a tight bounding box that is not
-            # inflated by per-face tolerances.  Without this, two geometrically
-            # identical shapes with different STEP tolerances can produce
-            # different bounding-box sizes and therefore different fingerprints.
-            bbox = Bnd_Box()
-            bbox.SetGap(0.0)
-            BRepBndLib.AddClose_s(shape, bbox)
-            xmin, ymin, zmin, xmax, ymax, zmax = bbox.Get()
-            dims = tuple(
-                sorted(
-                    [
-                        round(xmax - xmin, _ROUND_DP),
-                        round(ymax - ymin, _ROUND_DP),
-                        round(zmax - zmin, _ROUND_DP),
-                    ]
-                )
-            )
-
-            # Principal moments of inertia: eigenvalues of the inertia tensor
-            # computed relative to the centre of mass by OCC.  Invariant under
-            # rigid-body transformations but sensitive to internal mass
-            # distribution (e.g. holes at different positions).
-            #
-            # Rounded to the nearest 1000 mm⁵ to absorb the small numerical
-            # noise (~5 units on 10^13-scale values) that arises when the same
-            # geometry is stored with different face topology in STEP.  A
-            # realistic engineering difference (10 mm hole moved 5 mm) produces
-            # a ~40 000 mm⁵ change — 40× the rounding unit.
-            pp = vol_props.PrincipalProperties()
-            moments = tuple(sorted(round(v, -3) for v in pp.Moments()))
-
-            chirality = _canonical_chirality(shape, vol_props, pp)
-
-            return (volume, surface, *dims, *moments, chirality)
-
-        except Exception as exc:
-            logger.warning("fingerprint_shape_failed", error=str(exc))
-            return None
+        return fingerprint_shape(shape)
 
     def _fingerprint_for_ref(self, doc, ref_id: str) -> Optional[Tuple]:
         """

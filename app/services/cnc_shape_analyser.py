@@ -332,6 +332,35 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
                     steel_grade: Optional[str] = None,
                     instance_count: int = 1) -> Dict[str, Any]:
     """
+    Run the full pipeline on one solid shape and attach measured features.
+
+    Wraps :func:`_analyse_single_impl` and merges a ``features`` block of
+    rule-independent measured geometry (OBB extents, cross-section area,
+    fill_ratio, inertia, …) into the result.  Persisting these alongside the
+    rule verdict turns each analysed sidecar into ML training data without a
+    separate re-extraction pass.  Best-effort: a failure here never affects the
+    classification result.
+    """
+    result = _analyse_single_impl(
+        shape, solid_idx, ref_id, member_id, file_path, out_dir,
+        parent_name, project_number, steel_grade, instance_count,
+    )
+    if isinstance(result, dict) and "features" not in result:
+        try:
+            from app.pipeline.feature_extract import extract_solid_features
+            result["features"] = extract_solid_features(shape)
+        except Exception as e:
+            logger.debug("feature_extract_failed", ref_id=ref_id, error=str(e))
+    return result
+
+
+def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
+                    file_path: str, out_dir: Path,
+                    parent_name: Optional[str] = None,
+                    project_number: Optional[str] = None,
+                    steel_grade: Optional[str] = None,
+                    instance_count: int = 1) -> Dict[str, Any]:
+    """
     Run the full pipeline on one solid shape.
     Returns a result dict with type='plate', 'section', or 'unknown'.
     """
