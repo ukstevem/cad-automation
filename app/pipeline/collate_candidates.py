@@ -254,7 +254,7 @@ _GALLERY = r"""<!doctype html>
   .it b{color:#fff;cursor:pointer}.it small{color:#8a8a8a;display:block;margin:2px 0 5px}
   .it.L-section{border-left-color:#e6a13c}.it.L-plate{border-left-color:#4caf50}
   .it.L-formed{border-left-color:#e3496b}.it.L-bought{border-left-color:#8a7bd8}
-  .it.L-bent{border-left-color:#46c2c2}
+  .it.L-bent{border-left-color:#46c2c2}.it.L-excl{border-left-color:#777}
   .btns label{display:inline-block;font-size:11px;padding:2px 6px;margin:1px 3px 1px 0;border:1px solid #444;border-radius:4px;cursor:pointer;color:#bbb}
   .btns input{display:none}
   .btns input:checked+span{font-weight:bold}
@@ -278,7 +278,7 @@ _GALLERY = r"""<!doctype html>
   </div>
 </div>
 <div id="view"><canvas id="cv"></canvas><div id="cap">Select an item &rarr;</div>
-  <div id="hint">keys: 1=Section 2=Plate 3=Formed 4=Bent 5=Bought-out &middot; drag to rotate</div></div>
+  <div id="hint">keys: 1=Section 2=Plate 3=Formed 4=Bent 5=Bought-out 6=Excluded &middot; drag to rotate</div></div>
 <div id="modal"><div>
   <p>Copy this and paste it back to Claude (or Save As <code>verified.csv</code>):</p>
   <textarea id="csv" readonly></textarea>
@@ -289,8 +289,8 @@ import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {STLLoader} from 'three/addons/loaders/STLLoader.js';
 const ITEMS=/*__ITEMS__*/;
-const CLASSES=[['section','Section'],['plate','Plate'],['formed','Formed plate'],['bent','Bent section'],['bought','Bought-out']];
-const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECTION',bought:'BOUGHT_OUT'};
+const CLASSES=[['section','Section'],['plate','Plate'],['formed','Formed plate'],['bent','Bent section'],['bought','Bought-out'],['excl','Excluded']];
+const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECTION',bought:'BOUGHT_OUT',excl:'EXCLUDE'};
 const KEY='fp_labels_v1';
 let labels=JSON.parse(localStorage.getItem(KEY)||'{}');
 function save(){localStorage.setItem(KEY,JSON.stringify(labels));refreshCount();}
@@ -351,13 +351,13 @@ ITEMS.forEach((it,i)=>{
   el.querySelectorAll('input').forEach(inp=>inp.onchange=()=>{load(i);setLabel(i,inp.value);});
 });
 addEventListener('keydown',e=>{
-  if(curIdx<0)return;const m={'1':'section','2':'plate','3':'formed','4':'bent','5':'bought'};
+  if(curIdx<0)return;const m={'1':'section','2':'plate','3':'formed','4':'bent','5':'bought','6':'excl'};
   if(m[e.key]){setLabel(curIdx,m[e.key]);if(curIdx<ITEMS.length-1)load(curIdx+1);}
 });
 function buildCSV(){
   let out='job,ref_id,solid_index,category,designation,issue,note\n';
   ITEMS.forEach(it=>{const c=labels[it.file];if(!c)return;
-    const note=(c==='formed')?'gallery: formed plate':(c==='bent')?'gallery: bent section':'gallery';
+    const note=(c==='formed')?'gallery: formed plate':(c==='bent')?'gallery: bent section':(c==='excl')?'gallery: artifact/excluded':'gallery';
     const issue=(c==='formed'||c==='bent')?'1':'';
     out+=[JSON.stringify(it.job),it.ref_id,it.solid_index,CAT[c],'',issue,note].join(',')+'\n';});
   return out;
