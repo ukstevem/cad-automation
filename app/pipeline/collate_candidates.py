@@ -274,7 +274,7 @@ _GALLERY = r"""<!doctype html>
 <div id="list">
   <div id="bar"><h2>Classify candidates</h2>
     <button id="exp">Export CSV</button><button id="clr">Clear all</button>
-    <span id="count"></span>
+    <span id="count"></span><br><span id="acc" style="font-size:12px"></span>
   </div>
 </div>
 <div id="view"><canvas id="cv"></canvas><div id="cap">Select an item &rarr;</div>
@@ -291,11 +291,31 @@ import {STLLoader} from 'three/addons/loaders/STLLoader.js';
 const ITEMS=/*__ITEMS__*/;
 const CLASSES=[['section','Section'],['plate','Plate'],['formed','Formed plate'],['bent','Bent section'],['bought','Bought-out'],['excl','Excluded']];
 const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECTION',bought:'BOUGHT_OUT',excl:'EXCLUDE'};
+// Preview of the co-designed rule decision tree, applied to the features already
+// in the gallery. Cannot yet predict BENT_SECTION / BOUGHT_OUT / EXCLUDE
+// (no feature) — those will count as misses, which is the point (shows gaps).
+function predict(it){
+  const num=v=>(v===''||v==null)?null:parseFloat(v);
+  const fill=num(it.fill_ratio), holes=num(it.n_holes), thk=num(it.thk_max_over_teff), dev=num(it.developed_ratio);
+  if(holes!=null && holes>=1) return 'SECTION';          // hollow box (RHS/SHS/CHS)
+  if(fill!=null && fill>=0.8) return 'PLATE';             // flat plate
+  if(thk!=null && thk>1.6) return 'SECTION';              // open rolled (I/UC/PFC: thick flanges)
+  if(dev!=null){ if(dev<=1.05) return 'FORMED_PLATE'; if(dev>=1.5) return 'SECTION'; }
+  if(fill!=null) return fill>=0.5?'PLATE':'SECTION';
+  return null;
+}
 const KEY='fp_labels_v1';
 let labels=JSON.parse(localStorage.getItem(KEY)||'{}');
 function save(){localStorage.setItem(KEY,JSON.stringify(labels));refreshCount();}
-function refreshCount(){document.getElementById('count').textContent=
-  Object.keys(labels).length+' / '+ITEMS.length+' labelled';}
+function refreshCount(){
+  document.getElementById('count').textContent=Object.keys(labels).length+' / '+ITEMS.length+' labelled';
+  // live rule-preview accuracy: predicted vs your label, over labelled items
+  let n=0,ok=0;
+  ITEMS.forEach(it=>{const c=labels[it.file];if(!c)return;const p=predict(it);if(p==null)return;
+    n++; if(p===CAT[c])ok++;});
+  const a=document.getElementById('acc');
+  a.innerHTML = n? `rules match your label: <b>${ok}/${n} = ${(100*ok/n).toFixed(0)}%</b> <span style="color:#888">(preview — no bent/BO/excl yet)</span>` : '';
+}
 
 const cv=document.getElementById('cv'), view=document.getElementById('view');
 const r=new THREE.WebGLRenderer({canvas:cv,antialias:true});r.setPixelRatio(devicePixelRatio);
@@ -327,7 +347,8 @@ function load(i){
       `<span class=tag>fill ${(+it.fill_ratio).toFixed(2)}</span>`+
       (it.n_holes!=null&&it.n_holes!==''?`<span class=tag>holes ${it.n_holes}</span>`:'')+
       (it.thk_max_over_teff!=null&&it.thk_max_over_teff!==''?`<span class=tag>thk/teff ${(+it.thk_max_over_teff).toFixed(2)}</span>`:'')+
-      `<span class=tag>${(+it.dim_long).toFixed(0)}&times;${(+it.dim_mid).toFixed(0)}&times;${(+it.dim_thin).toFixed(0)}</span>`;
+      `<span class=tag>${(+it.dim_long).toFixed(0)}&times;${(+it.dim_mid).toFixed(0)}&times;${(+it.dim_thin).toFixed(0)}</span>`+
+      (predict(it)?`<br><span class=tag style="background:#3a3a5a">rules predict: <b>${predict(it)}</b></span>`:'');
   },undefined,()=>{document.getElementById('cap').textContent='load error: '+it.file;});
 }
 function setLabel(i,cls){
@@ -336,6 +357,8 @@ function setLabel(i,cls){
   const el=document.getElementById('it'+i);
   el.className='it'+(i===curIdx?' sel':'')+(cls?' L-'+cls:'');
   const inp=el.querySelector(`input[value="${cls}"]`);if(inp)inp.checked=true;
+  const p=predict(it),mk=document.getElementById('m'+i);
+  if(mk) mk.innerHTML = (cls&&p)? (p===CAT[cls]?'<span style="color:#5c5">&#10003;</span>':'<span style="color:#e66">&#10007;</span>') : '';
   save();
 }
 const list=document.getElementById('list');
@@ -345,8 +368,10 @@ ITEMS.forEach((it,i)=>{
   el.className='it'+(cur?' L-'+cur:'');
   const radios=CLASSES.map(([v,lbl])=>
     `<label><input type=radio name=c${i} value="${v}" ${cur===v?'checked':''}><span>${lbl}</span></label>`).join('');
-  el.innerHTML=`<b id=b${i}>${it.part_name}</b><small>${it.job} &middot; t/thin ${(+it.t_eff_thin_ratio).toFixed(2)} &middot; fill ${(+it.fill_ratio).toFixed(2)}</small><div class=btns>${radios}</div>`;
+  el.innerHTML=`<b id=b${i}>${it.part_name}</b> <span id=m${i}></span><small>${it.job} &middot; pred ${predict(it)||'-'} &middot; fill ${(+it.fill_ratio).toFixed(2)}</small><div class=btns>${radios}</div>`;
   list.appendChild(el);
+  if(cur){const p=predict(it),mk=el.querySelector('#m'+i);
+    if(mk&&p) mk.innerHTML=(p===CAT[cur]?'<span style="color:#5c5">&#10003;</span>':'<span style="color:#e66">&#10007;</span>');}
   el.querySelector('#b'+i).onclick=()=>load(i);
   el.querySelectorAll('input').forEach(inp=>inp.onchange=()=>{load(i);setLabel(i,inp.value);});
 });
