@@ -1,127 +1,141 @@
 """
-Evaluate the rule decision tree (plate/formed/section, via holes + thickness +
-fill + developed_ratio) against the human gallery labels in verified.csv.
+Evaluate the rule decision tree (plate / formed / section / bent-section)
+against the human gallery labels in verified.csv.
 
-Joins verified.csv to the gallery manifest (which carries the cross-section
-raster features) on (job, ref_id, solid_index), applies the same decision tree
-the gallery previews, and prints a confusion matrix + per-class precision/recall.
+Self-contained: for each labelled part it re-opens the STEP, computes the same
+features the live pipeline uses (extract_solid_features section mode: holes,
+thickness, convex bends) and reads the existing library-match verdict from the
+analysis sidecars.  No dependency on the transient gallery manifest, so coverage
+matches the labels exactly.
 
-Run inside the container::
+Run inside the container (slow — re-opens each job's STEP)::
 
     docker exec cad-automation-api python /tmp/eval_rules.py
 """
 from __future__ import annotations
 import csv
+import glob
+import json
+import os
+import re
+import sys
 from collections import defaultdict
 
-MANIFEST = "/app/outputs/stl/_formed_candidates/manifest.csv"
-LABELS = "/app/app/pipeline/data/labels/verified.csv"
+sys.path.insert(0, "/app")
+from app.config import settings  # noqa: E402
 
-# Classes the rules actually target; everything else is "out of scope" for now.
+LABELS = "/app/app/pipeline/data/labels/verified.csv"
 GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION"]
 OOS = ["BOUGHT_OUT", "EXCLUDE"]
 
 
-def num(v):
-    if v in (None, ""):
-        return None
-    try:
-        return float(v)
-    except ValueError:
-        return None
-
-
 def predict(holes, thk, tthin, rule_type, nbends):
-    """Calibrated decision tree (92% on the labelled set, 4 geometric classes).
-
-    Combines cross-section raster features, convex-bend detection, and the
-    pipeline's existing library match.  Residual error: unmatched uniform-wall
-    section vs formed plate without a detectable bend (tessellated / tight
-    bends), plus BO/exclude which have no feature yet.
-    """
     if nbends is not None and nbends >= 5:
-        return "BENT_SECTION"                  # curved tube => many bend faces
+        return "BENT_SECTION"
     if holes is not None and holes >= 1:
-        return "SECTION"                       # hollow box (RHS/SHS/CHS)
+        return "SECTION"
     if tthin is not None and tthin >= 0.45:
-        return "PLATE"                         # flat-ish plate
+        return "PLATE"
     if nbends is not None and nbends >= 1:
-        return "FORMED_PLATE"                  # convex bend, R>=gauge => formed
+        return "FORMED_PLATE"
     if rule_type == "section":
-        return "SECTION"                       # matched a standard section profile
+        return "SECTION"
     if thk is not None and thk >= 1.5:
-        return "SECTION"                       # open profile w/ distinct flanges
-    return "FORMED_PLATE"                       # thin uniform open wall
+        return "SECTION"
+    return "FORMED_PLATE"
+
+
+def resolve_step(job):
+    for p in glob.glob(settings.ANALYSIS_OUTPUT_DIR + "/*.json"):
+        stem = os.path.basename(p)[:-5]
+        if re.sub(r"^[0-9a-f]{8}_", "", stem) == job:
+            for ext in (".step", ".stp", ".STEP", ".STP"):
+                f = os.path.join(settings.UPLOAD_DIR, stem + ext)
+                if os.path.exists(f):
+                    return f, p
+    return None, None
+
+
+def rule_types_for(sidecar_path):
+    """ref_id -> rule_type from a sidecar's cnc_analysis."""
+    try:
+        d = json.loads(open(sidecar_path).read())
+    except Exception:
+        return {}
+    out = {}
+    for rid, v in (d.get("cnc_analysis") or {}).items():
+        if isinstance(v, dict):
+            out[rid] = v.get("type")
+    return out
 
 
 def load_labels():
     out = {}
-    with open(LABELS, newline="") as f:
-        for row in csv.reader(f):
-            if not row or row[0].lstrip().startswith("#") or row[0] == "job":
-                continue
-            job, ref, sidx, cat = row[0], row[1], row[2], row[3]
-            out[(job, ref, str(sidx))] = cat
+    for row in csv.reader(open(LABELS, newline="")):
+        if not row or row[0].lstrip().startswith("#") or row[0] == "job":
+            continue
+        out[(row[0], row[1], str(row[2]))] = row[3]
     return out
 
 
 def main():
+    from app.services.cnc_shape_analyser import _read_xcaf, _get_shape, _iter_solids
+    from app.pipeline.feature_extract import extract_solid_features
+
     labels = load_labels()
-    feats = {}
-    with open(MANIFEST, newline="") as f:
-        for r in csv.DictReader(f):
-            feats[(r["job"], r["ref_id"], str(r["solid_index"]))] = r
+    by_job = defaultdict(list)
+    for (job, ref, sidx), cat in labels.items():
+        by_job[job].append((ref, sidx, cat))
 
     rows = []
-    for key, cat in labels.items():
-        fr = feats.get(key)
-        if not fr:
+    for job, items in by_job.items():
+        step, sidecar = resolve_step(job)
+        if not step:
             continue
-        pred = predict(num(fr.get("n_holes")), num(fr.get("thk_max_over_teff")),
-                       num(fr.get("t_eff_thin_ratio")), fr.get("rule_type"),
-                       num(fr.get("n_convex_bends")))
-        rows.append((cat, pred))
-    print(f"labels: {len(labels)}  joined to features: {len(rows)}")
+        rts = rule_types_for(sidecar)
+        doc = _read_xcaf(step)[0]
+        print(f"  {job}: {len(items)} labels", file=sys.stderr)
+        for ref, sidx, cat in items:
+            try:
+                shape = _get_shape(doc, ref)
+                solids = list(_iter_solids(shape))
+                si = int(sidx)
+                solid = solids[si] if si < len(solids) else (solids[0] if solids else shape)
+                f = extract_solid_features(solid, section=True)
+            except Exception:
+                continue
+            pred = predict(f.get("n_holes"), f.get("thk_max_over_teff"),
+                           f.get("t_eff_thin_ratio"), rts.get(ref), f.get("n_convex_bends"))
+            rows.append((cat, pred))
+    print(f"\nlabels: {len(labels)}  evaluated: {len(rows)}")
 
-    # confusion (true -> predicted)
     conf = defaultdict(lambda: defaultdict(int))
-    for true, pred in rows:
-        conf[true][pred or "NONE"] += 1
-
-    preds = sorted({p or "NONE" for _, p in rows})
+    for t, p in rows:
+        conf[t][p] += 1
+    cols = GEOM
     print("\nConfusion (rows=your label, cols=rule prediction):")
-    print("  " + " " * 14 + "".join(f"{p[:11]:>13}" for p in preds))
-    for true in GEOM + OOS:
-        if true not in conf:
-            continue
-        line = "".join(f"{conf[true].get(p,0):>13}" for p in preds)
-        print(f"  {true:<14}{line}")
+    print("  " + " " * 14 + "".join(f"{p[:11]:>13}" for p in cols))
+    for t in GEOM + OOS:
+        if t in conf:
+            print(f"  {t:<14}" + "".join(f"{conf[t].get(p,0):>13}" for p in cols))
 
-    print("\nPer-class (rules target SECTION/PLATE/FORMED_PLATE only):")
+    print("\nPer-class:")
     for c in GEOM:
-        tp = sum(1 for t, p in rows if t == c and p == c)
-        fp = sum(1 for t, p in rows if t != c and p == c)
+        tp = sum(1 for t, p in rows if t == c == p)
+        fp = sum(1 for t, p in rows if p == c and t != c)
         fn = sum(1 for t, p in rows if t == c and p != c)
         n = sum(1 for t, _ in rows if t == c)
-        prec = tp / (tp + fp) if tp + fp else 0
-        rec = tp / (tp + fn) if tp + fn else 0
-        print(f"  {c:<14} n={n:3d}  precision={prec:5.1%}  recall={rec:5.1%}")
+        if n:
+            prec = tp / (tp + fp) if tp + fp else 0
+            rec = tp / (tp + fn) if tp + fn else 0
+            print(f"  {c:<14} n={n:3d}  precision={prec:5.0%}  recall={rec:5.0%}")
 
-    geom = [(t, p) for t, p in rows if t in GEOM]
-    acc_geom = sum(1 for t, p in geom if t == p) / len(geom) if geom else 0
-    print(f"\nAccuracy on geometric classes (SECTION/PLATE/FORMED): "
-          f"{sum(1 for t,p in geom if t==p)}/{len(geom)} = {acc_geom:.1%}")
-
+    g = [(t, p) for t, p in rows if t in GEOM]
+    acc = sum(1 for t, p in g if t == p) / len(g) if g else 0
+    print(f"\nAccuracy on {'/'.join(GEOM)}: {sum(1 for t,p in g if t==p)}/{len(g)} = {acc:.1%}")
     oos = [(t, p) for t, p in rows if t in OOS]
-    print(f"\nOut-of-scope today ({'/'.join(OOS)}): {len(oos)} parts — the rules "
-          f"have no feature for these yet, so all are mis-predicted:")
-    for c in OOS:
-        sub = [(t, p) for t, p in oos if t == c]
-        if sub:
-            mis = defaultdict(int)
-            for _, p in sub:
-                mis[p or "NONE"] += 1
-            print(f"  {c:<14} n={len(sub):3d}  -> predicted as {dict(mis)}")
+    if oos:
+        print(f"\nOut-of-scope ({'/'.join(OOS)}): {len(oos)} parts (no feature yet).")
 
 
 if __name__ == "__main__":
