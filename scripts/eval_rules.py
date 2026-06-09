@@ -25,11 +25,16 @@ sys.path.insert(0, "/app")
 from app.config import settings  # noqa: E402
 
 LABELS = "/app/app/pipeline/data/labels/verified.csv"
+DATASET = "/app/outputs/ml/dataset.csv"
 GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION"]
 OOS = ["BOUGHT_OUT", "EXCLUDE"]
 
 
-def predict(holes, thk, tthin, rule_type, nbends):
+def predict(name, holes, thk, tthin, rule_type, nbends):
+    from app.pipeline.catalogue_products import match_catalogue_product
+    cp = match_catalogue_product(name)   # known BO products (Unistrut, ...)
+    if cp:
+        return cp[0]
     if nbends is not None and nbends >= 5:
         return "BENT_SECTION"
     if holes is not None and holes >= 1:
@@ -83,6 +88,13 @@ def main():
     from app.pipeline.feature_extract import extract_solid_features
 
     labels = load_labels()
+    # part_name per (job, ref_id) from the dataset, for catalogue-product matching
+    names = {}
+    try:
+        for r in csv.DictReader(open(DATASET, newline="")):
+            names[(r["job"], r["ref_id"])] = r.get("part_name", "")
+    except Exception:
+        pass
     by_job = defaultdict(list)
     for (job, ref, sidx), cat in labels.items():
         by_job[job].append((ref, sidx, cat))
@@ -104,8 +116,9 @@ def main():
                 f = extract_solid_features(solid, section=True)
             except Exception:
                 continue
-            pred = predict(f.get("n_holes"), f.get("thk_max_over_teff"),
-                           f.get("t_eff_thin_ratio"), rts.get(ref), f.get("n_convex_bends"))
+            pred = predict(names.get((job, ref)), f.get("n_holes"),
+                           f.get("thk_max_over_teff"), f.get("t_eff_thin_ratio"),
+                           rts.get(ref), f.get("n_convex_bends"))
             rows.append((cat, pred))
     print(f"\nlabels: {len(labels)}  evaluated: {len(rows)}")
 

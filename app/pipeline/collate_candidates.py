@@ -296,6 +296,10 @@ const CAT={section:'SECTION',plate:'PLATE',formed:'FORMED_PLATE',bent:'BENT_SECT
 // (no feature) — those will count as misses, which is the point (shows gaps).
 function predict(it){
   const num=v=>(v===''||v==null)?null:parseFloat(v);
+  // Known catalogue products are confidently bought-out (e.g. Unistrut), checked
+  // before geometry. Keep in sync with app/pipeline/catalogue_products.py.
+  if(it.part_name){const nm=String(it.part_name).toLowerCase();
+    if(nm.includes('unist') && !nm.includes('plate')) return 'BOUGHT_OUT';}
   const holes=num(it.n_holes), thk=num(it.thk_max_over_teff), tthin=num(it.t_eff_thin_ratio), nb=num(it.n_convex_bends);
   if(nb!=null && nb>=5) return 'BENT_SECTION';            // curved tube => many bend faces
   if(holes!=null && holes>=1) return 'SECTION';          // hollow box (RHS/SHS/CHS)
