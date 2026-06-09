@@ -94,6 +94,13 @@ def _select_candidates(df: pd.DataFrame, max_n: int = 320,
     d = df.copy()
     d["fill"] = pd.to_numeric(d["fill_ratio"], errors="coerce")
     d = d[d["features_ok"].fillna(False).astype(bool) & d["fill"].notna()]
+    # Drop merged/unseparated STEP exports: jobs that parsed to <=2 distinct
+    # refs are a single whole-assembly lump (no part structure) — useless for
+    # part labelling.  Also drop individual lumps with many solids in one ref.
+    ref_per_job = df.groupby("job")["ref_id"].nunique()
+    degenerate = set(ref_per_job[ref_per_job <= 2].index)
+    d = d[~d["job"].isin(degenerate)]
+    d = d[pd.to_numeric(d["n_solids"], errors="coerce").fillna(1) <= 12]
     # one representative per distinct geometry
     d = d.sort_values("fill").drop_duplicates("fingerprint_key", keep="first")
 
