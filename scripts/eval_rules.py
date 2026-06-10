@@ -29,32 +29,9 @@ DATASET = "/app/outputs/ml/dataset.csv"
 GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION", "EXCLUDE"]
 OOS = ["BOUGHT_OUT"]
 
-# Tiny / physically degenerate solids (filled-in holes, broken geometry) — no
-# real fabricated part is this small; catches 82% of artifacts with 0 false
-# excludes on the labelled set.
-_EXCLUDE_VOL_MM3 = 10000.0
-
-
-def predict(name, holes, thk, tthin, rule_type, nbends, volume):
-    from app.pipeline.catalogue_products import match_catalogue_product
-    cp = match_catalogue_product(name)   # known BO products (Unistrut, ...)
-    if cp:
-        return cp[0]
-    if volume is not None and volume < _EXCLUDE_VOL_MM3:
-        return "EXCLUDE"                 # tiny/degenerate artifact
-    if nbends is not None and nbends >= 5:
-        return "BENT_SECTION"
-    if holes is not None and holes >= 1:
-        return "SECTION"
-    if tthin is not None and tthin >= 0.45:
-        return "PLATE"
-    if nbends is not None and nbends >= 1:
-        return "FORMED_PLATE"
-    if rule_type == "section":
-        return "SECTION"
-    if thk is not None and thk >= 1.5:
-        return "SECTION"
-    return "FORMED_PLATE"
+# The decision tree lives in app.pipeline.part_classifier.classify_part — the
+# SAME function the live STEP pipeline uses — so this evaluator can't drift from
+# production.  We just feed it features + rule_type + name per labelled part.
 
 
 def resolve_step(job):
@@ -93,6 +70,7 @@ def load_labels():
 def main():
     from app.services.cnc_shape_analyser import _read_xcaf, _get_shape, _iter_solids
     from app.pipeline.feature_extract import extract_solid_features
+    from app.pipeline.part_classifier import classify_part
 
     labels = load_labels()
     # part_name per (job, ref_id) from the dataset, for catalogue-product matching
@@ -123,9 +101,7 @@ def main():
                 f = extract_solid_features(solid, section=True)
             except Exception:
                 continue
-            pred = predict(names.get((job, ref)), f.get("n_holes"),
-                           f.get("thk_max_over_teff"), f.get("t_eff_thin_ratio"),
-                           rts.get(ref), f.get("n_convex_bends"), f.get("volume_mm3"))
+            pred = classify_part(f, rts.get(ref), names.get((job, ref)))["class"]
             rows.append((cat, pred))
     print(f"\nlabels: {len(labels)}  evaluated: {len(rows)}")
 

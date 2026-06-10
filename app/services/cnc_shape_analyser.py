@@ -336,10 +336,12 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
 
     Wraps :func:`_analyse_single_impl` and merges a ``features`` block of
     rule-independent measured geometry (OBB extents, cross-section area,
-    fill_ratio, inertia, …) into the result.  Persisting these alongside the
-    rule verdict turns each analysed sidecar into ML training data without a
-    separate re-extraction pass.  Best-effort: a failure here never affects the
-    classification result.
+    fill_ratio, holes, convex bends, inertia, …) into the result, then applies
+    the refined decision-tree classifier (:func:`classify_part`) to add
+    ``refined_class`` (SECTION/PLATE/FORMED_PLATE/BENT_SECTION/BOUGHT_OUT/EXCLUDE),
+    ``refined_confidence`` and ``refined_reason``.  The base ``type`` field is
+    left unchanged so existing BOM/DXF/NC1 routing is unaffected.  Best-effort:
+    a failure here never affects the base classification result.
     """
     result = _analyse_single_impl(
         shape, solid_idx, ref_id, member_id, file_path, out_dir,
@@ -348,7 +350,15 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
     if isinstance(result, dict) and "features" not in result:
         try:
             from app.pipeline.feature_extract import extract_solid_features
-            result["features"] = extract_solid_features(shape)
+            # section=True so holes/thickness/bends are available to the
+            # classifier (internally gated on fill_ratio, so plates stay fast).
+            feats = extract_solid_features(shape, section=True)
+            result["features"] = feats
+            from app.pipeline.part_classifier import classify_part
+            refined = classify_part(feats, result.get("type"), member_id)
+            result["refined_class"] = refined["class"]
+            result["refined_confidence"] = refined["confidence"]
+            result["refined_reason"] = refined["reason"]
         except Exception as e:
             logger.debug("feature_extract_failed", ref_id=ref_id, error=str(e))
     return result
