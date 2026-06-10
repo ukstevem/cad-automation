@@ -3067,6 +3067,17 @@ export class AnalysisPage {
             bought_out: 'bought-out', exclude: 'exclude',
         };
         let changed = 0;
+        const applyTo = (node) => {
+            if (this.classifications.has(node.id)) return;
+            const res = this._refinedForNode(node);
+            if (!res) return;
+            const action = MAP[(res.refined_class || '').toLowerCase()];  // MIXED -> undefined
+            const conf = res.refined_confidence;
+            if (action && conf != null && conf >= 0.5) {
+                this.classifications.set(node.id, action);
+                changed++;
+            }
+        };
         const walk = (nodes) => {
             for (const node of nodes) {
                 const cls = this.classifications.get(node.id);
@@ -3077,21 +3088,16 @@ export class AnalysisPage {
                     if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
                     continue;
                 }
-                // Exposed frontier part: auto-classify if unclassified + confident.
-                if (!cls) {
-                    const refId = node.ref_id || node.id;
-                    const res = this._cncAnalysisResults[refId];
-                    if (res) {
-                        const action = MAP[(res.refined_class || '').toLowerCase()];
-                        const conf = res.refined_confidence;
-                        if (action && conf != null && conf >= 0.5) {
-                            this.classifications.set(node.id, action);
-                            changed++;
-                        }
-                    }
+                if (node.node_type === 'part_multi_solid') {
+                    // Exploded -> classify each constituent solid (per-solid
+                    // class from the parent's solids[]); unexploded -> classify
+                    // the whole part by its aggregate (skips MIXED).
+                    if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
+                    else applyTo(node);
+                    continue;
                 }
-                // A multi-solid part exploded into solids: descend only if exploded.
-                if (node.children && this.explodedNodes.has(node.id)) walk(node.children);
+                // Single-solid part or a revealed SOLID node.
+                applyTo(node);
             }
         };
         walk(this._treeData);
@@ -3109,11 +3115,26 @@ export class AnalysisPage {
      * exposed = not inside an unexploded or bought-out/excluded assembly; needs
      * = not user-classified and no refined_class yet. Returns Map(refId -> name).
      */
+    /**
+     * Resolve a tree node to its refined-class result. Multi-solid SOLID nodes
+     * (synthetic id "<parentRef>:s<N>") resolve to the parent's solids[N] —
+     * they are never classified by their synthetic ref (it is not an XCAF label).
+     */
+    _refinedForNode(node) {
+        if (!this._cncAnalysisResults) return null;
+        if (node.node_type === 'solid') {
+            const m = String(node.id).match(/^(.*):s(\d+)$/);
+            const parentRef = m ? m[1] : node.id;
+            const idx = m ? parseInt(m[2], 10) : 0;
+            const res = this._cncAnalysisResults[parentRef];
+            if (res && Array.isArray(res.solids) && res.solids[idx]) return res.solids[idx];
+            return null;
+        }
+        return this._cncAnalysisResults[node.ref_id || node.id] || null;
+    }
+
     _collectFrontierRefs() {
         const refs = new Map();
-        const haveRefined = (refId) =>
-            this._cncAnalysisResults && this._cncAnalysisResults[refId]
-            && this._cncAnalysisResults[refId].refined_class != null;
         const walk = (nodes) => {
             for (const node of nodes) {
                 const cls = this.classifications.get(node.id);
@@ -3122,8 +3143,12 @@ export class AnalysisPage {
                     if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
                     continue;
                 }
+                // SOLID nodes are covered by their parent multi-solid classify
+                // (which returns solids[]); never send their synthetic ref.
+                if (node.node_type === 'solid') continue;
                 const refId = node.ref_id || node.id;
-                if (!cls && !haveRefined(refId) && !refs.has(refId)) {
+                const res = this._cncAnalysisResults && this._cncAnalysisResults[refId];
+                if (!cls && !(res && res.refined_class != null) && !refs.has(refId)) {
                     refs.set(refId, node.name || '');
                 }
                 if (node.children && this.explodedNodes.has(node.id)) walk(node.children);
@@ -3141,28 +3166,30 @@ export class AnalysisPage {
     async _classifyFrontier() {
         if (!this._currentFilename || !this._treeData || !this._projectStateRestored) return;
         const refs = this._collectFrontierRefs();
-        if (refs.size === 0) return;
         this._classifyInFlight = this._classifyInFlight || new Set();
         const refIds = [...refs.keys()].filter(r => !this._classifyInFlight.has(r));
-        if (refIds.length === 0) return;
-        refIds.forEach(r => this._classifyInFlight.add(r));
-        const memberIds = {};
-        for (const r of refIds) memberIds[r] = refs.get(r);
-        try {
-            const resp = await this.api.classifyParts(
-                this._currentFilename, refIds, memberIds, this._lastSteelGrade || '');
-            if (resp?.results) {
-                this._cncAnalysisResults = this._cncAnalysisResults || {};
-                for (const [r, res] of Object.entries(resp.results)) {
-                    if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
+        if (refIds.length) {
+            refIds.forEach(r => this._classifyInFlight.add(r));
+            const memberIds = {};
+            for (const r of refIds) memberIds[r] = refs.get(r);
+            try {
+                const resp = await this.api.classifyParts(
+                    this._currentFilename, refIds, memberIds, this._lastSteelGrade || '');
+                if (resp?.results) {
+                    this._cncAnalysisResults = this._cncAnalysisResults || {};
+                    for (const [r, res] of Object.entries(resp.results)) {
+                        if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
+                    }
                 }
-                this._autoClassifyFromRefinedResults();
+            } catch (e) {
+                console.warn('classifyFrontier failed:', e);
+            } finally {
+                refIds.forEach(r => this._classifyInFlight.delete(r));
             }
-        } catch (e) {
-            console.warn('classifyFrontier failed:', e);
-        } finally {
-            refIds.forEach(r => this._classifyInFlight.delete(r));
         }
+        // Always apply — an explode may reveal solids whose classes come from a
+        // parent that is already cached (no new POST needed).
+        this._autoClassifyFromRefinedResults();
     }
 
     // ---------------------------------------------------------------
