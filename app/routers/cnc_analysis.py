@@ -49,6 +49,8 @@ from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker script
 _CNC_WORKER = Path(__file__).parent.parent / "workers" / "analyse_cnc_parts.py"
+# Lightweight classify worker (refined_class only, no NC1/DXF).
+_CLASSIFY_WORKER = Path(__file__).parent.parent / "workers" / "classify_parts.py"
 
 # Hard timeout for a single CNC analysis run (seconds).
 # The worker saves each part's result progressively, so a timeout only loses
@@ -303,6 +305,71 @@ async def get_cnc_result(filename: str) -> Dict[str, Any]:
         )
 
     return {"filename": filename, "results": cache["cnc_analysis"]}
+
+
+@router.post("/cnc-analysis/classify/{filename}")
+async def classify_parts(filename: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Lightweight refined-class for a set of refs — features + library match +
+    decision tree, NO NC1/DXF.  Assists the top-down triage as the user explores
+    the frontier; runs ahead of (and far cheaper than) the heavy CNC analysis.
+
+    Body: ``{"ref_ids": [...], "member_ids": {ref: name}, "steel_grade": "S275"}``
+    Returns ``{"results": {ref_id: {refined_class, refined_confidence, ...}}}``.
+    Already-classified/analysed refs are returned from cache without recompute.
+    """
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "File not found", "filename": filename},
+        )
+    ref_ids: List[str] = body.get("ref_ids", [])
+    member_ids: dict = body.get("member_ids", {})
+    steel_grade: str = body.get("steel_grade", "") or ""
+    if not ref_ids:
+        return {"filename": filename, "results": {}}
+
+    cache = _load_cache(filename) or {}
+    classification = dict(cache.get("classification") or {})
+    cnc = cache.get("cnc_analysis") or {}
+
+    def _cached(r):
+        if r in classification:
+            return classification[r]
+        c = cnc.get(r)
+        if isinstance(c, dict) and c.get("refined_class") is not None:
+            return {"refined_class": c.get("refined_class"),
+                    "refined_confidence": c.get("refined_confidence"),
+                    "refined_reason": c.get("refined_reason")}
+        return None
+
+    pending = [r for r in ref_ids if _cached(r) is None]
+    if pending:
+        analysis_json_path = str(_analysis_json_path(filename))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(_CLASSIFY_WORKER),
+                str(file_path), analysis_json_path,
+                json.dumps(pending), json.dumps(member_ids), steel_grade,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=float(_CNC_TIMEOUT))
+        except Exception as exc:
+            logger.error("classify_worker_failed", filename=filename, error=str(exc))
+            raise HTTPException(status_code=500,
+                                detail={"error": f"Classification failed: {exc}"})
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            raise HTTPException(status_code=500,
+                                detail={"error": f"Classify worker exit {proc.returncode}: {stderr[:300]}"})
+        # Worker saved progressively to the sidecar; parse stdout for the results.
+        json_line = next((l for l in stdout.splitlines() if l.strip().startswith("{")), "{}")
+        classification.update(json.loads(json_line).get("results", {}))
+
+    return {"filename": filename,
+            "results": {r: _cached(r) or classification.get(r) for r in ref_ids}}
 
 
 @router.post("/cnc-analysis/analyse/{filename}")
