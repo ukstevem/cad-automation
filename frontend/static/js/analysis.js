@@ -564,6 +564,8 @@ export class AnalysisPage {
             this._restoreProjectState(data.project_state);
         }
         this._projectStateRestored = true;
+        // Auto-classify from the classifier (no-op until CNC results are loaded).
+        this._autoClassifyFromRefinedResults();
 
         // Only trigger STL generation if we don't already have cached STL results.
         // _restoreProjectState populates stlMap from project_state.stl_map, so if
@@ -3035,6 +3037,57 @@ export class AnalysisPage {
         }
     }
 
+    /**
+     * Auto-apply classifications from the classifier's refined_class (rw7.1).
+     *
+     * Runs once CNC results AND project_state are both loaded. For every leaf
+     * part the user has NOT already classified, a confident refined_class
+     * (refined_confidence >= 0.5) is mapped to an action and applied:
+     *   SECTION / PLATE / FORMED_PLATE / BENT_SECTION -> postprocess
+     *   BOUGHT_OUT -> bought-out,   EXCLUDE -> exclude
+     * Low-confidence parts and MIXED multi-solid parts are left UNSET so they
+     * surface for review (they already carry the ⚠ refined badge). Never
+     * overwrites a manual decision; idempotent (only fills blanks).
+     */
+    _autoClassifyFromRefinedResults() {
+        if (!this._cncAnalysisResults || !this._projectStateRestored || !this._treeData) return;
+        const MAP = {
+            section: 'postprocess', plate: 'postprocess',
+            formed_plate: 'postprocess', bent_section: 'postprocess',
+            bought_out: 'bought-out', exclude: 'exclude',
+        };
+        let changed = 0;
+        const walk = (nodes) => {
+            for (const node of nodes) {
+                if (node.node_type === 'assembly') {
+                    if (node.children) walk(node.children);
+                    continue;
+                }
+                if (!this.classifications.has(node.id)) {
+                    const refId = node.ref_id || node.id;
+                    const res = this._cncAnalysisResults[refId];
+                    if (res) {
+                        const action = MAP[(res.refined_class || '').toLowerCase()];
+                        const conf = res.refined_confidence;
+                        if (action && conf != null && conf >= 0.5) {
+                            this.classifications.set(node.id, action);
+                            changed++;
+                        }
+                    }
+                }
+                if (node.children) walk(node.children);
+            }
+        };
+        walk(this._treeData);
+        if (changed > 0) {
+            console.info(`Auto-classified ${changed} parts from refined_class`);
+            this._updateProgress();
+            this._debouncedSave();
+            this._refreshAssemblyColors();
+            this._renderPartsList(this._consolidationGroups);
+        }
+    }
+
     // ---------------------------------------------------------------
     // Progress counter + tree filter
     // ---------------------------------------------------------------
@@ -3156,6 +3209,7 @@ export class AnalysisPage {
                 }),
             this._refreshCncState(filename),
         ]).finally(() => {
+            this._autoClassifyFromRefinedResults();
             this._renderPartsList(this._consolidationGroups);
         });
     }
@@ -4988,6 +5042,8 @@ export class AnalysisPage {
                         this._cncAnalysisResults = Object.assign(
                             {}, this._cncAnalysisResults || {}, resp.results || {}
                         );
+                        // Auto-classify newly analysed parts from refined_class.
+                        this._autoClassifyFromRefinedResults();
 
                         // Refresh freshness — completion should move us to 'fresh'.
                         this._refreshCncState(this._currentFilename)
