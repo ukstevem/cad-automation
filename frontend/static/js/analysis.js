@@ -4496,6 +4496,22 @@ export class AnalysisPage {
             ? ` <span class="cnc-confidence cnc-confidence-${confLevel.toLowerCase()}">${confLevel}</span>`
             : '';
 
+        // Refined decision-tree class (rw7.1): surfaces formed/bent/exclude/BO
+        // that the base type can't express, with a review flag for low confidence.
+        const refined = result.refined_class || '';
+        const rConf = result.refined_confidence;
+        let refinedBadge = '';
+        if (refined) {
+            const colors = {
+                section: '#e6a13c', plate: '#4caf50', formed_plate: '#e3496b',
+                bent_section: '#46c2c2', bought_out: '#8a7bd8', exclude: '#777',
+            };
+            const c = colors[refined.toLowerCase()] || '#999';
+            const flag = (rConf != null && rConf < 0.5) ? ' ⚠' : '';
+            const tip = `confidence ${rConf}${result.refined_reason ? ' — ' + result.refined_reason : ''}`;
+            refinedBadge = ` <span class="cnc-refined" style="background:${c};color:#fff;border-radius:4px;padding:1px 6px;font-size:11px" title="${this._esc(tip)}">${this._esc(refined)}${flag}</span>`;
+        }
+
         switch (result.type) {
             case 'plate': {
                 const { L, W, T } = result.dims || {};
@@ -4541,7 +4557,7 @@ export class AnalysisPage {
                 return '';
         }
 
-        return badge + (downloadLink ? ' ' + downloadLink : '');
+        return badge + refinedBadge + (downloadLink ? ' ' + downloadLink : '');
     }
 
     /**

@@ -235,13 +235,15 @@ def _write_cnc_sheet(
         "Mass Each (kg)", "Total Mass (kg)", "Confidence",
         "Holes", "End Cuts",
         "DXF", "NC1", "Parent Assembly",
+        "Refined Class", "Class Conf.", "Review?",
     ]
     for col, h in enumerate(headers, 1):
         ws.cell(row=1, column=col, value=h)
     _style_header(ws, len(headers))
 
     # Column widths
-    col_widths = [30, 9, 30, 6, 8, 12, 18, 6, 10, 10, 10, 8, 12, 12, 12, 6, 8, 16, 16, 25]
+    col_widths = [30, 9, 30, 6, 8, 12, 18, 6, 10, 10, 10, 8, 12, 12, 12, 6, 8, 16, 16, 25,
+                  16, 10, 8]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -273,6 +275,12 @@ def _write_cnc_sheet(
 
         confidence = cnc.get("confidence", "")
 
+        # Refined decision-tree class (rw7.1): formed/bent/exclude that the base
+        # type can't express, plus a review flag for low-confidence calls.
+        refined = cnc.get("refined_class", "")
+        refined_conf = cnc.get("refined_confidence")
+        review = "REVIEW" if (refined_conf is not None and refined_conf < 0.5) else ""
+
         values = [
             None,  # thumbnail column — filled separately
             item.get("bom_item", ""),
@@ -294,6 +302,9 @@ def _write_cnc_sheet(
             dxf_name,
             nc1_name,
             item.get("parent", ""),
+            refined,
+            refined_conf if refined_conf is not None else "",
+            review,
         ]
 
         confidence_col = 15  # 1-based column index for Confidence
