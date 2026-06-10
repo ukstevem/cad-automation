@@ -4307,7 +4307,7 @@ export class AnalysisPage {
         let hasDxf = false, hasNc1 = false;
         if (this._cncAnalysisResults) {
             for (const r of Object.values(this._cncAnalysisResults)) {
-                const checks = r.type === 'multi_solid' ? (r.solids || []) : [r];
+                const checks = Array.isArray(r.solids) ? r.solids : [r];
                 for (const s of checks) {
                     if (s.dxf_path) hasDxf = true;
                     if (s.nc1_path) hasNc1 = true;
@@ -4581,11 +4581,13 @@ export class AnalysisPage {
             const parentResult = this._cncAnalysisResults[xcafRefId];
             if (!parentResult) return null;
 
-            if (parentResult.type === 'multi_solid') {
+            // Index solids[] whenever present — heavy results carry
+            // type==='multi_solid', lightweight classify results just have solids[].
+            if (Array.isArray(parentResult.solids)) {
                 // Try to extract solid index from nodeId (expected format "<ref_id>:s<N>")
                 const match = item.key.match(/:s(\d+)$/);
                 const solidIdx = match ? parseInt(match[1]) : 0;
-                const solidResult = parentResult.solids?.[solidIdx];
+                const solidResult = parentResult.solids[solidIdx];
                 if (solidResult) return { result: solidResult, xcafRefId, solidIdx };
                 // Fall back to parent result if index extraction fails
                 return { result: parentResult, xcafRefId, solidIdx: null };
@@ -4611,8 +4613,8 @@ export class AnalysisPage {
         const xcafRefId = this._nodeRefMap?.get(instanceNodeId) || instanceNodeId;
         const refResult = this._cncAnalysisResults[xcafRefId];
         if (!refResult) return null;
-        if (refResult.type === 'multi_solid' && solidIdx != null) {
-            const solidResult = refResult.solids?.[solidIdx];
+        if (Array.isArray(refResult.solids) && solidIdx != null) {
+            const solidResult = refResult.solids[solidIdx];
             if (solidResult) return { result: solidResult, xcafRefId, solidIdx };
             return { result: refResult, xcafRefId, solidIdx: null };
         }
