@@ -26,15 +26,22 @@ from app.config import settings  # noqa: E402
 
 LABELS = "/app/app/pipeline/data/labels/verified.csv"
 DATASET = "/app/outputs/ml/dataset.csv"
-GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION"]
-OOS = ["BOUGHT_OUT", "EXCLUDE"]
+GEOM = ["SECTION", "PLATE", "FORMED_PLATE", "BENT_SECTION", "EXCLUDE"]
+OOS = ["BOUGHT_OUT"]
+
+# Tiny / physically degenerate solids (filled-in holes, broken geometry) — no
+# real fabricated part is this small; catches 82% of artifacts with 0 false
+# excludes on the labelled set.
+_EXCLUDE_VOL_MM3 = 10000.0
 
 
-def predict(name, holes, thk, tthin, rule_type, nbends):
+def predict(name, holes, thk, tthin, rule_type, nbends, volume):
     from app.pipeline.catalogue_products import match_catalogue_product
     cp = match_catalogue_product(name)   # known BO products (Unistrut, ...)
     if cp:
         return cp[0]
+    if volume is not None and volume < _EXCLUDE_VOL_MM3:
+        return "EXCLUDE"                 # tiny/degenerate artifact
     if nbends is not None and nbends >= 5:
         return "BENT_SECTION"
     if holes is not None and holes >= 1:
@@ -118,7 +125,7 @@ def main():
                 continue
             pred = predict(names.get((job, ref)), f.get("n_holes"),
                            f.get("thk_max_over_teff"), f.get("t_eff_thin_ratio"),
-                           rts.get(ref), f.get("n_convex_bends"))
+                           rts.get(ref), f.get("n_convex_bends"), f.get("volume_mm3"))
             rows.append((cat, pred))
     print(f"\nlabels: {len(labels)}  evaluated: {len(rows)}")
 

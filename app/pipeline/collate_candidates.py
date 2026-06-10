@@ -166,7 +166,7 @@ def main() -> None:
         for r in manifest:  # csv reads all as str; coerce numerics for the JS
             for k in ("t_eff", "t_eff_thin_ratio", "fill_ratio", "dim_long",
                       "dim_mid", "dim_thin", "n_holes", "thk_max_over_teff",
-                      "n_convex_bends", "developed_ratio", "solid_index"):
+                      "n_convex_bends", "volume_mm3", "developed_ratio", "solid_index"):
                 if r.get(k) not in (None, ""):
                     try:
                         r[k] = float(r[k])
@@ -245,6 +245,7 @@ def main() -> None:
                 "n_holes": f.get("n_holes"),
                 "thk_max_over_teff": f.get("thk_max_over_teff"),
                 "n_convex_bends": f.get("n_convex_bends"),
+                "volume_mm3": f.get("volume_mm3", row.get("volume_mm3")),
                 "developed_ratio": f.get("developed_ratio", row.get("developed_ratio")),
             })
             _log(f"  ok {fname}")
@@ -324,6 +325,8 @@ function predict(it){
   // before geometry. Keep in sync with app/pipeline/catalogue_products.py.
   if(it.part_name){const nm=String(it.part_name).toLowerCase();
     if(nm.includes('unist') && !nm.includes('plate')) return 'BOUGHT_OUT';}
+  const vol=num(it.volume_mm3);
+  if(vol!=null && vol<10000) return 'EXCLUDE';           // tiny/degenerate artifact
   const holes=num(it.n_holes), thk=num(it.thk_max_over_teff), tthin=num(it.t_eff_thin_ratio), nb=num(it.n_convex_bends);
   if(nb!=null && nb>=5) return 'BENT_SECTION';            // curved tube => many bend faces
   if(holes!=null && holes>=1) return 'SECTION';          // hollow box (RHS/SHS/CHS)
