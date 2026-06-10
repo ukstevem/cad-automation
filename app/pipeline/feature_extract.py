@@ -143,9 +143,13 @@ def extract_solid_features(shape, fast: bool = True,
         try:
             rast = _cross_section_raster(shape)
             if rast is not None:
-                feats["n_holes"], feats["thk_max"], feats["thk_cov"] = rast
+                (feats["n_holes"], feats["thk_max"], feats["thk_cov"],
+                 cs_h, cs_w, cs_area) = rast
                 if feats.get("t_eff"):
                     feats["thk_max_over_teff"] = round(feats["thk_max"] / feats["t_eff"], 3)
+                # Overwrite the fast-mode fingerprint proxies with the raster-
+                # measured cross-section (used for the library match).
+                feats["cs_H"], feats["cs_W"], feats["section_area"] = cs_h, cs_w, cs_area
         except Exception as exc:
             logger.debug("feature_section_raster_failed", error=str(exc))
         try:
@@ -371,9 +375,18 @@ def _cross_section_raster(solid):
         tmax = float(dt.max())
         core = dt[dt > 0.5 * tmax]
         cov = float(core.std() / core.mean()) if len(core) > 1 and core.mean() > 0 else 0.0
-        R.append((_count_holes(mask), tmax, cov))
+        # Section envelope + material area straight from the mask — reused for
+        # the library match in the lightweight classify pass (no re-slicing).
+        ys, xs = np.where(mask)
+        h = (ys.max() - ys.min() + 1) * g
+        w = (xs.max() - xs.min() + 1) * g
+        area = float(mask.sum()) * g * g
+        R.append((_count_holes(mask), tmax, cov, max(h, w), min(h, w), area))
     if not R:
         return None
     return (int(np.median([r[0] for r in R])),
             round(float(np.median([r[1] for r in R])), 2),
-            round(float(np.median([r[2] for r in R])), 3))
+            round(float(np.median([r[2] for r in R])), 3),
+            round(float(np.median([r[3] for r in R])), 2),
+            round(float(np.median([r[4] for r in R])), 2),
+            round(float(np.median([r[5] for r in R])), 1))

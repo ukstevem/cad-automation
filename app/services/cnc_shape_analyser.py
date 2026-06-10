@@ -1007,3 +1007,79 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
         return _analyse_single(shape, 0, ref_id, safe_member, file_path, out_dir,
                                parent_name, project_number, steel_grade,
                                instance_count)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight classification (rw7.10): refined_class WITHOUT NC1/DXF generation.
+# Used to assist the top-down triage as the user explores the frontier, before
+# the heavy CNC output generation runs (which stays scoped to postprocess parts).
+# ---------------------------------------------------------------------------
+def _light_rule_type(feats: Dict[str, Any], steel_grade: Optional[str]) -> Optional[str]:
+    """Library-match the raster-measured cross-section -> 'section' or None.
+
+    Reuses the cross-section already rastered for the features (no re-slicing).
+    Gives the classifier the same "matched a standard profile" signal the heavy
+    path derives, which is what rescues uniform-wall angles from the formed bucket.
+    """
+    h, w, area = feats.get("cs_H"), feats.get("cs_W"), feats.get("section_area")
+    if not (h and w and area):
+        return None
+    cs = {"span_web": h, "span_flange": w, "area": area,
+          "length": feats.get("obb_length") or 0.0}
+    try:
+        if classify_profile(cs, str(_library_for_grade(steel_grade))):
+            return "section"
+    except Exception:
+        pass
+    return None
+
+
+def _classify_solid_light(solid, part_name: Optional[str],
+                          steel_grade: Optional[str]) -> Dict[str, Any]:
+    from app.pipeline.feature_extract import extract_solid_features
+    from app.pipeline.part_classifier import classify_part
+    feats = extract_solid_features(solid, section=True)
+    rule_type = _light_rule_type(feats, steel_grade)
+    r = classify_part(feats, rule_type, part_name)
+    return {
+        "refined_class": r["class"],
+        "refined_confidence": r["confidence"],
+        "refined_reason": r["reason"],
+        "rule_type": rule_type,
+    }
+
+
+def classify_ref(file_path: str, ref_id: str,
+                 part_name: Optional[str] = None,
+                 steel_grade: Optional[str] = None,
+                 *, _doc=None, _shape_tool=None) -> Dict[str, Any]:
+    """Lightweight refined-class for one prototype — no NC1/DXF.
+
+    Mirrors :func:`analyse_ref` but only classifies (features + library match +
+    decision tree).  Multi-solid parts return per-solid classes plus an
+    aggregate (single class if all agree, else "MIXED"; confidence = min).
+    """
+    if _doc is not None and _shape_tool is not None:
+        doc, shape_tool = _doc, _shape_tool
+    else:
+        doc, shape_tool = _read_xcaf(file_path)
+    shape = _get_shape(doc, ref_id)
+    n_solids = count_solids_in_shape(shape)
+
+    if n_solids > 1:
+        solids = [_classify_solid_light(s, part_name, steel_grade)
+                  for s in _iter_solids(shape)]
+        rcs = [s.get("refined_class") for s in solids if s.get("refined_class")]
+        agg = None
+        if rcs:
+            uniq = set(rcs)
+            agg = next(iter(uniq)) if len(uniq) == 1 else "MIXED"
+        confs = [s.get("refined_confidence") for s in solids
+                 if s.get("refined_confidence") is not None]
+        return {
+            "refined_class": agg,
+            "refined_confidence": min(confs) if confs else None,
+            "n_solids": n_solids,
+            "solids": solids,
+        }
+    return _classify_solid_light(shape, part_name, steel_grade)
