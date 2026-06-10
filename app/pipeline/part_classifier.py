@@ -51,25 +51,28 @@ def classify_part(features: Optional[Dict[str, Any]],
     if cp:
         return {"class": cp[0], "confidence": 0.95, "reason": f"catalogue:{cp[1]}"}
 
-    # 2. Tiny / degenerate -> artifact.
+    # 2. Flat-walled (uniform thin gauge ~ smallest bbox dim) -> PLATE, checked
+    #    FIRST. A flat plate is a plate regardless of curved cut edges (which can
+    #    trip the bend detector) or small size (which can trip the artifact gate).
+    #    Sections / formed / bent / artifacts all have a low t_eff/dim_thin.
+    tthin = f.get("t_eff_thin_ratio")
+    if tthin is not None and tthin >= PLATE_TTHIN:
+        return {"class": "PLATE", "confidence": 0.90, "reason": "flat plate"}
+
+    # 3. Tiny / degenerate (and not flat) -> artifact.
     vol = f.get("volume_mm3")
     if vol is not None and vol < EXCLUDE_VOL_MM3:
         return {"class": "EXCLUDE", "confidence": 0.90, "reason": "tiny/degenerate"}
-
-    # 3. Many convex bends -> curved tube (bent section).
-    nb = f.get("n_convex_bends")
-    if nb is not None and nb >= BENT_MIN_BENDS:
-        return {"class": "BENT_SECTION", "confidence": 0.85, "reason": "many bends"}
 
     # 4. Closed hollow cross-section -> box section.
     holes = f.get("n_holes")
     if holes is not None and holes >= 1:
         return {"class": "SECTION", "confidence": 0.90, "reason": "hollow box"}
 
-    # 5. Flat-ish -> plate.
-    tthin = f.get("t_eff_thin_ratio")
-    if tthin is not None and tthin >= PLATE_TTHIN:
-        return {"class": "PLATE", "confidence": 0.90, "reason": "flat plate"}
+    # 5. Many convex bends -> curved tube (bent section).
+    nb = f.get("n_convex_bends")
+    if nb is not None and nb >= BENT_MIN_BENDS:
+        return {"class": "BENT_SECTION", "confidence": 0.85, "reason": "many bends"}
 
     # 6. A convex bend (R>=gauge) -> formed plate.
     if nb is not None and nb >= FORMED_MIN_BENDS:
