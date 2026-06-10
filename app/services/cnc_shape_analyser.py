@@ -983,10 +983,24 @@ def analyse_ref(file_path: str, ref_id: str, out_dir: Path,
                                 parent_name, project_number, steel_grade,
                                 instance_count)
             results.append(r)
+        # Aggregate refined class so multi-solid parts surface in the BOM too:
+        # the single class if all solids agree, else "MIXED"; confidence = min.
+        rcs = [r.get("refined_class") for r in results
+               if isinstance(r, dict) and r.get("refined_class")]
+        agg_class = None
+        agg_conf = None
+        if rcs:
+            uniq = set(rcs)
+            agg_class = next(iter(uniq)) if len(uniq) == 1 else "MIXED"
+            confs = [r.get("refined_confidence") for r in results
+                     if isinstance(r, dict) and r.get("refined_confidence") is not None]
+            agg_conf = min(confs) if confs else None
         return {
             "type": "multi_solid",
             "n_solids": n_solids,
             "solids": results,
+            "refined_class": agg_class,
+            "refined_confidence": agg_conf,
             "analysed_at": datetime.now(timezone.utc).isoformat(),
         }
     else:
