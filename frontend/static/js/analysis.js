@@ -2522,6 +2522,10 @@ export class AnalysisPage {
         } else if (nodeType === 'part_multi_solid') {
             await this._explodeMultiSolid(li, siblings);
         }
+
+        // Newly-revealed frontier: auto-classify the parts this explosion exposed
+        // (respects the frontier — won't descend into nested unexploded assemblies).
+        this._autoClassifyFromRefinedResults();
     }
 
     /**
@@ -3038,16 +3042,20 @@ export class AnalysisPage {
     }
 
     /**
-     * Auto-apply classifications from the classifier's refined_class (rw7.1).
+     * Auto-apply classifications at the CURRENT explosion frontier (rw7.1).
      *
-     * Runs once CNC results AND project_state are both loaded. For every leaf
-     * part the user has NOT already classified, a confident refined_class
-     * (refined_confidence >= 0.5) is mapped to an action and applied:
-     *   SECTION / PLATE / FORMED_PLATE / BENT_SECTION -> postprocess
-     *   BOUGHT_OUT -> bought-out,   EXCLUDE -> exclude
-     * Low-confidence parts and MIXED multi-solid parts are left UNSET so they
-     * surface for review (they already carry the ⚠ refined badge). Never
-     * overwrites a manual decision; idempotent (only fills blanks).
+     * This is a FRONTIER assistant, not a tree-flattener: it respects the
+     * user's top-down explode/categorise workflow and NEVER auto-descends.
+     * Specifically the walk stops at:
+     *   • assemblies the user has not exploded — they stay a single frontier
+     *     item (this is what prevents classifying e.g. floor grating piece by
+     *     piece; the user marks the grating assembly BO without exploding), and
+     *   • any node already classified bought-out / exclude (out of scope).
+     * For each EXPOSED, not-yet-classified part with a confident refined_class
+     * (>=0.5) it applies the mapped action; low-confidence / MIXED parts are
+     * left unset (flagged via the ⚠ badge) for review. Never overwrites a
+     * manual decision; idempotent. Re-run whenever the frontier changes
+     * (explode) or new CNC results arrive.
      */
     _autoClassifyFromRefinedResults() {
         if (!this._cncAnalysisResults || !this._projectStateRestored || !this._treeData) return;
@@ -3059,11 +3067,16 @@ export class AnalysisPage {
         let changed = 0;
         const walk = (nodes) => {
             for (const node of nodes) {
+                const cls = this.classifications.get(node.id);
                 if (node.node_type === 'assembly') {
-                    if (node.children) walk(node.children);
+                    // Respect the human triage: don't descend into bought-out /
+                    // excluded assemblies, or ones not yet exploded.
+                    if (cls === 'bought-out' || cls === 'exclude') continue;
+                    if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
                     continue;
                 }
-                if (!this.classifications.has(node.id)) {
+                // Exposed frontier part: auto-classify if unclassified + confident.
+                if (!cls) {
                     const refId = node.ref_id || node.id;
                     const res = this._cncAnalysisResults[refId];
                     if (res) {
@@ -3075,12 +3088,13 @@ export class AnalysisPage {
                         }
                     }
                 }
-                if (node.children) walk(node.children);
+                // A multi-solid part exploded into solids: descend only if exploded.
+                if (node.children && this.explodedNodes.has(node.id)) walk(node.children);
             }
         };
         walk(this._treeData);
         if (changed > 0) {
-            console.info(`Auto-classified ${changed} parts from refined_class`);
+            console.info(`Auto-classified ${changed} frontier parts from refined_class`);
             this._updateProgress();
             this._debouncedSave();
             this._refreshAssemblyColors();
