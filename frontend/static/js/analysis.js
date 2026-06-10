@@ -564,8 +564,9 @@ export class AnalysisPage {
             this._restoreProjectState(data.project_state);
         }
         this._projectStateRestored = true;
-        // Auto-classify from the classifier (no-op until CNC results are loaded).
-        this._autoClassifyFromRefinedResults();
+        // Classify the (restored) frontier with the lightweight pass, then
+        // auto-apply — runs ahead of any heavy CNC analysis.
+        this._classifyFrontier();
 
         // Only trigger STL generation if we don't already have cached STL results.
         // _restoreProjectState populates stlMap from project_state.stl_map, so if
@@ -2523,9 +2524,10 @@ export class AnalysisPage {
             await this._explodeMultiSolid(li, siblings);
         }
 
-        // Newly-revealed frontier: auto-classify the parts this explosion exposed
-        // (respects the frontier — won't descend into nested unexploded assemblies).
-        this._autoClassifyFromRefinedResults();
+        // Newly-revealed frontier: lightweight-classify the parts this explosion
+        // exposed, then auto-apply (respects the frontier — won't descend into
+        // nested unexploded assemblies).
+        this._classifyFrontier();
     }
 
     /**
@@ -3099,6 +3101,67 @@ export class AnalysisPage {
             this._debouncedSave();
             this._refreshAssemblyColors();
             this._renderPartsList(this._consolidationGroups);
+        }
+    }
+
+    /**
+     * Collect the EXPOSED frontier part refs that still need a refined_class:
+     * exposed = not inside an unexploded or bought-out/excluded assembly; needs
+     * = not user-classified and no refined_class yet. Returns Map(refId -> name).
+     */
+    _collectFrontierRefs() {
+        const refs = new Map();
+        const haveRefined = (refId) =>
+            this._cncAnalysisResults && this._cncAnalysisResults[refId]
+            && this._cncAnalysisResults[refId].refined_class != null;
+        const walk = (nodes) => {
+            for (const node of nodes) {
+                const cls = this.classifications.get(node.id);
+                if (node.node_type === 'assembly') {
+                    if (cls === 'bought-out' || cls === 'exclude') continue;
+                    if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
+                    continue;
+                }
+                const refId = node.ref_id || node.id;
+                if (!cls && !haveRefined(refId) && !refs.has(refId)) {
+                    refs.set(refId, node.name || '');
+                }
+                if (node.children && this.explodedNodes.has(node.id)) walk(node.children);
+            }
+        };
+        if (this._treeData) walk(this._treeData);
+        return refs;
+    }
+
+    /**
+     * Lightweight-classify the current frontier (no NC1/DXF), merge the
+     * refined_class results, then auto-apply. This is the cheap pass that runs
+     * AS YOU EXPLORE — ahead of any heavy CNC analysis.
+     */
+    async _classifyFrontier() {
+        if (!this._currentFilename || !this._treeData || !this._projectStateRestored) return;
+        const refs = this._collectFrontierRefs();
+        if (refs.size === 0) return;
+        this._classifyInFlight = this._classifyInFlight || new Set();
+        const refIds = [...refs.keys()].filter(r => !this._classifyInFlight.has(r));
+        if (refIds.length === 0) return;
+        refIds.forEach(r => this._classifyInFlight.add(r));
+        const memberIds = {};
+        for (const r of refIds) memberIds[r] = refs.get(r);
+        try {
+            const resp = await this.api.classifyParts(
+                this._currentFilename, refIds, memberIds, this._lastSteelGrade || '');
+            if (resp?.results) {
+                this._cncAnalysisResults = this._cncAnalysisResults || {};
+                for (const [r, res] of Object.entries(resp.results)) {
+                    if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
+                }
+                this._autoClassifyFromRefinedResults();
+            }
+        } catch (e) {
+            console.warn('classifyFrontier failed:', e);
+        } finally {
+            refIds.forEach(r => this._classifyInFlight.delete(r));
         }
     }
 
@@ -4622,7 +4685,9 @@ export class AnalysisPage {
                 break;
             }
             default:
-                return '';
+                // Lightweight classification entry (no base type yet) — show the
+                // refined-class badge alone so triage suggestions are visible.
+                return refinedBadge;
         }
 
         return badge + refinedBadge + (downloadLink ? ' ' + downloadLink : '');

@@ -159,6 +159,14 @@ export class ApiClient {
         return this._get(`/api/v1/cnc-analysis/status/${encodeURIComponent(taskId)}`);
     }
 
+    /** Lightweight refined-class for a set of refs (no NC1/DXF) — drives triage. */
+    async classifyParts(filename, refIds, memberIds = {}, steelGrade = '') {
+        return this._postJson(
+            `/api/v1/cnc-analysis/classify/${encodeURIComponent(filename)}`,
+            { ref_ids: refIds, member_ids: memberIds, steel_grade: steelGrade },
+        );
+    }
+
     // ── Projects ───────────────────────────────────────────────────
 
     async listProjects() {
