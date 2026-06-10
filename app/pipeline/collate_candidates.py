@@ -83,23 +83,47 @@ def _round_robin_by_job(d: pd.DataFrame, n: int) -> pd.DataFrame:
     return d.loc[order]
 
 
+def _load_labelled(df: pd.DataFrame):
+    """Return (labelled (job,ref,sidx) keys, labelled fingerprint_keys) from
+    verified.csv — so the gallery can skip what's already been classified."""
+    keys = set()
+    path = Path(__file__).parent / "data" / "labels" / "verified.csv"
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                if not row or row[0].lstrip().startswith("#") or row[0] == "job":
+                    continue
+                keys.add((row[0], row[1], str(row[2])))
+    dd = df.copy()
+    dd["key"] = list(zip(dd["job"], dd["ref_id"], dd["solid_index"].astype(str)))
+    fps = set(dd[dd["key"].isin(keys)]["fingerprint_key"])
+    return keys, fps
+
+
 def _select_candidates(df: pd.DataFrame, max_n: int = 320,
                        fill_gate: float = 0.65) -> pd.DataFrame:
-    """Stratified set of distinct geometries for labelling.
+    """Stratified set of UNLABELLED distinct geometries for labelling.
 
-    One representative per distinct geometry (fingerprint), spread across jobs.
-    Prioritises the classification-ambiguous zone (thin-walled: formed / section
-    / angle / box) and includes a smaller sample of flatter plates for balance.
+    One representative per distinct geometry (fingerprint), spread across jobs,
+    EXCLUDING anything already classified in verified.csv (by exact part and by
+    shape — labelling one instance covers all copies).  Prioritises the
+    classification-ambiguous zone (thin-walled) with a smaller flat-plate sample.
     """
+    labelled_keys, labelled_fps = _load_labelled(df)
+
     d = df.copy()
     d["fill"] = pd.to_numeric(d["fill_ratio"], errors="coerce")
     d = d[d["features_ok"].fillna(False).astype(bool) & d["fill"].notna()]
     # Drop merged/unseparated STEP exports: jobs that parsed to <=2 distinct
-    # refs are a single whole-assembly lump (no part structure) — useless for
-    # part labelling.  Also drop individual lumps with many solids in one ref.
+    # refs are a single whole-assembly lump (no part structure).
     ref_per_job = df.groupby("job")["ref_id"].nunique()
     degenerate = set(ref_per_job[ref_per_job <= 2].index)
     d = d[~d["job"].isin(degenerate)]
+    # Skip already-labelled parts and any other instance of a labelled shape.
+    d["key"] = list(zip(d["job"], d["ref_id"], d["solid_index"].astype(str)))
+    d = d[~d["key"].isin(labelled_keys) & ~d["fingerprint_key"].isin(labelled_fps)]
+    _log(f"excluding {len(labelled_keys)} labelled parts "
+         f"({len(labelled_fps)} shapes) — showing only unlabelled")
     # one representative per distinct geometry
     d = d.sort_values("fill").drop_duplicates("fingerprint_key", keep="first")
 
