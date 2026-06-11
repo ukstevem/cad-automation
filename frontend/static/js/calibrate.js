@@ -31,7 +31,9 @@ export class CalibratePage {
     async _init() {
         try {
             const defaults = await this.api.getBoardDefaults();
-            this._board = { ...defaults.default_board };
+            // Restore the user's last board config so the dictionary/size don't
+            // silently revert to defaults on navigation (a mismatch = zero detection).
+            this._board = this._loadSavedBoard() || { ...defaults.default_board };
             this._dictionaries = defaults.dictionaries;
             this._minViews = defaults.min_views;
             this._recommendedViews = defaults.recommended_views;
@@ -193,6 +195,18 @@ export class CalibratePage {
             marker_mm: parseFloat($('#cal-marker').value) || 22,
             dictionary: $('#cal-dict').value,
         };
+        try {
+            localStorage.setItem('cal-board', JSON.stringify(this._board));
+        } catch { /* storage unavailable — non-fatal */ }
+    }
+
+    _loadSavedBoard() {
+        try {
+            const raw = localStorage.getItem('cal-board');
+            const b = raw ? JSON.parse(raw) : null;
+            if (b && b.dictionary && b.squares_x && b.squares_y) return b;
+        } catch { /* ignore */ }
+        return null;
     }
 
     // ---------------------------------------------------------------
@@ -410,18 +424,25 @@ export class CalibratePage {
         const resultEl = this.container.querySelector('#cal-result');
         const k = p.intrinsics || {};
         const rms = p.rms_reproj_error_px;
-        const quality = rms < 0.5 ? 'excellent' : rms < 1.0 ? 'good' : rms < 2.0 ? 'fair' : 'poor';
+        // Absolute-pixel RMS isn't comparable across resolutions: 2 px on a 36 MP
+        // phone image is proportionally far better than 2 px at 1080p. Normalise to
+        // a 1920-px-wide reference before bucketing quality.
+        const width = (p.image_size && p.image_size[0]) || 1920;
+        const normRms = rms * (1920 / width);
+        const quality = normRms < 0.5 ? 'excellent' : normRms < 1.0 ? 'good' : normRms < 2.0 ? 'fair' : 'poor';
+        const scaleNote = width > 2200
+            ? ` (≈${normRms.toFixed(2)} px normalised to 1080p)` : '';
         resultEl.innerHTML = `
             <div class="calibrate-result calibrate-result-${quality}">
                 <p><strong>Saved “${this._esc(p.name)}”.</strong>
-                   RMS reprojection error <strong>${rms} px</strong> (${quality}) ·
+                   RMS reprojection error <strong>${rms} px</strong>${scaleNote} (${quality}) ·
                    ${p.views_used}/${p.views_total} views used ·
                    ${p.image_size[0]}×${p.image_size[1]}</p>
                 <table class="calibrate-intrinsics">
                     <tr><td>fx</td><td>${k.fx}</td><td>fy</td><td>${k.fy}</td></tr>
                     <tr><td>cx</td><td>${k.cx}</td><td>cy</td><td>${k.cy}</td></tr>
                 </table>
-                <small>${rms >= 1.0 ? 'Tip: drop weak views and recapture with more angle variety for a lower error.' : 'Good result — ready for the overlay tool.'}</small>
+                <small>${quality === 'fair' || quality === 'poor' ? 'Tip: drop weak views and recapture with more angle variety and frame-edge coverage for a lower error.' : 'Good result — ready for the overlay tool.'}</small>
             </div>
         `;
     }

@@ -309,11 +309,13 @@ async def compute(
         obj_points, img_points, image_size, None, None
     )
 
-    # Per-view reprojection error, to flag bad frames back to the user.
+    # Per-view RMS reprojection error, to flag bad frames back to the user.
+    # RMS over the view's points = ||observed - projected||_2 / sqrt(N), matching
+    # the convention cv2.calibrateCamera uses for its overall RMS return value.
     per_used = [v for v in per_view if v.get("used")]
     for i, v in enumerate(per_used):
         proj, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], K, dist)
-        err = float(cv2.norm(img_points[i], proj, cv2.NORM_L2) / len(proj))
+        err = float(cv2.norm(img_points[i], proj, cv2.NORM_L2) / np.sqrt(len(proj)))
         v["reproj_error_px"] = round(err, 3)
 
     K = np.asarray(K)
