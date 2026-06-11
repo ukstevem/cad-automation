@@ -6,6 +6,7 @@ import { UploadPage } from './upload.js';
 import { AnalysisPage } from './analysis.js';
 import { ConnectionsPage } from './connections.js';
 import { ProjectsPage } from './projects.js';
+import { CalibratePage } from './calibrate.js';
 
 const api = new ApiClient();
 
@@ -14,6 +15,7 @@ const pages = {
     analysis: new AnalysisPage(api),
     connections: new ConnectionsPage(api),
     projects: new ProjectsPage(api),
+    calibrate: new CalibratePage(api),
 };
 
 class App {

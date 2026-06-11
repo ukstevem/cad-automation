@@ -289,6 +289,68 @@ export class ApiClient {
         return this._get(`/api/v1/connections/preview-status/${encodeURIComponent(taskId)}`);
     }
 
+    // ── Camera calibration (ChArUco) ──────────────────────────────
+
+    async getBoardDefaults() {
+        return this._get('/api/v1/calibration/board-defaults');
+    }
+
+    /** URL for the printable ChArUco board PNG (board params as query string). */
+    getBoardImageUrl(board) {
+        const p = new URLSearchParams({
+            squares_x: board.squares_x,
+            squares_y: board.squares_y,
+            square_mm: board.square_mm,
+            marker_mm: board.marker_mm,
+            dictionary: board.dictionary,
+        });
+        return `${this.baseUrl}/api/v1/calibration/board?${p.toString()}`;
+    }
+
+    /** Single-frame detection feedback. `frameBlob` is a Blob/File of a JPEG/PNG. */
+    async detectBoard(frameBlob, board) {
+        const fd = new FormData();
+        fd.append('frame', frameBlob, 'frame.jpg');
+        this._appendBoard(fd, board);
+        return this._postForm('/api/v1/calibration/detect', fd);
+    }
+
+    /** Run calibration over many frames. `frames` is an array of Blob/File. */
+    async computeCalibration(frames, name, board, cameraLabel = '') {
+        const fd = new FormData();
+        frames.forEach((f, i) => fd.append('frames', f, f.name || `frame_${i}.jpg`));
+        fd.append('name', name);
+        fd.append('camera_label', cameraLabel);
+        this._appendBoard(fd, board);
+        return this._postForm('/api/v1/calibration/compute', fd);
+    }
+
+    async listCalibrationProfiles() {
+        return this._get('/api/v1/calibration/profiles');
+    }
+
+    async getCalibrationProfile(name) {
+        return this._get(`/api/v1/calibration/profiles/${encodeURIComponent(name)}`);
+    }
+
+    async deleteCalibrationProfile(name) {
+        return this._delete(`/api/v1/calibration/profiles/${encodeURIComponent(name)}`);
+    }
+
+    _appendBoard(fd, board) {
+        fd.append('squares_x', board.squares_x);
+        fd.append('squares_y', board.squares_y);
+        fd.append('square_mm', board.square_mm);
+        fd.append('marker_mm', board.marker_mm);
+        fd.append('dictionary', board.dictionary);
+    }
+
+    async _postForm(path, formData) {
+        const res = await fetch(`${this.baseUrl}${path}`, { method: 'POST', body: formData });
+        if (!res.ok) throw await this._handleError(res);
+        return res.json();
+    }
+
     async _get(path) {
         const res = await fetch(`${this.baseUrl}${path}`);
         if (!res.ok) throw await this._handleError(res);

@@ -20,6 +20,10 @@ ifcopenshell>=0.7.12,<0.9
 # DXF/DWG generation
 ezdxf==1.1.3
 
+# Camera calibration (ChArUco) for the AR weld-ratification tool.
+# contrib build is required for the aruco/charuco modules; headless avoids GUI deps.
+opencv-contrib-python-headless==4.10.0.84
+
 # Data handling
 numpy==1.26.3
 pandas==2.1.4

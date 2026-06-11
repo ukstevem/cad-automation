@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Analysis cache
     ANALYSIS_OUTPUT_DIR: str = "/app/outputs/analysis"
 
+    # Camera calibration profiles (AR weld-ratification tool)
+    CALIBRATION_OUTPUT_DIR: str = "/app/outputs/calibration"
+
     # STL generation settings
     STL_OUTPUT_DIR: str = "/app/outputs/stl"
     STL_LINEAR_DEFLECTION: float = 0.5

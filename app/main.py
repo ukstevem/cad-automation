@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from fastapi.staticfiles import StaticFiles
-from app.routers import upload, frontend, analysis, stl, cnc_analysis, connections, projects
+from app.routers import upload, frontend, analysis, stl, cnc_analysis, connections, projects, calibration
 from app.exceptions import CADAutomationException
 
 # Configure structured logging
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     os.makedirs(settings.STL_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(settings.CALIBRATION_OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(settings.OUTPUT_DIR, "projects"), exist_ok=True)
 
     logger.info(
@@ -127,6 +128,7 @@ app.include_router(stl.router, prefix="/api/v1", tags=["stl"])
 app.include_router(cnc_analysis.router, prefix="/api/v1", tags=["cnc-analysis"])
 app.include_router(connections.router, prefix="/api/v1", tags=["connections"])
 app.include_router(projects.router, prefix="/api/v1", tags=["projects"])
+app.include_router(calibration.router, prefix="/api/v1", tags=["calibration"])
 
 
 @app.get("/")
