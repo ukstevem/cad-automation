@@ -27,6 +27,7 @@ from app.services.bom_manifest import (
     assign_bom_items,
     build_manifest_rows,
     build_ref_to_stl,
+    resolve_classification_ref,
 )
 from app.services.stl_thumbnail import render_stl_thumbnail
 
@@ -123,10 +124,11 @@ def _build_bom_data(cache: dict) -> dict:
     seen_refs: set = set()  # track refs we've already emitted a row for
 
     for node_id, action in classifications.items():
-        # Classifications are stored against instance node IDs; resolve to the
+        # Classifications are stored against instance node IDs (and "<ref>:s<n>"
+        # solid keys for per-solid classified multi-solid parts); resolve to the
         # prototype ref_id so the lookups against cnc_results, member_names,
         # parent_names, and stl_map (all keyed by ref_id) succeed.
-        ref_id = node_to_ref.get(node_id, node_id)
+        ref_id = resolve_classification_ref(node_id, node_to_ref)
         if ref_id in seen_refs:
             continue
         name = member_names.get(ref_id, ref_id)

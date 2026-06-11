@@ -17,6 +17,7 @@ across the manifest files and the Excel workbook.
 """
 import csv
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import structlog
 
 logger = structlog.get_logger()
+
+# Matches a solid-level classification key: "<prefix>:s<index>" (e.g.
+# "0:1:1:2:s0").  Frontend stores per-solid classifications of a multi-solid
+# part under "<prototype_ref_id>:s<n>" keys.
+_SOLID_KEY_RE = re.compile(r"^(.*):s\d+$")
 
 
 def _walk_count_instances(tree: list) -> Dict[str, int]:
@@ -66,6 +72,29 @@ def _build_node_to_ref(tree: list) -> Dict[str, str]:
 
     _walk(tree)
     return out
+
+
+def resolve_classification_ref(node_id: str, node_to_ref: Dict[str, str]) -> str:
+    """Resolve a classification key to its prototype ``ref_id``.
+
+    Classifications come in two shapes:
+
+      - *instance* node ids (e.g. ``0:1:1:3:1``) — resolve through the tree's
+        instance→ref map.
+      - *solid-level* ids (e.g. ``0:1:1:2:s0``) — the frontend stores per-solid
+        classifications of a multi-solid part under ``<prototype_ref_id>:s<n>``
+        keys.  These never appear in ``node_to_ref`` (the tree leaf is the whole
+        multi-solid part, not its sub-solids), so without stripping the suffix
+        they fall back to a bogus self-ref and the part fragments into N
+        unnamed "Unknown" rows in the BOM export.
+
+    Strip any ``:s<n>`` suffix so solid classifications collapse onto the parent
+    multi-solid part (whose ``multi_solid`` CNC result already expands per
+    solid), then resolve the remaining base through ``node_to_ref``.
+    """
+    m = _SOLID_KEY_RE.match(node_id)
+    base = m.group(1) if m else node_id
+    return node_to_ref.get(base, base)
 
 
 def build_ref_to_stl(stl_map: Dict[str, str], tree: list) -> Dict[str, str]:
@@ -115,9 +144,10 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     for node_id, action in classifications.items():
         if action not in ("postprocess", "bought-out", "exclude"):
             continue
-        # Resolve instance node_id → prototype ref_id. Fall back to node_id
-        # itself for solid sub-IDs or any node not present in the tree map.
-        ref_id = node_to_ref.get(node_id, node_id)
+        # Resolve instance node_id → prototype ref_id.  Solid-level keys
+        # ("<ref>:s<n>") collapse onto their parent multi-solid part so all of
+        # its solids share one BOM Item rather than fragmenting per solid.
+        ref_id = resolve_classification_ref(node_id, node_to_ref)
         if ref_id in seen_refs:
             continue
 
