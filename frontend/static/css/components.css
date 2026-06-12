@@ -2283,6 +2283,11 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-markers input { width: 80px; margin-top: 0.15rem; }
 .capture-markers button { margin-bottom: 0; }
 .capture-mk-note { font-size: 0.78rem; color: var(--pico-muted-color, #666); flex-basis: 100%; }
+.capture-legend { font-size: 0.78rem; color: var(--pico-muted-color, #666); margin-top: 0.3rem; }
+.capture-legend .lg { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: middle; margin: 0 2px 0 8px; }
+.capture-legend .lg-red { background: #dc2626; }
+.capture-legend .lg-cyan { background: #06b6d4; }
+.capture-legend .lg-blue { background: #2563eb; }
 .capture-setup {
     display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin: 0.75rem 0;
 }

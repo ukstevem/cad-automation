@@ -31,7 +31,8 @@ export class CapturePage {
         this._markers = null;          // detected markers [{id, corners, distance_mm}]
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
-        this._overlay = null;          // [polyline2d] from solve
+        this._overlayManual = null;    // red — manual-correspondence solve
+        this._overlayAuto = null;      // cyan — marker auto-align (compare deviation)
         this._lastSolve = null;
         this._solving = false;         // guards against double-click on Solve
         this._saving = false;          // guards against double-click on Save
@@ -69,7 +70,8 @@ export class CapturePage {
         this._disposeThree();
         this._correspondences = [];
         this._selectedAnchor = null;
-        this._overlay = null;
+        this._overlayManual = null;
+        this._overlayAuto = null;
         this._markers = null;
         this._img = null;
         this._photoBlob = null;
@@ -117,6 +119,11 @@ export class CapturePage {
                     <div class="capture-pane">
                         <header>Photo <small id="cap-photo-meta"></small></header>
                         <canvas id="cap-photo-canvas" class="capture-canvas"></canvas>
+                        <div class="capture-legend">
+                            <span class="lg lg-red"></span> manual solve
+                            <span class="lg lg-cyan"></span> auto-align
+                            <span class="lg lg-blue"></span> detected marker
+                        </div>
                     </div>
                     <div class="capture-pane">
                         <header>CAD model — click an anchor, then click it on the photo</header>
@@ -185,12 +192,12 @@ export class CapturePage {
         this._setStatus('Detecting registered marker and aligning…');
         try {
             const res = await this.api.autoSolve(this._filename, this._photoBlob, { profile: this._profile.name });
-            this._overlay = res.overlay;
+            this._overlayAuto = res.overlay;
             this._markers = [{ id: res.marker_id_used, corners: res.marker_corners }];
             this._lastSolve = null;        // auto pose isn't a manual solve
             this._drawPhoto();
             this._refreshButtons();
-            this._setStatus(`✓ Auto-aligned from marker ${res.marker_id_used} — no clicking. Do the red edges land on the steel?`);
+            this._setStatus(`✓ Auto-aligned from marker ${res.marker_id_used} (cyan) — no clicking. Where red (manual) and cyan (auto) both show, the gap is the deviation.`);
         } catch (err) {
             this._setStatus(`Auto-align failed: ${err?.detail || err?.message || err}`, true);
         } finally {
@@ -266,7 +273,8 @@ export class CapturePage {
             this._img = img;
             this._scale = Math.min(1, MAX_PHOTO_W / img.naturalWidth);
             this._correspondences = [];
-            this._overlay = null;
+            this._overlayManual = null;
+            this._overlayAuto = null;
             this._markers = null;
             this._drawPhoto();
             this._validatePhotoRes();
@@ -339,11 +347,11 @@ export class CapturePage {
             }
         }
 
-        // Overlay (projected CAD edges)
-        if (this._overlay) {
-            ctx.strokeStyle = 'rgba(220,38,38,0.9)';
-            ctx.lineWidth = 1.5;
-            for (const poly of this._overlay) {
+        // Projected CAD edges: red = manual solve, cyan = marker auto-align.
+        const drawOverlay = (polys, color) => {
+            if (!polys) return;
+            ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+            for (const poly of polys) {
                 ctx.beginPath();
                 poly.forEach((p, i) => {
                     const x = p[0] * this._scale, y = p[1] * this._scale;
@@ -351,7 +359,9 @@ export class CapturePage {
                 });
                 ctx.stroke();
             }
-        }
+        };
+        drawOverlay(this._overlayManual, 'rgba(220,38,38,0.9)');     // red
+        drawOverlay(this._overlayAuto, 'rgba(6,182,212,0.95)');      // cyan
     }
 
     _onPhotoClick(e) {
@@ -522,14 +532,14 @@ export class CapturePage {
     _undo() {
         const last = this._correspondences.pop();
         if (last) { const m = this._anchorMeshes[last.anchor]; if (m) m.material.color.setHex(0xcccccc); this._three?.render(); }
-        this._overlay = null; this._drawPhoto(); this._refreshButtons();
+        this._overlayManual = null; this._drawPhoto(); this._refreshButtons();
     }
 
     _clearCorr() {
         this._correspondences = [];
         this._anchorMeshes.forEach(m => m.material.color.setHex(0xcccccc));
         this._three?.render();
-        this._overlay = null; this._lastSolve = null; this._drawPhoto(); this._refreshButtons();
+        this._overlayManual = null; this._lastSolve = null; this._drawPhoto(); this._refreshButtons();
     }
 
     async _solve() {
@@ -542,7 +552,7 @@ export class CapturePage {
         this._setStatus('Solving pose…');
         try {
             const res = await this.api.solveAr(this._filename, this._profile.name, corr);
-            this._overlay = res.overlay;
+            this._overlayManual = res.overlay;
             this._lastSolve = res;
             this._saved = false;        // a fresh solve can be saved again
             this._drawPhoto();
