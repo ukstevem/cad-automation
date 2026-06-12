@@ -7,6 +7,7 @@ import { AnalysisPage } from './analysis.js';
 import { ConnectionsPage } from './connections.js';
 import { ProjectsPage } from './projects.js';
 import { CalibratePage } from './calibrate.js';
+import { CapturePage } from './capture.js';
 
 const api = new ApiClient();
 
@@ -16,6 +17,7 @@ const pages = {
     connections: new ConnectionsPage(api),
     projects: new ProjectsPage(api),
     calibrate: new CalibratePage(api),
+    capture: new CapturePage(api),
 };
 
 class App {
@@ -43,6 +45,8 @@ class App {
                 }
                 e.preventDefault();
                 window.location.hash = link.dataset.page;
+                // Close the containing nav dropdown after selection.
+                link.closest('details.dropdown')?.removeAttribute('open');
             });
         });
     }

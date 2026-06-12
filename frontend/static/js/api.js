@@ -345,6 +345,31 @@ export class ApiClient {
         fd.append('dictionary', board.dictionary);
     }
 
+    // ── AR alignment (Phase 0) ────────────────────────────────────
+
+    async getArGeometry(filename, nodeId = null) {
+        let url = `/api/v1/ar/geometry/${encodeURIComponent(filename)}`;
+        if (nodeId) url += `?node_id=${encodeURIComponent(nodeId)}`;
+        return this._get(url);
+    }
+
+    async solveAr(filename, profile, correspondences, nodeId = null, ransac = false) {
+        return this._postJson(`/api/v1/ar/solve/${encodeURIComponent(filename)}`, {
+            profile, correspondences, node_id: nodeId, ransac,
+        });
+    }
+
+    async saveCapture(filename, photoBlob, { profile, correspondences, pose, reprojRms, nodeId = '' }) {
+        const fd = new FormData();
+        fd.append('photo', photoBlob, photoBlob.name || 'photo.jpg');
+        fd.append('profile', profile);
+        fd.append('correspondences', JSON.stringify(correspondences));
+        fd.append('pose', JSON.stringify(pose));
+        fd.append('reproj_rms', String(reprojRms));
+        fd.append('node_id', nodeId || '');
+        return this._postForm(`/api/v1/ar/capture/${encodeURIComponent(filename)}`, fd);
+    }
+
     async _postForm(path, formData) {
         const res = await fetch(`${this.baseUrl}${path}`, { method: 'POST', body: formData });
         if (!res.ok) throw await this._handleError(res);

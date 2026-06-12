@@ -14,13 +14,16 @@ onto the real photo? (A lone section has no welds — this tests pose/overlay on
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.config import settings
@@ -138,3 +141,62 @@ async def solve(filename: str, req: SolveRequest):
         "image_size": profile.get("image_size"),
         "n_correspondences": len(obj),
     }
+
+
+def _run_id_of(filename: str) -> str:
+    """8-hex run prefix from the stored upload filename."""
+    return Path(filename).stem.split("_", 1)[0]
+
+
+@router.post("/capture/{filename}")
+async def save_capture(
+    filename: str,
+    photo: UploadFile = File(...),
+    profile: str = Form(...),
+    correspondences: str = Form("[]"),
+    pose: str = Form("{}"),
+    reproj_rms: float = Form(0.0),
+    node_id: str = Form(""),
+):
+    """
+    Persist a capture as a permanent, fully-described record (ML-readiness item 1
+    = provenance, item 2 = label quality). Local storage for the spike:
+    ``outputs/captures/<run_id>/<capture_id>/`` holding the original photo + a
+    metadata JSON. Migrates to Supabase (table + Storage) later.
+    """
+    prof_path = _profile_path(profile)
+    profile_data = json.loads(prof_path.read_text(encoding="utf-8")) if prof_path.exists() else {}
+
+    raw = await photo.read()
+    run_id = _run_id_of(filename)
+    cap_id = hashlib.sha1(os.urandom(16)).hexdigest()[:12]
+    out_dir = Path(settings.OUTPUT_DIR) / "captures" / run_id / cap_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = (Path(photo.filename or "photo.jpg").suffix or ".jpg").lower()
+    photo_name = f"photo{ext}"
+    (out_dir / photo_name).write_bytes(raw)
+
+    record = {
+        "capture_id": cap_id,
+        "run_id": run_id,
+        "source_filename": filename,
+        "node_id": node_id or None,
+        # ── provenance (item 1) ──
+        "photo_file": photo_name,
+        "photo_original_name": photo.filename,
+        "photo_bytes": len(raw),
+        "photo_sha256": hashlib.sha256(raw).hexdigest(),
+        "calibration_profile": profile,
+        "image_size": profile_data.get("image_size"),
+        "intrinsics": profile_data.get("intrinsics"),
+        "correspondences": json.loads(correspondences),
+        "pose": json.loads(pose),
+        # ── label quality (item 2) ──
+        "reproj_rms_px": reproj_rms,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (out_dir / "record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+    logger.info("ar_capture_saved", run_id=run_id, capture_id=cap_id, reproj_rms=reproj_rms)
+    return {"capture_id": cap_id, "run_id": run_id, "stored": str(out_dir), "record": record}
