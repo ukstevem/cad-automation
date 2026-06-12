@@ -28,6 +28,7 @@ export class CapturePage {
         this._photoBlob = null;
         this._scale = 1;               // display/natural
         this._geometry = null;         // { edges, vertices, bbox }
+        this._markers = null;          // detected markers [{id, corners, distance_mm}]
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
         this._overlay = null;          // [polyline2d] from solve
@@ -69,6 +70,7 @@ export class CapturePage {
         this._correspondences = [];
         this._selectedAnchor = null;
         this._overlay = null;
+        this._markers = null;
         this._img = null;
         this._photoBlob = null;
         this._lastSolve = null;
@@ -123,6 +125,7 @@ export class CapturePage {
                 </div>
 
                 <div class="capture-actions">
+                    <button id="cap-detect" class="outline" disabled>Detect markers</button>
                     <span id="cap-corr-count" class="capture-corr-count">0 correspondences</span>
                     <button id="cap-undo" class="outline secondary" disabled>Undo last</button>
                     <button id="cap-clear" class="outline secondary" disabled>Clear</button>
@@ -146,6 +149,32 @@ export class CapturePage {
         $('#cap-save').addEventListener('click', () => this._save());
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
         $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
+        $('#cap-detect').addEventListener('click', () => this._detectMarkers());
+    }
+
+    async _detectMarkers() {
+        if (!this._img || !this._profile || !this._photoBlob) return;
+        const size = parseFloat(this.container.querySelector('#cap-mk-size').value) || 100;
+        const btn = this.container.querySelector('#cap-detect');
+        if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+        this._setStatus('Detecting markers…');
+        try {
+            const res = await this.api.detectMarkers(this._filename, this._photoBlob, {
+                profile: this._profile.name, markerSizeMm: size,
+            });
+            this._markers = res.markers || [];
+            this._drawPhoto();
+            if (this._markers.length) {
+                const ids = this._markers.map(m => `ID ${m.id} @ ~${(m.distance_mm / 1000).toFixed(2)} m`).join(', ');
+                this._setStatus(`✓ Detected ${this._markers.length} marker(s): ${ids}`);
+            } else {
+                this._setStatus('No markers detected — make sure the WHOLE tag is visible (not occluded), sharp, and well lit.', true);
+            }
+        } catch (err) {
+            this._setStatus(`Detect failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+        }
     }
 
     _printMarkers() {
@@ -171,6 +200,8 @@ export class CapturePage {
         const ready = !!(this._filename && this._profile);
         this.container.querySelector('#cap-photo-input').disabled = !ready;
         this.container.querySelector('#cap-load-model').disabled = !(ready && this._img);
+        const detectBtn = this.container.querySelector('#cap-detect');
+        if (detectBtn) detectBtn.disabled = !(this._img && this._profile);
     }
 
     // ---------------------------------------------------------------
@@ -188,6 +219,7 @@ export class CapturePage {
             this._scale = Math.min(1, MAX_PHOTO_W / img.naturalWidth);
             this._correspondences = [];
             this._overlay = null;
+            this._markers = null;
             this._drawPhoto();
             this._validatePhotoRes();
             this._refreshReady();
@@ -237,6 +269,19 @@ export class CapturePage {
             ctx.font = '12px sans-serif';
             ctx.fillText(String(c.anchor), x + 7, y - 7);
         });
+
+        // Detected markers (blue outline + ID/distance)
+        if (this._markers) {
+            ctx.lineWidth = 2; ctx.strokeStyle = '#2563eb'; ctx.fillStyle = '#2563eb';
+            for (const m of this._markers) {
+                const c = m.corners.map(p => [p[0] * this._scale, p[1] * this._scale]);
+                ctx.beginPath();
+                c.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
+                ctx.closePath(); ctx.stroke();
+                ctx.font = '13px sans-serif';
+                ctx.fillText(`ID ${m.id}`, c[0][0], c[0][1] - 6);
+            }
+        }
 
         // Overlay (projected CAD edges)
         if (this._overlay) {

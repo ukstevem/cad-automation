@@ -359,6 +359,15 @@ export class ApiClient {
         });
     }
 
+    async detectMarkers(filename, photoBlob, { profile, dictionary = 'DICT_APRILTAG_36h11', markerSizeMm = 100 }) {
+        const fd = new FormData();
+        fd.append('photo', photoBlob, photoBlob.name || 'photo.jpg');
+        fd.append('profile', profile);
+        fd.append('dictionary', dictionary);
+        fd.append('marker_size_mm', String(markerSizeMm));
+        return this._postForm(`/api/v1/ar/detect-markers/${encodeURIComponent(filename)}`, fd);
+    }
+
     async saveCapture(filename, photoBlob, { profile, correspondences, pose, reprojRms, nodeId = '' }) {
         const fd = new FormData();
         fd.append('photo', photoBlob, photoBlob.name || 'photo.jpg');
