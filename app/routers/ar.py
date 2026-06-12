@@ -204,23 +204,23 @@ def markers_pdf(
             f'</div>'
         )
 
-    pad = size_mm * 0.12
+    pad = size_mm * 0.07
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-        @page {{ size: A4; margin: 12mm; }}
-        body {{ font-family: sans-serif; }}
-        h1 {{ font-size: 12pt; }}
-        .note {{ font-size: 9pt; color: #444; margin-bottom: 6mm; }}
+        @page {{ size: A4; margin: 8mm; }}
+        body {{ font-family: sans-serif; margin: 0; }}
+        h1 {{ font-size: 12pt; margin: 0 0 2mm; }}
+        .note {{ font-size: 9pt; color: #444; margin-bottom: 4mm; }}
         /* inline-block + break-inside:avoid paginates cleanly in weasyprint;
            flex does not (it split markers across page breaks). */
         .cell {{
             display: inline-block; vertical-align: top; text-align: center;
-            width: {size_mm + 2 * pad:g}mm; margin: 4mm;
+            width: {size_mm + 2 * pad:g}mm; margin: 2mm;
             break-inside: avoid; page-break-inside: avoid;
         }}
         .mwrap {{ background: #fff; padding: {pad:g}mm; display: inline-block;
             break-inside: avoid; page-break-inside: avoid; }}
         .mwrap img {{ width: {size_mm:g}mm; height: {size_mm:g}mm; image-rendering: pixelated; display: block; }}
-        .lbl {{ font-size: 8pt; margin-top: 2mm; }}
+        .lbl {{ font-size: 8pt; margin-top: 1.5mm; }}
     </style></head><body>
         <h1>AR placement markers — {label}</h1>
         <div class="note">Print at <b>100% / actual size</b> (no fit-to-page). Measure a printed
