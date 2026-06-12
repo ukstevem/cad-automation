@@ -264,9 +264,7 @@ async def detect_markers(
     const = getattr(cv2.aruco, dictionary, None)
     if const is None:
         raise HTTPException(400, f"Dictionary '{dictionary}' not in this OpenCV build")
-    det = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(const), cv2.aruco.DetectorParameters(),
-    )
+    det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(const), _detector_params())
 
     raw = await photo.read()
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
@@ -305,14 +303,30 @@ async def detect_markers(
     }
 
 
+def _detector_params():
+    """
+    Tuned ArUco/AprilTag detector params — the defaults miss small or oblique tags
+    (e.g. several markers spread along a long section in one wide shot). Widen the
+    adaptive-threshold sweep, accept smaller markers, and sub-pixel-refine corners
+    (also tightens pose accuracy).
+    """
+    p = cv2.aruco.DetectorParameters()
+    p.adaptiveThreshWinSizeMin = 3
+    p.adaptiveThreshWinSizeMax = 53
+    p.adaptiveThreshWinSizeStep = 4
+    p.minMarkerPerimeterRate = 0.01      # default 0.03 — accept tags smaller in frame
+    p.polygonalApproxAccuracyRate = 0.05
+    p.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    p.cornerRefinementWinSize = 5
+    return p
+
+
 def _detect_raw(img, dictionary: str):
     """Detect markers → list of (id, 4x2 corner pixels). Size-independent."""
     const = getattr(cv2.aruco, dictionary, None)
     if const is None:
         raise HTTPException(400, f"Dictionary '{dictionary}' not in this OpenCV build")
-    det = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(const), cv2.aruco.DetectorParameters(),
-    )
+    det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(const), _detector_params())
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = det.detectMarkers(gray)
     out = []
