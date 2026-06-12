@@ -121,6 +121,14 @@ def test_ransac_path_and_outlier_rejection():
     assert np.linalg.norm(cam - CAM_POS) < 5.0
 
 
+def test_solve_pose_five_points():
+    """5 correspondences must work — ITERATIVE's DLT init needs >=6 and threw on 5."""
+    img = _ground_truth_image_points()
+    rvec, tvec, _ = P.solve_pose(CORNERS[:5], img[:5], K, DIST)
+    cam = P.camera_position_world(rvec, tvec)
+    assert np.linalg.norm(cam - CAM_POS) < 1.0
+
+
 def test_too_few_points_raises():
     img = _ground_truth_image_points()
     with pytest.raises(P.PoseError):

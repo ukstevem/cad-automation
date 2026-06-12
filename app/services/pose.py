@@ -78,12 +78,16 @@ def solve_pose(
 
     inliers: Optional[np.ndarray] = None
     if ransac:
+        # EPnP init inside RANSAC works from 4 points (ITERATIVE's DLT needs >=6).
         ok, rvec, tvec, inliers = cv2.solvePnPRansac(
             obj, img, K, dist, reprojectionError=reproj_threshold,
-            flags=cv2.SOLVEPNP_ITERATIVE,
+            flags=cv2.SOLVEPNP_EPNP,
         )
     else:
-        ok, rvec, tvec = cv2.solvePnP(obj, img, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
+        # SQPNP solves from >=4 points and handles planar AND non-planar configs.
+        # SOLVEPNP_ITERATIVE's DLT initialisation needs >=6 non-coplanar points and
+        # raised "DLT algorithm needs at least 6 points" on a 5-point click set.
+        ok, rvec, tvec = cv2.solvePnP(obj, img, K, dist, flags=cv2.SOLVEPNP_SQPNP)
 
     if not ok:
         raise PoseError("solvePnP failed to find a pose")
