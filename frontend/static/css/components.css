@@ -2297,6 +2297,17 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-status { min-height: 1.2em; font-size: 0.85rem; margin: 0.25rem 0; }
 .capture-status.error { color: #dc2626; }
 .capture-status.ok { color: #16a34a; }
+.capture-livecam {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    margin: 0.25rem 0 0.5rem; font-size: 0.85rem;
+}
+.capture-livecam select { max-width: 220px; margin: 0; }
+.capture-livecam button { margin-bottom: 0; }
+.capture-cam-video {
+    flex-basis: 100%; max-width: 480px; border-radius: 6px; background: #000;
+    aspect-ratio: 16 / 9; object-fit: contain;
+}
+.capture-cam-video:not([srcobject]) { }
 
 .capture-stage {
     display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start;

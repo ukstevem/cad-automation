@@ -30,6 +30,7 @@ export class CapturePage {
         this._geometry = null;         // { edges, vertices, bbox }
         this._markers = null;          // detected markers [{id, corners, distance_mm}]
         this._conFiles = null;         // FileList for constellation calibration
+        this._stream = null;           // live webcam MediaStream
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
         this._overlayManual = null;    // red — manual-correspondence solve
@@ -68,6 +69,7 @@ export class CapturePage {
     }
 
     _cleanup() {
+        this._stopStream();
         this._disposeThree();
         this._correspondences = [];
         this._selectedAnchor = null;
@@ -111,8 +113,17 @@ export class CapturePage {
                 <div class="capture-setup">
                     <label>Job<select id="cap-file">${fileOpts}</select></label>
                     <label>Calibration<select id="cap-profile">${profOpts}</select></label>
-                    <label>Photo<input type="file" id="cap-photo-input" accept="image/*" disabled></label>
+                    <label>Photo (or use camera)<input type="file" id="cap-photo-input" accept="image/*" disabled></label>
                     <button id="cap-load-model" class="outline" disabled>Load model</button>
+                </div>
+
+                <div class="capture-livecam">
+                    <span>Live camera:</span>
+                    <select id="cap-cam-device"><option value="">default camera</option></select>
+                    <button id="cap-cam-start" class="outline" disabled>Start camera</button>
+                    <button id="cap-cam-capture" class="outline" disabled>Capture frame</button>
+                    <button id="cap-cam-stop" class="outline secondary" disabled>Stop</button>
+                    <video id="cap-cam-video" autoplay playsinline muted class="capture-cam-video"></video>
                 </div>
                 <p id="cap-status" class="capture-status"></p>
 
@@ -180,6 +191,10 @@ export class CapturePage {
         });
         $('#cap-con-calibrate').addEventListener('click', () => this._calibrateConstellation());
         $('#cap-con-anchor').addEventListener('click', () => this._anchorConstellation());
+        $('#cap-cam-start').addEventListener('click', () => this._startCamera());
+        $('#cap-cam-capture').addEventListener('click', () => this._captureLiveFrame());
+        $('#cap-cam-stop').addEventListener('click', () => this._stopCamera());
+        if (window.isSecureContext) $('#cap-cam-start').disabled = false;
     }
 
     _setConStatus(msg, isError = false) {
@@ -336,9 +351,12 @@ export class CapturePage {
 
     _onPhoto(e) {
         const file = e.target.files?.[0];
-        if (!file) return;
-        this._photoBlob = file;
-        const url = URL.createObjectURL(file);
+        if (file) this._setPhotoFromBlob(file);
+    }
+
+    _setPhotoFromBlob(blob) {
+        this._photoBlob = blob;
+        const url = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => {
             this._img = img;
@@ -354,6 +372,79 @@ export class CapturePage {
             URL.revokeObjectURL(url);
         };
         img.src = url;
+    }
+
+    // ── Live webcam (ditch the phone) ──────────────────────────────
+
+    async _startCamera() {
+        if (!window.isSecureContext) {
+            this._setStatus('Live camera needs localhost or HTTPS (you\'re on a plain-IP origin).', true);
+            return;
+        }
+        this._stopStream();
+        const deviceId = this.container.querySelector('#cap-cam-device')?.value || undefined;
+        try {
+            this._stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    width: { ideal: 1920 }, height: { ideal: 1080 },
+                },
+                audio: false,
+            });
+        } catch (err) {
+            this._setStatus(`Camera error: ${err?.message || err}`, true);
+            return;
+        }
+        const video = this.container.querySelector('#cap-cam-video');
+        video.srcObject = this._stream;
+        this.container.querySelector('#cap-cam-capture').disabled = false;
+        this.container.querySelector('#cap-cam-stop').disabled = false;
+        this.container.querySelector('#cap-cam-start').disabled = true;
+        this._enumerateCameras();
+        this._setStatus('Camera live — frame the part + markers, then Capture frame.');
+    }
+
+    _stopCamera() {
+        this._stopStream();
+        const v = this.container.querySelector('#cap-cam-video');
+        if (v) v.srcObject = null;
+        this.container.querySelector('#cap-cam-capture').disabled = true;
+        this.container.querySelector('#cap-cam-stop').disabled = true;
+        this.container.querySelector('#cap-cam-start').disabled = false;
+    }
+
+    async _captureLiveFrame() {
+        const video = this.container.querySelector('#cap-cam-video');
+        if (!video || !video.videoWidth) return;
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.95));
+        if (!blob) return;
+        blob.name = `live_${video.videoWidth}x${video.videoHeight}.jpg`;
+        this._setPhotoFromBlob(blob);
+        this._setStatus(`Frame captured (${video.videoWidth}×${video.videoHeight}) — Load model, then detect / solve / auto-align.`);
+    }
+
+    _stopStream() {
+        if (this._stream) {
+            this._stream.getTracks().forEach(t => t.stop());
+            this._stream = null;
+        }
+    }
+
+    async _enumerateCameras() {
+        if (!navigator.mediaDevices?.enumerateDevices) return;
+        try {
+            const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+            const sel = this.container.querySelector('#cap-cam-device');
+            if (sel && devs.length) {
+                const cur = sel.value;
+                sel.innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${this._esc(d.label || `Camera ${i + 1}`)}</option>`).join('');
+                if (cur) sel.value = cur;
+            }
+        } catch { /* ignore */ }
     }
 
     _validatePhotoRes() {
