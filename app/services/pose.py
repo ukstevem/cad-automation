@@ -155,6 +155,22 @@ def project_polylines(
     return out
 
 
+def rt_compose(A, B):
+    """Compose rigid transforms (apply B then A): X → A(B(X)). Each is (R 3x3, t 3x1)."""
+    RA = np.asarray(A[0], np.float64).reshape(3, 3)
+    tA = np.asarray(A[1], np.float64).reshape(3, 1)
+    RB = np.asarray(B[0], np.float64).reshape(3, 3)
+    tB = np.asarray(B[1], np.float64).reshape(3, 1)
+    return RA @ RB, RA @ tB + tA
+
+
+def rt_invert(R, t):
+    """Invert a rigid transform (R, t) → (Rᵀ, -Rᵀ·t)."""
+    R = np.asarray(R, np.float64).reshape(3, 3)
+    t = np.asarray(t, np.float64).reshape(3, 1)
+    return R.T, -R.T @ t
+
+
 def register_marker_to_model(rvec_marker, tvec_marker, rvec_model, tvec_model):
     """
     Compute T(marker→model) from one photo where both are known.

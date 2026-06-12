@@ -2322,3 +2322,15 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-rms-excellent, .capture-rms-good { color: #16a34a; font-weight: 600; }
 .capture-rms-fair { color: #d97706; font-weight: 600; }
 .capture-rms-poor { color: #dc2626; font-weight: 600; }
+
+.capture-constellation {
+    margin-top: 1rem; padding: 0.75rem; border: 1px solid var(--pico-muted-border-color, #ccc);
+    border-radius: 8px;
+}
+.capture-constellation header { margin-bottom: 0.5rem; }
+.capture-constellation header small { font-weight: 400; color: var(--pico-muted-color, #666); }
+.capture-con-row { display: flex; gap: 0.6rem; align-items: end; flex-wrap: wrap; }
+.capture-con-row label { font-size: 0.85rem; }
+.capture-con-row button { margin-bottom: 0; }
+.capture-con-status { min-height: 1.2em; font-size: 0.85rem; margin: 0.4rem 0 0; }
+.capture-con-status.error { color: #dc2626; }

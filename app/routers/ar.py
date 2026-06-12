@@ -267,13 +267,6 @@ async def detect_markers(
     det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(const), _detector_params())
 
     raw = await photo.read()
-
-    # TEMP DEBUG: save this exact frame for inspection of why tags don't detect.
-    try:
-        (Path(settings.OUTPUT_DIR) / "_debug_detect.jpg").write_bytes(raw)
-    except Exception:
-        pass
-
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(400, "Could not decode photo")
@@ -498,6 +491,120 @@ async def auto_solve(
         "detected_ids": [d[0] for d in dets],
         "registered_ids": [int(k) for k in stored],
     }
+
+
+@router.post("/calibrate-constellation/{filename}")
+async def calibrate_constellation(
+    filename: str,
+    photos: List[UploadFile] = File(...),
+    profile: str = Form(...),
+    dictionary: str = Form("DICT_APRILTAG_36h11"),
+    marker_size_mm: float = Form(100.0),
+):
+    """
+    Link markers across many photos into one constellation (marker-SLAM). Each photo
+    where two tags are co-visible pins their relative pose; co-visibility chains them
+    into a single frame. No CAD needed yet — that's the separate anchor step.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    _pd, K, dist = _load_profile_K(profile)
+
+    photo_markers, per_photo = [], []
+    for ph in photos:
+        img = _decode_photo(await ph.read())
+        pm = {}
+        for mid, pts in _detect_raw(img, dictionary):
+            rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
+            R_mc, _ = cv2.Rodrigues(rvec_m)
+            pm[mid] = (R_mc, tvec_m)
+        photo_markers.append(pm)
+        per_photo.append({"name": ph.filename, "markers": sorted(int(m) for m in pm)})
+
+    from app.services.constellation import build_constellation
+    con = build_constellation(photo_markers)
+    if con is None:
+        raise HTTPException(400, "No markers detected in any photo")
+    con["marker_size_mm"] = marker_size_mm
+    con["dictionary"] = dictionary
+
+    aj = _analysis_json_path(filename)
+    sidecar = json.loads(aj.read_text(encoding="utf-8"))
+    sidecar["ar_constellation"] = con
+    aj.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+
+    logger.info("ar_constellation_calibrated", filename=filename,
+                linked=con["linked"], unlinked=con["unlinked"])
+    return {
+        "reference": con["reference"],
+        "linked": con["linked"],
+        "unlinked": con["unlinked"],
+        "per_photo": per_photo,
+        "n_photos": len(photos),
+    }
+
+
+@router.post("/anchor-constellation/{filename}")
+async def anchor_constellation(
+    filename: str,
+    photo: UploadFile = File(...),
+    profile: str = Form(...),
+    model_rvec: str = Form(...),
+    model_tvec: str = Form(...),
+    dictionary: str = Form("DICT_APRILTAG_36h11"),
+    marker_size_mm: float = Form(100.0),
+):
+    """
+    Tie a calibrated constellation to the CAD frame using one wide shot that was
+    manually solved. Anchoring any one visible constellation marker anchors them all
+    → writes per-marker T(marker→model) into ar_markers so auto-solve works on any photo.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    _pd, K, dist = _load_profile_K(profile)
+
+    aj = _analysis_json_path(filename)
+    sidecar = json.loads(aj.read_text(encoding="utf-8"))
+    con = sidecar.get("ar_constellation")
+    if not con:
+        raise HTTPException(400, "No constellation calibrated yet — calibrate it first.")
+
+    img = _decode_photo(await photo.read())
+    dets = _detect_raw(img, dictionary)
+    linked = set(con["linked"])
+    anchor = next(((mid, pts) for (mid, pts) in dets if mid in linked), None)
+    if anchor is None:
+        raise HTTPException(
+            400,
+            f"No constellation marker visible to anchor. Detected {[d[0] for d in dets]}, "
+            f"constellation {sorted(linked)}.",
+        )
+
+    mid, pts = anchor
+    size = con.get("marker_size_mm", marker_size_mm)
+    rvec_m, tvec_m = _marker_pose(pts, size, K, dist)
+    R_mc, _ = cv2.Rodrigues(rvec_m)
+
+    from app.services.constellation import anchor_to_model
+    regs = anchor_to_model(con, mid, R_mc, tvec_m, json.loads(model_rvec), json.loads(model_tvec))
+
+    ar_markers = {
+        str(m): {
+            "marker_id": m,
+            "dictionary": con.get("dictionary", dictionary),
+            "marker_size_mm": size,
+            "R_wm": data["R_wm"],
+            "t_wm": data["t_wm"],
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "via": "constellation",
+        }
+        for m, data in regs.items()
+    }
+    sidecar["ar_markers"] = ar_markers
+    aj.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+
+    logger.info("ar_constellation_anchored", filename=filename, anchor=mid, count=len(ar_markers))
+    return {"anchored_via": mid, "registered": sorted(int(k) for k in ar_markers), "count": len(ar_markers)}
 
 
 def _run_id_of(filename: str) -> str:

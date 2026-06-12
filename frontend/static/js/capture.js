@@ -29,6 +29,7 @@ export class CapturePage {
         this._scale = 1;               // display/natural
         this._geometry = null;         // { edges, vertices, bbox }
         this._markers = null;          // detected markers [{id, corners, distance_mm}]
+        this._conFiles = null;         // FileList for constellation calibration
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
         this._overlayManual = null;    // red — manual-correspondence solve
@@ -142,6 +143,18 @@ export class CapturePage {
                     <button id="cap-auto" class="outline" disabled title="Detect a registered marker and align automatically">Auto-align</button>
                     <span id="cap-result" class="capture-result"></span>
                 </div>
+
+                <article class="capture-constellation">
+                    <header><strong>Constellation</strong> <small>— link many markers, anchor once, then any photo aligns</small></header>
+                    <div class="capture-con-row">
+                        <label>Calibration photos (≥2, close shots)
+                            <input type="file" id="cap-con-files" accept="image/*" multiple>
+                        </label>
+                        <button id="cap-con-calibrate" class="outline" disabled>Calibrate constellation</button>
+                        <button id="cap-con-anchor" class="outline" disabled title="Tie the constellation to the CAD using the current manual solve">Anchor to CAD (from current solve)</button>
+                    </div>
+                    <p id="cap-con-status" class="capture-con-status"></p>
+                </article>
             </section>
         `;
     }
@@ -161,6 +174,62 @@ export class CapturePage {
         $('#cap-detect').addEventListener('click', () => this._detectMarkers());
         $('#cap-register').addEventListener('click', () => this._registerMarker());
         $('#cap-auto').addEventListener('click', () => this._autoAlign());
+        $('#cap-con-files').addEventListener('change', (e) => {
+            this._conFiles = [...(e.target.files || [])];
+            $('#cap-con-calibrate').disabled = this._conFiles.length < 2 || !this._profile;
+        });
+        $('#cap-con-calibrate').addEventListener('click', () => this._calibrateConstellation());
+        $('#cap-con-anchor').addEventListener('click', () => this._anchorConstellation());
+    }
+
+    _setConStatus(msg, isError = false) {
+        const el = this.container?.querySelector('#cap-con-status');
+        if (el) { el.textContent = msg; el.className = `capture-con-status${isError ? ' error' : ''}`; }
+    }
+
+    async _calibrateConstellation() {
+        if (!this._conFiles || this._conFiles.length < 2 || !this._profile) {
+            this._setConStatus('Select ≥2 photos and a calibration profile first.', true); return;
+        }
+        const size = parseFloat(this.container.querySelector('#cap-mk-size').value) || 100;
+        const btn = this.container.querySelector('#cap-con-calibrate');
+        btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+        this._setConStatus(`Detecting markers across ${this._conFiles.length} photos and linking…`);
+        try {
+            const res = await this.api.calibrateConstellation(this._filename, this._conFiles, {
+                profile: this._profile.name, markerSizeMm: size,
+            });
+            const unl = res.unlinked.length ? ` · unlinked (need a co-visible shot): ${res.unlinked.join(', ')}` : '';
+            this._setConStatus(`✓ Linked ${res.linked.length} markers: ${res.linked.join(', ')} (ref ${res.reference})${unl}. Now do a manual Solve on a wide shot, then Anchor to CAD.`);
+        } catch (err) {
+            this._setConStatus(`Calibrate failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            btn.disabled = false; btn.removeAttribute('aria-busy');
+        }
+    }
+
+    async _anchorConstellation() {
+        if (!this._lastSolve || !this._photoBlob) {
+            this._setConStatus('Do a manual Solve on this (wide) photo first, then Anchor.', true); return;
+        }
+        const size = parseFloat(this.container.querySelector('#cap-mk-size').value) || 100;
+        const btn = this.container.querySelector('#cap-con-anchor');
+        btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+        this._setConStatus('Anchoring constellation to the CAD frame…');
+        try {
+            const res = await this.api.anchorConstellation(this._filename, this._photoBlob, {
+                profile: this._profile.name,
+                modelRvec: this._lastSolve.rvec,
+                modelTvec: this._lastSolve.tvec,
+                markerSizeMm: size,
+            });
+            this._setConStatus(`✓ Anchored via marker ${res.anchored_via}. Registered ${res.count} markers: ${res.registered.join(', ')}. Auto-align now works on any photo showing these tags.`);
+        } catch (err) {
+            this._setConStatus(`Anchor failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            btn.disabled = !(this._lastSolve && this._photoBlob);
+            btn.removeAttribute('aria-busy');
+        }
     }
 
     async _registerMarker() {
@@ -532,6 +601,8 @@ export class CapturePage {
         $('#cap-solve').disabled = this._solving || !(n >= 4 && this._img && !this._resMismatch);
         $('#cap-save').disabled = this._saving || this._saved || !this._lastSolve;
         $('#cap-register').disabled = !this._lastSolve;
+        const anchorBtn = this.container.querySelector('#cap-con-anchor');
+        if (anchorBtn) anchorBtn.disabled = !(this._lastSolve && this._photoBlob);
     }
 
     _undo() {

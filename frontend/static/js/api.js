@@ -380,6 +380,26 @@ export class ApiClient {
         return this._postForm(`/api/v1/ar/register-marker/${encodeURIComponent(filename)}`, fd);
     }
 
+    async calibrateConstellation(filename, photoBlobs, { profile, dictionary = 'DICT_APRILTAG_36h11', markerSizeMm = 100 }) {
+        const fd = new FormData();
+        photoBlobs.forEach((b, i) => fd.append('photos', b, b.name || `p${i}.jpg`));
+        fd.append('profile', profile);
+        fd.append('dictionary', dictionary);
+        fd.append('marker_size_mm', String(markerSizeMm));
+        return this._postForm(`/api/v1/ar/calibrate-constellation/${encodeURIComponent(filename)}`, fd);
+    }
+
+    async anchorConstellation(filename, photoBlob, { profile, modelRvec, modelTvec, dictionary = 'DICT_APRILTAG_36h11', markerSizeMm = 100 }) {
+        const fd = new FormData();
+        fd.append('photo', photoBlob, photoBlob.name || 'photo.jpg');
+        fd.append('profile', profile);
+        fd.append('model_rvec', JSON.stringify(modelRvec));
+        fd.append('model_tvec', JSON.stringify(modelTvec));
+        fd.append('dictionary', dictionary);
+        fd.append('marker_size_mm', String(markerSizeMm));
+        return this._postForm(`/api/v1/ar/anchor-constellation/${encodeURIComponent(filename)}`, fd);
+    }
+
     async autoSolve(filename, photoBlob, { profile, dictionary = 'DICT_APRILTAG_36h11', nodeId = '' }) {
         const fd = new FormData();
         fd.append('photo', photoBlob, photoBlob.name || 'photo.jpg');
