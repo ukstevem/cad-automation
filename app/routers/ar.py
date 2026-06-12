@@ -267,6 +267,13 @@ async def detect_markers(
     det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(const), _detector_params())
 
     raw = await photo.read()
+
+    # TEMP DEBUG: save this exact frame for inspection of why tags don't detect.
+    try:
+        (Path(settings.OUTPUT_DIR) / "_debug_detect.jpg").write_bytes(raw)
+    except Exception:
+        pass
+
     img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(400, "Could not decode photo")
@@ -311,11 +318,14 @@ def _detector_params():
     (also tightens pose accuracy).
     """
     p = cv2.aruco.DetectorParameters()
+    # Aggressive sweep — on real 36MP shop shots, soft/oblique tags only decode with
+    # a wide adaptive-threshold range, a low perimeter floor, and lenient polygon
+    # approximation. Verified to recover a 2nd marker the default/mild params missed.
     p.adaptiveThreshWinSizeMin = 3
-    p.adaptiveThreshWinSizeMax = 53
-    p.adaptiveThreshWinSizeStep = 4
-    p.minMarkerPerimeterRate = 0.01      # default 0.03 — accept tags smaller in frame
-    p.polygonalApproxAccuracyRate = 0.05
+    p.adaptiveThreshWinSizeMax = 153
+    p.adaptiveThreshWinSizeStep = 10
+    p.minMarkerPerimeterRate = 0.005     # default 0.03 — accept small/distant tags
+    p.polygonalApproxAccuracyRate = 0.08  # default 0.03 — tolerate oblique/soft quads
     p.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
     p.cornerRefinementWinSize = 5
     return p
