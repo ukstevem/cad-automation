@@ -347,10 +347,12 @@ export class CapturePage {
             }
         }
 
-        // Projected CAD edges: red = manual solve, cyan = marker auto-align.
-        const drawOverlay = (polys, color) => {
+        // Projected CAD edges: red = manual solve (solid), cyan = auto-align (dashed
+        // so it doesn't fully hide red when the two coincide closely).
+        const drawOverlay = (polys, color, dashed) => {
             if (!polys) return;
             ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+            ctx.setLineDash(dashed ? [7, 5] : []);
             for (const poly of polys) {
                 ctx.beginPath();
                 poly.forEach((p, i) => {
@@ -359,9 +361,10 @@ export class CapturePage {
                 });
                 ctx.stroke();
             }
+            ctx.setLineDash([]);
         };
-        drawOverlay(this._overlayManual, 'rgba(220,38,38,0.9)');     // red
-        drawOverlay(this._overlayAuto, 'rgba(6,182,212,0.95)');      // cyan
+        drawOverlay(this._overlayManual, 'rgba(220,38,38,0.95)', false);   // solid red
+        drawOverlay(this._overlayAuto, 'rgba(6,182,212,0.95)', true);      // dashed cyan
     }
 
     _onPhotoClick(e) {
