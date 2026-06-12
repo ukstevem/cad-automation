@@ -176,7 +176,8 @@ export class CapturePage {
                 modelTvec: this._lastSolve.tvec,
                 markerSizeMm: size,
             });
-            this._setStatus(`✓ Marker ${res.registered} registered. Now upload another photo with this marker and hit Auto-align — no clicking.`);
+            const ids = (res.registered || []).join(', ');
+            this._setStatus(`✓ Registered ${res.registered.length} marker(s): ${ids}. Upload another photo showing any of them and hit Auto-align — no clicking.`);
             this.container.querySelector('#cap-auto').disabled = !(this._img && this._profile);
         } catch (err) {
             this._setStatus(`Register failed: ${err?.detail || err?.message || err}`, true);
@@ -193,11 +194,12 @@ export class CapturePage {
         try {
             const res = await this.api.autoSolve(this._filename, this._photoBlob, { profile: this._profile.name });
             this._overlayAuto = res.overlay;
-            this._markers = [{ id: res.marker_id_used, corners: res.marker_corners }];
+            this._markers = res.markers || [];
             this._lastSolve = null;        // auto pose isn't a manual solve
             this._drawPhoto();
             this._refreshButtons();
-            this._setStatus(`✓ Auto-aligned from marker ${res.marker_id_used} (cyan) — no clicking. Where red (manual) and cyan (auto) both show, the gap is the deviation.`);
+            const ids = (res.marker_ids_used || []).join(', ');
+            this._setStatus(`✓ Auto-aligned (cyan) from ${this._markers.length} marker(s): ${ids} · RMS ${res.reproj_rms}px — no clicking.`);
         } catch (err) {
             this._setStatus(`Auto-align failed: ${err?.detail || err?.message || err}`, true);
         } finally {

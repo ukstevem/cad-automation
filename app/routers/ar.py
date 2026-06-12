@@ -383,31 +383,33 @@ async def register_marker(
     dets = _detect_raw(img, dictionary)
     if not dets:
         raise HTTPException(400, "No marker detected in this photo — the whole tag must be visible.")
-    if marker_id >= 0:
-        match = [d for d in dets if d[0] == marker_id]
-        if not match:
-            raise HTTPException(400, f"Marker {marker_id} not found (detected {[d[0] for d in dets]})")
-        mid, pts = match[0]
-    elif len(dets) == 1:
-        mid, pts = dets[0]
-    else:
-        raise HTTPException(400, f"Multiple markers {[d[0] for d in dets]} — specify which marker_id to register")
 
-    rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
-    R_wm, t_wm = P.register_marker_to_model(
-        rvec_m, tvec_m, json.loads(model_rvec), json.loads(model_tvec),
-    )
-    data = {
-        "marker_id": mid,
-        "dictionary": dictionary,
-        "marker_size_mm": marker_size_mm,
-        "R_wm": R_wm.tolist(),
-        "t_wm": t_wm.ravel().tolist(),
-        "registered_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save_ar_marker(filename, mid, data)
-    logger.info("ar_marker_registered", filename=filename, marker_id=mid)
-    return {"registered": mid, "marker": data, "detected_ids": [d[0] for d in dets]}
+    # marker_id >= 0 registers just that tag; -1 registers ALL visible tags from this
+    # one solve (constellation bootstrap — one manual solve teaches several markers).
+    if marker_id >= 0:
+        targets = [d for d in dets if d[0] == marker_id]
+        if not targets:
+            raise HTTPException(400, f"Marker {marker_id} not found (detected {[d[0] for d in dets]})")
+    else:
+        targets = dets
+
+    model_rvec_v, model_tvec_v = json.loads(model_rvec), json.loads(model_tvec)
+    registered = []
+    for mid, pts in targets:
+        rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
+        R_wm, t_wm = P.register_marker_to_model(rvec_m, tvec_m, model_rvec_v, model_tvec_v)
+        _save_ar_marker(filename, mid, {
+            "marker_id": mid,
+            "dictionary": dictionary,
+            "marker_size_mm": marker_size_mm,
+            "R_wm": R_wm.tolist(),
+            "t_wm": t_wm.ravel().tolist(),
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        })
+        registered.append(mid)
+
+    logger.info("ar_markers_registered", filename=filename, registered=registered)
+    return {"registered": registered, "detected_ids": [d[0] for d in dets]}
 
 
 @router.post("/auto-solve/{filename}")
@@ -429,26 +431,44 @@ async def auto_solve(
     h, w = img.shape[:2]
     dets = _detect_raw(img, dictionary)
     stored = _load_ar_markers(filename)
-    usable = [(mid, pts) for (mid, pts) in dets if str(mid) in stored]
-    if not usable:
+
+    # Fuse EVERY visible registered marker: each tag's 4 corners have known world
+    # coords (via its stored T(marker→model)); solve one camera pose over all of them.
+    # More markers → more constraints → accurate pose with no single-marker drift.
+    obj_pts, img_pts, used = [], [], []
+    for mid, pts in dets:
+        reg = stored.get(str(mid))
+        if not reg:
+            continue
+        R_wm = np.asarray(reg["R_wm"], float).reshape(3, 3)
+        t_wm = np.asarray(reg["t_wm"], float).reshape(3, 1)
+        s = reg["marker_size_mm"] / 2.0
+        mc = np.array([[-s, s, 0], [s, s, 0], [s, -s, 0], [-s, -s, 0]], float)
+        world = (R_wm @ mc.T + t_wm).T            # 4x3 world corner coords
+        obj_pts.append(world)
+        img_pts.append(pts)
+        used.append({"id": mid, "corners": pts.tolist()})
+
+    if not used:
         raise HTTPException(
             400,
             f"No registered marker visible. Detected {[d[0] for d in dets]}, "
             f"registered {[int(k) for k in stored]}. Register a marker first.",
         )
 
-    mid, pts = usable[0]
-    reg = stored[str(mid)]
-    rvec_m, tvec_m = _marker_pose(pts, reg["marker_size_mm"], K, dist)
-    rvec2, tvec2 = P.model_pose_from_marker(rvec_m, tvec_m, reg["R_wm"], reg["t_wm"])
+    obj = np.vstack(obj_pts)
+    img2 = np.vstack(img_pts)
+    rvec2, tvec2, _ = P.solve_pose(obj, img2, K, dist)
+    rms = P.reprojection_rms(obj, img2, rvec2, tvec2, K, dist)
 
     geom = await _get_geometry(filename, node_id or None)
     overlay = P.project_polylines(geom.get("edges", []), rvec2, tvec2, K, dist)
     cam = P.camera_position_world(rvec2, tvec2)
     return {
         "overlay": overlay,
-        "marker_id_used": mid,
-        "marker_corners": pts.tolist(),
+        "markers": used,
+        "marker_ids_used": [u["id"] for u in used],
+        "reproj_rms": round(float(rms), 3),
         "camera_position": [round(float(x), 1) for x in cam],
         "image_size": [w, h],
         "detected_ids": [d[0] for d in dets],
