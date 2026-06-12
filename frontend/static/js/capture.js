@@ -88,6 +88,14 @@ export class CapturePage {
                 <p class="capture-intro">Overlay a part's CAD edges onto a photo to prove alignment.
                    Pick a job + the camera's calibration, upload a photo, match ≥4 corners, then Solve.</p>
 
+                <div class="capture-markers">
+                    <span>Printable AR markers:</span>
+                    <label>size mm<input type="number" id="cap-mk-size" value="100" min="20" max="400"></label>
+                    <label>count<input type="number" id="cap-mk-count" value="6" min="1" max="50"></label>
+                    <label>start ID<input type="number" id="cap-mk-start" value="0" min="0"></label>
+                    <button id="cap-mk-print" class="outline">Open marker PDF ↗</button>
+                </div>
+
                 <div class="capture-setup">
                     <label>Job<select id="cap-file">${fileOpts}</select></label>
                     <label>Calibration<select id="cap-profile">${profOpts}</select></label>
@@ -130,6 +138,17 @@ export class CapturePage {
         $('#cap-solve').addEventListener('click', () => this._solve());
         $('#cap-save').addEventListener('click', () => this._save());
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
+        $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
+    }
+
+    _printMarkers() {
+        const size = parseFloat(this.container.querySelector('#cap-mk-size').value) || 100;
+        const count = parseInt(this.container.querySelector('#cap-mk-count').value) || 6;
+        const start = parseInt(this.container.querySelector('#cap-mk-start').value) || 0;
+        const p = new URLSearchParams({
+            dictionary: 'DICT_APRILTAG_36h11', start, count, size_mm: size,
+        });
+        window.open(`/api/v1/ar/markers.pdf?${p.toString()}`, '_blank');
     }
 
     _onProfile(name) {

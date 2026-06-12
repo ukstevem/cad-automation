@@ -22,12 +22,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+import base64
+
 import structlog
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.config import settings
 from app.services import pose as P
+
+try:  # cv2 for marker generation (already a dep)
+    import cv2
+    _CV2_ERR: Optional[str] = None
+except Exception as exc:  # pragma: no cover
+    cv2 = None  # type: ignore
+    _CV2_ERR = str(exc)
+
+_MARKER_DICTS = {
+    "DICT_APRILTAG_36h11": "AprilTag 36h11",
+    "DICT_4X4_50": "ArUco 4x4",
+    "DICT_5X5_100": "ArUco 5x5",
+    "DICT_6X6_250": "ArUco 6x6",
+}
 
 router = APIRouter(prefix="/ar", tags=["ar"])
 logger = structlog.get_logger()
@@ -141,6 +158,78 @@ async def solve(filename: str, req: SolveRequest):
         "image_size": profile.get("image_size"),
         "n_correspondences": len(obj),
     }
+
+
+@router.get("/markers.pdf")
+def markers_pdf(
+    dictionary: str = "DICT_APRILTAG_36h11",
+    start: int = 0,
+    count: int = 6,
+    size_mm: float = 100.0,
+    cols: int = 2,
+):
+    """
+    Printable sheet of uniquely-numbered AR placement markers, each at an exact
+    physical size. Print at 100% / actual size, then measure a printed marker —
+    that measured edge length (black square) is what the pose solver uses.
+
+    The marker ID is load-bearing: the placement plan maps ID → CAD datum, so each
+    physical marker must keep its number.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    if dictionary not in _MARKER_DICTS:
+        raise HTTPException(400, f"Unsupported dictionary. Allowed: {list(_MARKER_DICTS)}")
+    const = getattr(cv2.aruco, dictionary, None)
+    if const is None:
+        raise HTTPException(400, f"Dictionary '{dictionary}' not in this OpenCV build")
+    if count < 1 or count > 100:
+        raise HTTPException(400, "count must be 1..100")
+
+    adict = cv2.aruco.getPredefinedDictionary(const)
+    label = _MARKER_DICTS[dictionary]
+
+    cells = []
+    for i in range(count):
+        mid = start + i
+        img = cv2.aruco.generateImageMarker(adict, mid, 1000)
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            raise HTTPException(500, f"Failed to render marker {mid}")
+        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        cells.append(
+            f'<div class="cell">'
+            f'<div class="mwrap"><img src="data:image/png;base64,{b64}"></div>'
+            f'<div class="lbl">{label} &middot; ID {mid} &middot; {size_mm:g} mm</div>'
+            f'</div>'
+        )
+
+    pad = size_mm * 0.12
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        @page {{ size: A4; margin: 12mm; }}
+        body {{ font-family: sans-serif; }}
+        h1 {{ font-size: 12pt; }}
+        .note {{ font-size: 9pt; color: #444; margin-bottom: 6mm; }}
+        .grid {{ display: flex; flex-wrap: wrap; gap: 8mm; }}
+        .cell {{ width: {size_mm + 2 * pad:g}mm; text-align: center; }}
+        .mwrap {{ background: #fff; padding: {pad:g}mm; display: inline-block; }}
+        .mwrap img {{ width: {size_mm:g}mm; height: {size_mm:g}mm; image-rendering: pixelated; display: block; }}
+        .lbl {{ font-size: 8pt; margin-top: 2mm; }}
+    </style></head><body>
+        <h1>AR placement markers — {label}</h1>
+        <div class="note">Print at <b>100% / actual size</b> (no fit-to-page). Measure a printed
+        black marker; it should be <b>{size_mm:g} mm</b>. Mount flat &amp; rigid. Keep each ID with its
+        planned location.</div>
+        <div class="grid">{''.join(cells)}</div>
+    </body></html>"""
+
+    from weasyprint import HTML
+    pdf = HTML(string=html).write_pdf()
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="ar_markers_{dictionary}_{start}-{start+count-1}.pdf"'},
+    )
 
 
 def _run_id_of(filename: str) -> str:

@@ -2274,6 +2274,14 @@ tr.group-member-row .group-actions button.cls-active-exc {
    ────────────────────────────────────────────────────────────────────────── */
 
 .capture-intro { color: var(--pico-muted-color, #666); }
+.capture-markers {
+    display: flex; gap: 0.6rem; align-items: end; flex-wrap: wrap;
+    padding: 0.5rem 0.75rem; margin: 0.5rem 0; font-size: 0.85rem;
+    background: var(--pico-card-background-color, #f6f6f6); border-radius: 6px;
+}
+.capture-markers label { font-size: 0.8rem; }
+.capture-markers input { width: 80px; margin-top: 0.15rem; }
+.capture-markers button { margin-bottom: 0; }
 .capture-setup {
     display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin: 0.75rem 0;
 }
