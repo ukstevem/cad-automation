@@ -2282,6 +2282,7 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-markers label { font-size: 0.8rem; }
 .capture-markers input { width: 80px; margin-top: 0.15rem; }
 .capture-markers button { margin-bottom: 0; }
+.capture-mk-note { font-size: 0.78rem; color: var(--pico-muted-color, #666); flex-basis: 100%; }
 .capture-setup {
     display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin: 0.75rem 0;
 }

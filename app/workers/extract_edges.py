@@ -27,6 +27,8 @@ import sys
 import threading
 from pathlib import Path
 
+import numpy as np
+
 faulthandler.enable()
 
 try:
@@ -108,11 +110,28 @@ def main() -> None:
                 if xs else {"min": [0, 0, 0], "max": [0, 0, 0]}
             )
 
+            # Oriented bounding box (PCA) — true element L×W×H, robust to the part
+            # being rotated in world space (unlike the axis-aligned bbox). Drives
+            # marker sizing: a marker can't be bigger than the face it sits on.
+            obb_dims = []
+            if xs and len(xs) >= 3:
+                pts_all = np.array([p for poly in edges for p in poly], dtype=float)
+                c = pts_all.mean(axis=0)
+                X = pts_all - c
+                _evals, evecs = np.linalg.eigh(np.cov(X.T))
+                proj = X @ evecs
+                ext = proj.max(axis=0) - proj.min(axis=0)
+                obb_dims = sorted(round(float(e), 1) for e in ext)  # [min, mid, max]
+
             result_holder[0] = {
                 "edges": edges,
                 "vertices": vertices,
                 "bbox": bbox,
-                "summary": {"solids": len(solids), "edges": len(edges), "vertices": len(vertices)},
+                "obb": obb_dims,
+                "summary": {
+                    "solids": len(solids), "edges": len(edges),
+                    "vertices": len(vertices), "obb": obb_dims,
+                },
             }
         except Exception as exc:  # noqa: BLE001
             error_holder[0] = exc

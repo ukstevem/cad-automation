@@ -32,6 +32,9 @@ export class CapturePage {
         this._selectedAnchor = null;   // index awaiting a photo click
         this._overlay = null;          // [polyline2d] from solve
         this._lastSolve = null;
+        this._solving = false;         // guards against double-click on Solve
+        this._saving = false;          // guards against double-click on Save
+        this._saved = false;           // this solve already persisted
 
         // three.js
         this._three = null;
@@ -68,6 +71,9 @@ export class CapturePage {
         this._overlay = null;
         this._img = null;
         this._photoBlob = null;
+        this._lastSolve = null;
+        this._saving = false;
+        this._saved = false;
     }
 
     // ---------------------------------------------------------------
@@ -94,6 +100,7 @@ export class CapturePage {
                     <label>count<input type="number" id="cap-mk-count" value="6" min="1" max="50"></label>
                     <label>start ID<input type="number" id="cap-mk-start" value="0" min="0"></label>
                     <button id="cap-mk-print" class="outline">Open marker PDF ↗</button>
+                    <span id="cap-mk-note" class="capture-mk-note"></span>
                 </div>
 
                 <div class="capture-setup">
@@ -282,7 +289,24 @@ export class CapturePage {
             return;
         }
         this._build3D();
+        this._updateMarkerSizing();
         this._setStatus(`Model loaded: ${this._geometry.summary.edges} edges, ${this._geometry.summary.vertices} anchors. Click an anchor to start.`);
+    }
+
+    _updateMarkerSizing() {
+        const obb = this._geometry?.obb;
+        const note = this.container.querySelector('#cap-mk-note');
+        if (!obb || obb.length < 3) { if (note) note.textContent = ''; return; }
+        const [minD, midD, maxD] = obb;
+        // A marker (black square) plus its white quiet zone (~14%) must fit on the
+        // face it sits on. Cap to the smallest cross-section so it fits any face,
+        // with margin; round to 5 mm.
+        const rec = Math.max(15, Math.floor((minD * 0.75) / 5) * 5);
+        const sizeInput = this.container.querySelector('#cap-mk-size');
+        if (sizeInput) sizeInput.value = rec;
+        if (note) {
+            note.textContent = `Element OBB ${minD}×${midD}×${maxD} mm → marker ≤ ~${rec} mm to fit the ${minD} mm face (larger faces allow bigger).`;
+        }
     }
 
     _build3D() {
@@ -389,8 +413,8 @@ export class CapturePage {
         $('#cap-corr-count').textContent = `${n} correspondence${n === 1 ? '' : 's'}`;
         $('#cap-undo').disabled = n === 0;
         $('#cap-clear').disabled = n === 0;
-        $('#cap-solve').disabled = !(n >= 4 && this._img && !this._resMismatch);
-        $('#cap-save').disabled = !this._lastSolve;
+        $('#cap-solve').disabled = this._solving || !(n >= 4 && this._img && !this._resMismatch);
+        $('#cap-save').disabled = this._saving || this._saved || !this._lastSolve;
     }
 
     _undo() {
@@ -407,26 +431,39 @@ export class CapturePage {
     }
 
     async _solve() {
+        if (this._solving) return;
+        this._solving = true;
+        this._refreshButtons();
+        const sbtn = this.container.querySelector('#cap-solve');
+        if (sbtn) sbtn.setAttribute('aria-busy', 'true');
         const corr = this._correspondences.map(c => ({ image: c.image, world: c.world }));
         this._setStatus('Solving pose…');
         try {
             const res = await this.api.solveAr(this._filename, this._profile.name, corr);
             this._overlay = res.overlay;
             this._lastSolve = res;
+            this._saved = false;        // a fresh solve can be saved again
             this._drawPhoto();
             const rms = res.reproj_rms;
             const quality = rms < 2 ? 'excellent' : rms < 6 ? 'good' : rms < 15 ? 'fair' : 'poor';
             this.container.querySelector('#cap-result').innerHTML =
                 `<span class="capture-rms-${quality}">RMS ${rms}px (${quality})</span> · cam ${res.camera_position.join(', ')} mm`;
             this._setStatus('Overlay drawn — do the red CAD edges land on the steel?');
-            this._refreshButtons();
         } catch (err) {
             this._setStatus(`Solve failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            this._solving = false;
+            if (sbtn) sbtn.removeAttribute('aria-busy');
+            this._refreshButtons();
         }
     }
 
     async _save() {
-        if (!this._lastSolve || !this._photoBlob) return;
+        if (this._saving || this._saved || !this._lastSolve || !this._photoBlob) return;
+        this._saving = true;
+        this._refreshButtons();
+        const btn = this.container.querySelector('#cap-save');
+        if (btn) { btn.setAttribute('aria-busy', 'true'); btn.textContent = 'Saving…'; }
         try {
             const resp = await this.api.saveCapture(this._filename, this._photoBlob, {
                 profile: this._profile.name,
@@ -434,9 +471,14 @@ export class CapturePage {
                 pose: { rvec: this._lastSolve.rvec, tvec: this._lastSolve.tvec, camera_position: this._lastSolve.camera_position },
                 reprojRms: this._lastSolve.reproj_rms,
             });
+            this._saved = true;
             this._setStatus(`Capture saved (${resp.capture_id}).`);
         } catch (err) {
             this._setStatus(`Save failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            this._saving = false;
+            if (btn) { btn.removeAttribute('aria-busy'); btn.textContent = 'Save capture'; }
+            this._refreshButtons();
         }
     }
 

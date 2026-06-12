@@ -24,6 +24,7 @@ from typing import List, Optional
 
 import base64
 
+import numpy as np
 import structlog
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -94,7 +95,7 @@ async def _get_geometry(filename: str, node_id: Optional[str], refresh: bool = F
     sidecar = json.loads(analysis_json.read_text(encoding="utf-8"))
     cache_key = node_id or "_all"
     cached = (sidecar.get("ar_geometry") or {}).get(cache_key)
-    if cached and not refresh:
+    if cached and not refresh and "obb" in cached:  # 'obb' gate re-runs stale caches
         return cached
 
     result = await _run_edge_worker(file_path, analysis_json, node_id)
@@ -236,6 +237,72 @@ def markers_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="ar_markers_{dictionary}_{start}-{start+count-1}.pdf"'},
     )
+
+
+@router.post("/detect-markers/{filename}")
+async def detect_markers(
+    filename: str,
+    photo: UploadFile = File(...),
+    profile: str = Form(...),
+    dictionary: str = Form("DICT_APRILTAG_36h11"),
+    marker_size_mm: float = Form(100.0),
+):
+    """
+    Detect fiducial markers in a photo and solve each marker's pose relative to the
+    camera (IPPE_SQUARE — purpose-built for square tags). Foundation for marker-based
+    auto-registration: this gives camera↔marker; combined later with a one-time
+    camera↔model registration it yields T(marker→model) for hands-free alignment.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    prof_path = _profile_path(profile)
+    if not prof_path.exists():
+        raise HTTPException(404, f"No calibration profile '{profile}'")
+    profile_data = json.loads(prof_path.read_text(encoding="utf-8"))
+    K, dist = P.load_intrinsics(profile_data)
+
+    const = getattr(cv2.aruco, dictionary, None)
+    if const is None:
+        raise HTTPException(400, f"Dictionary '{dictionary}' not in this OpenCV build")
+    det = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(const), cv2.aruco.DetectorParameters(),
+    )
+
+    raw = await photo.read()
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "Could not decode photo")
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = det.detectMarkers(gray)
+
+    half = marker_size_mm / 2.0
+    # Object corners in the marker frame, matching detectMarkers order (TL,TR,BR,BL).
+    objp = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]], dtype=np.float64)
+
+    markers = []
+    if ids is not None:
+        for c, mid in zip(corners, ids.ravel()):
+            pts = c.reshape(4, 2).astype(np.float64)
+            ok, rvec, tvec = cv2.solvePnP(objp, pts, K, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            if not ok:
+                continue
+            markers.append({
+                "id": int(mid),
+                "corners": pts.tolist(),
+                "rvec": [round(float(x), 6) for x in rvec.ravel()],
+                "tvec": [round(float(x), 2) for x in tvec.ravel()],
+                "distance_mm": round(float(np.linalg.norm(tvec)), 1),
+            })
+
+    return {
+        "image_size": [w, h],
+        "resolution_matches_profile": profile_data.get("image_size") == [w, h],
+        "dictionary": dictionary,
+        "marker_size_mm": marker_size_mm,
+        "count": len(markers),
+        "markers": markers,
+    }
 
 
 def _run_id_of(filename: str) -> str:
