@@ -131,6 +131,8 @@ export class CapturePage {
                     <button id="cap-clear" class="outline secondary" disabled>Clear</button>
                     <button id="cap-solve" disabled>Solve &amp; Overlay</button>
                     <button id="cap-save" class="outline" disabled>Save capture</button>
+                    <button id="cap-register" class="outline" disabled title="Store this marker's position from the current solve">Register marker</button>
+                    <button id="cap-auto" class="outline" disabled title="Detect a registered marker and align automatically">Auto-align</button>
                     <span id="cap-result" class="capture-result"></span>
                 </div>
             </section>
@@ -150,6 +152,50 @@ export class CapturePage {
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
         $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
         $('#cap-detect').addEventListener('click', () => this._detectMarkers());
+        $('#cap-register').addEventListener('click', () => this._registerMarker());
+        $('#cap-auto').addEventListener('click', () => this._autoAlign());
+    }
+
+    async _registerMarker() {
+        if (!this._lastSolve || !this._photoBlob) return;
+        const size = parseFloat(this.container.querySelector('#cap-mk-size').value) || 100;
+        const btn = this.container.querySelector('#cap-register');
+        if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+        this._setStatus('Registering marker (linking it to the CAD frame)…');
+        try {
+            const res = await this.api.registerMarker(this._filename, this._photoBlob, {
+                profile: this._profile.name,
+                modelRvec: this._lastSolve.rvec,
+                modelTvec: this._lastSolve.tvec,
+                markerSizeMm: size,
+            });
+            this._setStatus(`✓ Marker ${res.registered} registered. Now upload another photo with this marker and hit Auto-align — no clicking.`);
+            this.container.querySelector('#cap-auto').disabled = !(this._img && this._profile);
+        } catch (err) {
+            this._setStatus(`Register failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            if (btn) { btn.removeAttribute('aria-busy'); btn.disabled = !this._lastSolve; }
+        }
+    }
+
+    async _autoAlign() {
+        if (!this._img || !this._profile || !this._photoBlob) return;
+        const btn = this.container.querySelector('#cap-auto');
+        if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+        this._setStatus('Detecting registered marker and aligning…');
+        try {
+            const res = await this.api.autoSolve(this._filename, this._photoBlob, { profile: this._profile.name });
+            this._overlay = res.overlay;
+            this._markers = [{ id: res.marker_id_used, corners: res.marker_corners }];
+            this._lastSolve = null;        // auto pose isn't a manual solve
+            this._drawPhoto();
+            this._refreshButtons();
+            this._setStatus(`✓ Auto-aligned from marker ${res.marker_id_used} — no clicking. Do the red edges land on the steel?`);
+        } catch (err) {
+            this._setStatus(`Auto-align failed: ${err?.detail || err?.message || err}`, true);
+        } finally {
+            if (btn) { btn.removeAttribute('aria-busy'); btn.disabled = !(this._img && this._profile); }
+        }
     }
 
     async _detectMarkers() {
@@ -202,6 +248,8 @@ export class CapturePage {
         this.container.querySelector('#cap-load-model').disabled = !(ready && this._img);
         const detectBtn = this.container.querySelector('#cap-detect');
         if (detectBtn) detectBtn.disabled = !(this._img && this._profile);
+        const autoBtn = this.container.querySelector('#cap-auto');
+        if (autoBtn) autoBtn.disabled = !(this._img && this._profile);
     }
 
     // ---------------------------------------------------------------
@@ -278,8 +326,16 @@ export class CapturePage {
                 ctx.beginPath();
                 c.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])));
                 ctx.closePath(); ctx.stroke();
-                ctx.font = '13px sans-serif';
-                ctx.fillText(`ID ${m.id}`, c[0][0], c[0][1] - 6);
+                // Readable label: white text on a blue pill, above the marker.
+                const txt = `ID ${m.id}`;
+                ctx.font = 'bold 15px sans-serif';
+                const tw = ctx.measureText(txt).width;
+                const lx = c[0][0], ly = c[0][1] - 6;
+                ctx.fillStyle = '#2563eb';
+                ctx.fillRect(lx - 3, ly - 16, tw + 8, 20);
+                ctx.fillStyle = '#fff';
+                ctx.fillText(txt, lx + 1, ly - 1);
+                ctx.fillStyle = '#2563eb';
             }
         }
 
@@ -460,6 +516,7 @@ export class CapturePage {
         $('#cap-clear').disabled = n === 0;
         $('#cap-solve').disabled = this._solving || !(n >= 4 && this._img && !this._resMismatch);
         $('#cap-save').disabled = this._saving || this._saved || !this._lastSolve;
+        $('#cap-register').disabled = !this._lastSolve;
     }
 
     _undo() {

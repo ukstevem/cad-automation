@@ -135,6 +135,36 @@ def test_too_few_points_raises():
         P.solve_pose(CORNERS[:3], img[:3], K, DIST)
 
 
+def test_marker_registration_roundtrip():
+    """register_marker_to_model then model_pose_from_marker recovers the camera pose
+    on a different shot — the bootstrap→auto-align chain, exact (no image noise)."""
+    # True world→camera (reuse) and a true marker→model transform.
+    R2, _ = cv2.Rodrigues(RVEC_TRUE)
+    R_wm_true, _ = cv2.Rodrigues(np.array([[0.1], [0.2], [-0.15]]))
+    t_wm_true = np.array([[30.0], [-20.0], [500.0]])
+
+    # Forward: marker pose in the camera frame for the registration shot.
+    R1 = R2 @ R_wm_true
+    t1 = R2 @ t_wm_true + TVEC_TRUE
+    rvec_m, _ = cv2.Rodrigues(R1)
+
+    R_wm, t_wm = P.register_marker_to_model(rvec_m, t1, RVEC_TRUE, TVEC_TRUE)
+    assert np.allclose(R_wm, R_wm_true, atol=1e-6)
+    assert np.allclose(t_wm.ravel(), t_wm_true.ravel(), atol=1e-3)
+
+    # A different camera pose; auto-recover world→camera from the marker alone.
+    rvec2b, tvec2b = _look_at(CAM_POS + np.array([500.0, 300.0, -400.0]), target=[0, 0, 500])
+    R2b, _ = cv2.Rodrigues(rvec2b)
+    R1b = R2b @ R_wm_true
+    t1b = R2b @ t_wm_true + tvec2b
+    rvec_mb, _ = cv2.Rodrigues(R1b)
+
+    rvec_rec, tvec_rec = P.model_pose_from_marker(rvec_mb, t1b, R_wm, t_wm)
+    R_rec, _ = cv2.Rodrigues(rvec_rec)
+    assert np.allclose(R_rec, R2b, atol=1e-6)
+    assert np.allclose(tvec_rec.ravel(), tvec2b.ravel(), atol=1e-3)
+
+
 def test_load_intrinsics_from_profile():
     profile = {"camera_matrix": K.tolist(), "dist_coeffs": DIST.ravel().tolist()}
     K2, dist2 = P.load_intrinsics(profile)

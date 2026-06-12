@@ -305,6 +305,157 @@ async def detect_markers(
     }
 
 
+def _detect_raw(img, dictionary: str):
+    """Detect markers → list of (id, 4x2 corner pixels). Size-independent."""
+    const = getattr(cv2.aruco, dictionary, None)
+    if const is None:
+        raise HTTPException(400, f"Dictionary '{dictionary}' not in this OpenCV build")
+    det = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(const), cv2.aruco.DetectorParameters(),
+    )
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = det.detectMarkers(gray)
+    out = []
+    if ids is not None:
+        for c, mid in zip(corners, ids.ravel()):
+            out.append((int(mid), c.reshape(4, 2).astype(np.float64)))
+    return out
+
+
+def _marker_pose(pts, size_mm: float, K, dist):
+    """Camera-relative pose of a square marker (IPPE_SQUARE)."""
+    half = size_mm / 2.0
+    objp = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]], np.float64)
+    ok, rvec, tvec = cv2.solvePnP(objp, pts, K, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    return rvec, tvec
+
+
+def _load_ar_markers(filename: str) -> dict:
+    aj = _analysis_json_path(filename)
+    if not aj.exists():
+        return {}
+    return (json.loads(aj.read_text(encoding="utf-8")).get("ar_markers")) or {}
+
+
+def _save_ar_marker(filename: str, marker_id: int, data: dict) -> None:
+    aj = _analysis_json_path(filename)
+    sidecar = json.loads(aj.read_text(encoding="utf-8"))
+    sidecar.setdefault("ar_markers", {})[str(marker_id)] = data
+    aj.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+
+
+def _load_profile_K(profile: str):
+    prof_path = _profile_path(profile)
+    if not prof_path.exists():
+        raise HTTPException(404, f"No calibration profile '{profile}'")
+    profile_data = json.loads(prof_path.read_text(encoding="utf-8"))
+    K, dist = P.load_intrinsics(profile_data)
+    return profile_data, K, dist
+
+
+def _decode_photo(raw: bytes):
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "Could not decode photo")
+    return img
+
+
+@router.post("/register-marker/{filename}")
+async def register_marker(
+    filename: str,
+    photo: UploadFile = File(...),
+    profile: str = Form(...),
+    model_rvec: str = Form(...),
+    model_tvec: str = Form(...),
+    dictionary: str = Form("DICT_APRILTAG_36h11"),
+    marker_size_mm: float = Form(100.0),
+    marker_id: int = Form(-1),
+):
+    """
+    Bootstrap: in a photo where the marker AND the part are both present, combine the
+    detected marker pose with the manually-solved model pose to store T(marker→model)
+    for this job. After this, any photo with that marker auto-aligns.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    _profile_data, K, dist = _load_profile_K(profile)
+    img = _decode_photo(await photo.read())
+    dets = _detect_raw(img, dictionary)
+    if not dets:
+        raise HTTPException(400, "No marker detected in this photo — the whole tag must be visible.")
+    if marker_id >= 0:
+        match = [d for d in dets if d[0] == marker_id]
+        if not match:
+            raise HTTPException(400, f"Marker {marker_id} not found (detected {[d[0] for d in dets]})")
+        mid, pts = match[0]
+    elif len(dets) == 1:
+        mid, pts = dets[0]
+    else:
+        raise HTTPException(400, f"Multiple markers {[d[0] for d in dets]} — specify which marker_id to register")
+
+    rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
+    R_wm, t_wm = P.register_marker_to_model(
+        rvec_m, tvec_m, json.loads(model_rvec), json.loads(model_tvec),
+    )
+    data = {
+        "marker_id": mid,
+        "dictionary": dictionary,
+        "marker_size_mm": marker_size_mm,
+        "R_wm": R_wm.tolist(),
+        "t_wm": t_wm.ravel().tolist(),
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_ar_marker(filename, mid, data)
+    logger.info("ar_marker_registered", filename=filename, marker_id=mid)
+    return {"registered": mid, "marker": data, "detected_ids": [d[0] for d in dets]}
+
+
+@router.post("/auto-solve/{filename}")
+async def auto_solve(
+    filename: str,
+    photo: UploadFile = File(...),
+    profile: str = Form(...),
+    dictionary: str = Form("DICT_APRILTAG_36h11"),
+    node_id: str = Form(""),
+):
+    """
+    Hands-free alignment: detect a registered marker in the photo → recover the camera
+    pose from the stored T(marker→model) → project the CAD edges. No clicking.
+    """
+    if cv2 is None:
+        raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
+    _profile_data, K, dist = _load_profile_K(profile)
+    img = _decode_photo(await photo.read())
+    h, w = img.shape[:2]
+    dets = _detect_raw(img, dictionary)
+    stored = _load_ar_markers(filename)
+    usable = [(mid, pts) for (mid, pts) in dets if str(mid) in stored]
+    if not usable:
+        raise HTTPException(
+            400,
+            f"No registered marker visible. Detected {[d[0] for d in dets]}, "
+            f"registered {[int(k) for k in stored]}. Register a marker first.",
+        )
+
+    mid, pts = usable[0]
+    reg = stored[str(mid)]
+    rvec_m, tvec_m = _marker_pose(pts, reg["marker_size_mm"], K, dist)
+    rvec2, tvec2 = P.model_pose_from_marker(rvec_m, tvec_m, reg["R_wm"], reg["t_wm"])
+
+    geom = await _get_geometry(filename, node_id or None)
+    overlay = P.project_polylines(geom.get("edges", []), rvec2, tvec2, K, dist)
+    cam = P.camera_position_world(rvec2, tvec2)
+    return {
+        "overlay": overlay,
+        "marker_id_used": mid,
+        "marker_corners": pts.tolist(),
+        "camera_position": [round(float(x), 1) for x in cam],
+        "image_size": [w, h],
+        "detected_ids": [d[0] for d in dets],
+        "registered_ids": [int(k) for k in stored],
+    }
+
+
 def _run_id_of(filename: str) -> str:
     """8-hex run prefix from the stored upload filename."""
     return Path(filename).stem.split("_", 1)[0]

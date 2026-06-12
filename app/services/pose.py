@@ -155,6 +155,43 @@ def project_polylines(
     return out
 
 
+def register_marker_to_model(rvec_marker, tvec_marker, rvec_model, tvec_model):
+    """
+    Compute T(marker→model) from one photo where both are known.
+
+    marker pose (rvec_marker,tvec_marker): X_cam = R1·X_marker + t1
+    model pose  (rvec_model, tvec_model ): X_cam = R2·X_world  + t2
+    → X_world = R_wm·X_marker + t_wm, with R_wm = R2ᵀ·R1, t_wm = R2ᵀ·(t1 - t2).
+
+    Returns (R_wm 3x3, t_wm 3x1) as lists-ready numpy arrays.
+    """
+    _require_cv2()
+    R1, _ = cv2.Rodrigues(np.asarray(rvec_marker, np.float64).reshape(3, 1))
+    R2, _ = cv2.Rodrigues(np.asarray(rvec_model, np.float64).reshape(3, 1))
+    t1 = np.asarray(tvec_marker, np.float64).reshape(3, 1)
+    t2 = np.asarray(tvec_model, np.float64).reshape(3, 1)
+    R_wm = R2.T @ R1
+    t_wm = R2.T @ (t1 - t2)
+    return R_wm, t_wm
+
+
+def model_pose_from_marker(rvec_marker, tvec_marker, R_wm, t_wm):
+    """
+    Given a freshly-detected marker pose and the stored T(marker→model), recover the
+    world→camera pose (rvec, tvec) for projecting CAD geometry. Inverse of the above:
+    R2 = R1·R_wmᵀ, t2 = t1 - R2·t_wm.
+    """
+    _require_cv2()
+    R1, _ = cv2.Rodrigues(np.asarray(rvec_marker, np.float64).reshape(3, 1))
+    t1 = np.asarray(tvec_marker, np.float64).reshape(3, 1)
+    R_wm = np.asarray(R_wm, np.float64).reshape(3, 3)
+    t_wm = np.asarray(t_wm, np.float64).reshape(3, 1)
+    R2 = R1 @ R_wm.T
+    t2 = t1 - R2 @ t_wm
+    rvec2, _ = cv2.Rodrigues(R2)
+    return rvec2, t2
+
+
 def camera_position_world(rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
     """
     Camera centre in world/model coordinates: ``C = -Rᵀ·t``. Useful for sanity
