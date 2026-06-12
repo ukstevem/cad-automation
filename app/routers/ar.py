@@ -210,9 +210,15 @@ def markers_pdf(
         body {{ font-family: sans-serif; }}
         h1 {{ font-size: 12pt; }}
         .note {{ font-size: 9pt; color: #444; margin-bottom: 6mm; }}
-        .grid {{ display: flex; flex-wrap: wrap; gap: 8mm; }}
-        .cell {{ width: {size_mm + 2 * pad:g}mm; text-align: center; }}
-        .mwrap {{ background: #fff; padding: {pad:g}mm; display: inline-block; }}
+        /* inline-block + break-inside:avoid paginates cleanly in weasyprint;
+           flex does not (it split markers across page breaks). */
+        .cell {{
+            display: inline-block; vertical-align: top; text-align: center;
+            width: {size_mm + 2 * pad:g}mm; margin: 4mm;
+            break-inside: avoid; page-break-inside: avoid;
+        }}
+        .mwrap {{ background: #fff; padding: {pad:g}mm; display: inline-block;
+            break-inside: avoid; page-break-inside: avoid; }}
         .mwrap img {{ width: {size_mm:g}mm; height: {size_mm:g}mm; image-rendering: pixelated; display: block; }}
         .lbl {{ font-size: 8pt; margin-top: 2mm; }}
     </style></head><body>
@@ -220,7 +226,7 @@ def markers_pdf(
         <div class="note">Print at <b>100% / actual size</b> (no fit-to-page). Measure a printed
         black marker; it should be <b>{size_mm:g} mm</b>. Mount flat &amp; rigid. Keep each ID with its
         planned location.</div>
-        <div class="grid">{''.join(cells)}</div>
+        <div>{''.join(cells)}</div>
     </body></html>"""
 
     from weasyprint import HTML
