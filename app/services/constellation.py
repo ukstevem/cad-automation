@@ -24,6 +24,13 @@ import numpy as np
 
 from app.services.pose import rt_compose, rt_invert
 
+try:
+    import cv2
+    _CV2_ERR = None
+except Exception as exc:  # pragma: no cover
+    cv2 = None
+    _CV2_ERR = str(exc)
+
 
 def build_constellation(photo_markers: List[Dict[int, Tuple]]) -> Optional[dict]:
     """
@@ -79,6 +86,98 @@ def build_constellation(photo_markers: List[Dict[int, Tuple]]) -> Optional[dict]
         "linked": sorted(int(x) for x in linked),
         "unlinked": sorted(int(x) for x in (all_ids - linked)),
     }
+
+
+def _marker_objp(marker_size_mm: float) -> np.ndarray:
+    h = marker_size_mm / 2.0
+    return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], float)
+
+
+def bundle_adjust(photo_corners: List[Dict[int, np.ndarray]], init_poses: Dict[int, Tuple],
+                  reference: int, marker_size_mm: float, K, dist):
+    """
+    Refine the constellation by jointly optimising ALL marker poses (in the reference
+    frame, reference fixed at identity) and ALL camera poses against every marker-corner
+    observation — minimising total reprojection error with a robust loss.
+
+    Fixes the spanning-tree's accumulated chaining error by using direct co-visibility
+    constraints. *photo_corners*: per photo ``{marker_id: 4x2 image corners}``.
+    *init_poses*: spanning-tree ``{marker_id: (R 3x3, t 3x1)}`` (marker→ref). Returns
+    ``(refined_poses, info)`` with before/after RMS.
+    """
+    if cv2 is None:  # pragma: no cover
+        raise RuntimeError(f"OpenCV unavailable: {_CV2_ERR}")
+    from scipy.optimize import least_squares
+
+    K = np.asarray(K, float).reshape(3, 3)
+    dist = np.asarray(dist, float).reshape(-1, 1)
+    objp = _marker_objp(marker_size_mm)
+
+    opt = [m for m in sorted(init_poses) if m != reference]
+    m_off = {m: 6 * i for i, m in enumerate(opt)}
+    n_m = len(opt)
+
+    def world_corners(rt):
+        R = np.asarray(rt[0], float).reshape(3, 3)
+        t = np.asarray(rt[1], float).reshape(3, 1)
+        return (R @ objp.T + t).T
+
+    # Per-photo camera-pose init via solvePnP from the spanning-tree marker poses.
+    photos = []   # (obs=[(mid, corners)],)
+    cam0 = []
+    for pc in photo_corners:
+        obs = [(m, np.asarray(c, float)) for m, c in pc.items() if m in init_poses]
+        if len(obs) < 1:
+            continue
+        op = np.vstack([world_corners(init_poses[m]) for m, _ in obs])
+        ip = np.vstack([c for _, c in obs])
+        ok, rv, tv = cv2.solvePnP(op.reshape(-1, 1, 3), ip.reshape(-1, 1, 2), K, dist,
+                                  flags=cv2.SOLVEPNP_SQPNP)
+        if not ok:
+            continue
+        photos.append(obs)
+        cam0.append((rv.ravel(), tv.ravel()))
+
+    n_p = len(photos)
+    cam_base = 6 * n_m
+    x0 = np.zeros(6 * n_m + 6 * n_p)
+    for m in opt:
+        o = m_off[m]
+        x0[o:o + 3] = cv2.Rodrigues(np.asarray(init_poses[m][0], float).reshape(3, 3))[0].ravel()
+        x0[o + 3:o + 6] = np.asarray(init_poses[m][1], float).ravel()
+    for j, (rv, tv) in enumerate(cam0):
+        o = cam_base + 6 * j
+        x0[o:o + 3] = rv
+        x0[o + 3:o + 6] = tv
+
+    def m_pose(m, x):
+        if m == reference:
+            return np.zeros(3), np.zeros(3)
+        o = m_off[m]
+        return x[o:o + 3], x[o + 3:o + 6]
+
+    def residuals(x):
+        res = []
+        for j, obs in enumerate(photos):
+            o = cam_base + 6 * j
+            crv, ctv = x[o:o + 3], x[o + 3:o + 6]
+            for m, corners in obs:
+                mrv, mtv = m_pose(m, x)
+                world = (cv2.Rodrigues(mrv)[0] @ objp.T + mtv.reshape(3, 1)).T
+                proj, _ = cv2.projectPoints(world.reshape(-1, 1, 3), crv, ctv, K, dist)
+                res.append((proj.reshape(-1, 2) - corners).ravel())
+        return np.concatenate(res) if res else np.zeros(0)
+
+    rms_before = float(np.sqrt(np.mean(residuals(x0) ** 2)))
+    sol = least_squares(residuals, x0, method="trf", loss="huber", f_scale=5.0, max_nfev=400)
+    rms_after = float(np.sqrt(np.mean(residuals(sol.x) ** 2)))
+
+    refined = {int(reference): (np.eye(3), np.zeros((3, 1)))}
+    for m in opt:
+        mrv, mtv = m_pose(m, sol.x)
+        refined[int(m)] = (cv2.Rodrigues(mrv)[0], np.asarray(mtv).reshape(3, 1))
+    return refined, {"rms_before_px": round(rms_before, 2), "rms_after_px": round(rms_after, 2),
+                     "photos": n_p, "markers_optimised": n_m}
 
 
 def anchor_to_model(constellation: dict, anchor_marker_id: int,

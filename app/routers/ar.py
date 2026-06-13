@@ -531,22 +531,41 @@ async def calibrate_constellation(
         raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
     _pd, K, dist = _load_profile_K(profile)
 
-    photo_markers, per_photo = [], []
+    photo_markers, photo_corners, per_photo = [], [], []
     for ph in photos:
         img = _decode_photo(await ph.read())
         _require_resolution_match(_pd, img)
-        pm = {}
+        pm, pc = {}, {}
         for mid, pts in _detect_raw(img, dictionary):
             rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
             R_mc, _ = cv2.Rodrigues(rvec_m)
             pm[mid] = (R_mc, tvec_m)
+            pc[mid] = pts
         photo_markers.append(pm)
+        photo_corners.append(pc)
         per_photo.append({"name": ph.filename, "markers": sorted(int(m) for m in pm)})
 
-    from app.services.constellation import build_constellation
+    from app.services.constellation import build_constellation, bundle_adjust
     con = build_constellation(photo_markers)
     if con is None:
         raise HTTPException(400, "No markers detected in any photo")
+
+    # Refine with bundle adjustment over ALL corner observations — fixes the spanning
+    # tree's accumulated chaining error by using direct co-visibility constraints.
+    ba_info = None
+    init_poses = {int(m): (np.asarray(p["R"]), np.asarray(p["t"]).reshape(3, 1))
+                  for m, p in con["poses"].items()}
+    if len(init_poses) >= 2:
+        try:
+            refined, ba_info = bundle_adjust(
+                photo_corners, init_poses, con["reference"], marker_size_mm, K, dist,
+            )
+            con["poses"] = {int(m): {"R": R.tolist(), "t": np.asarray(t).reshape(3).tolist()}
+                            for m, (R, t) in refined.items()}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("constellation_ba_failed", error=str(exc))
+            ba_info = {"error": str(exc)}
+
     con["marker_size_mm"] = marker_size_mm
     con["dictionary"] = dictionary
 
@@ -556,11 +575,12 @@ async def calibrate_constellation(
     aj.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
 
     logger.info("ar_constellation_calibrated", filename=filename,
-                linked=con["linked"], unlinked=con["unlinked"])
+                linked=con["linked"], unlinked=con["unlinked"], ba=ba_info)
     return {
         "reference": con["reference"],
         "linked": con["linked"],
         "unlinked": con["unlinked"],
+        "bundle_adjust": ba_info,
         "per_photo": per_photo,
         "n_photos": len(photos),
     }
