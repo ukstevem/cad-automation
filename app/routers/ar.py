@@ -491,22 +491,54 @@ async def auto_solve(
             f"registered {[int(k) for k in stored]}. Register a marker first.",
         )
 
-    obj = np.vstack(obj_pts)
-    img2 = np.vstack(img_pts)
+    def _solve_over(indices):
+        """Solve pose over the markers at *indices*; return (rvec, tvec, per_marker_rms)."""
+        obj = np.vstack([obj_pts[i] for i in indices])
+        img = np.vstack([img_pts[i] for i in indices])
+        rv, tv, _ = P.solve_pose(obj, img, K, dist)
+        per = [P.reprojection_rms(obj_pts[i], img_pts[i], rv, tv, K, dist) for i in indices]
+        return rv, tv, per
+
     try:
-        rvec2, tvec2, _ = P.solve_pose(obj, img2, K, dist)
+        active = list(range(len(obj_pts)))
+        rvec2, tvec2, per_rms = _solve_over(active)
+
+        # Reject a single outlier marker: a badly-registered tag (e.g. a constellation
+        # marker carrying chain error) otherwise drags the whole fused pose. Drop the
+        # worst if it's both far above an absolute floor AND a clear outlier vs the rest,
+        # then re-solve — keeps the fix conservative so good markers aren't discarded.
+        dropped = []
+        while len(active) >= 2:
+            worst = int(np.argmax(per_rms))
+            worst_rms = per_rms[worst]
+            others = [r for j, r in enumerate(per_rms) if j != worst]
+            median_others = float(np.median(others))
+            is_outlier = worst_rms > 8.0 and worst_rms > max(3.0 * median_others, 15.0)
+            if not is_outlier:
+                break
+            dropped.append(used[active[worst]]["id"])
+            active.pop(worst)
+            rvec2, tvec2, per_rms = _solve_over(active)
     except P.PoseError as exc:
         raise HTTPException(400, f"Pose solve failed: {exc}")
+
+    obj = np.vstack([obj_pts[i] for i in active])
+    img2 = np.vstack([img_pts[i] for i in active])
     rms = P.reprojection_rms(obj, img2, rvec2, tvec2, K, dist)
+    used_active = [used[i] for i in active]
+    per_marker = [{"id": used[i]["id"], "rms": round(float(r), 2)}
+                  for i, r in zip(active, per_rms)]
 
     geom = await _get_geometry(filename, node_id or None)
     overlay = P.project_polylines(geom.get("edges", []), rvec2, tvec2, K, dist)
     cam = P.camera_position_world(rvec2, tvec2)
     return {
         "overlay": overlay,
-        "markers": used,
-        "marker_ids_used": [u["id"] for u in used],
+        "markers": used_active,
+        "marker_ids_used": [u["id"] for u in used_active],
         "reproj_rms": round(float(rms), 3),
+        "per_marker_rms": per_marker,
+        "dropped_markers": dropped,
         "camera_position": [round(float(x), 1) for x in cam],
         "image_size": [w, h],
         "detected_ids": [d[0] for d in dets],

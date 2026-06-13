@@ -305,7 +305,10 @@ export class CapturePage {
             this._drawPhoto();
             this._refreshButtons();
             const ids = (res.marker_ids_used || []).join(', ');
-            this._setStatus(`✓ Auto-aligned (cyan) from ${this._markers.length} marker(s): ${ids} · RMS ${res.reproj_rms}px — no clicking.`);
+            const per = (res.per_marker_rms || []).map(m => `${m.id}:${m.rms}px`).join(' ');
+            const drop = (res.dropped_markers || []).length
+                ? ` · dropped outlier marker(s) ${res.dropped_markers.join(', ')}` : '';
+            this._setStatus(`✓ Auto-aligned (cyan) from ${this._markers.length} marker(s): ${ids} · RMS ${res.reproj_rms}px${per ? ` [per-marker ${per}]` : ''}${drop} — no clicking.`);
         } catch (err) {
             this._setStatus(`Auto-align failed: ${err?.detail || err?.message || err}`, true);
         } finally {
