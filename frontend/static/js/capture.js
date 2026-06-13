@@ -11,7 +11,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-const MAX_PHOTO_W = 720;
+const MAX_PHOTO_W = 900;
+const LOUPE_PX = 200;     // magnifier canvas size
+const LOUPE_ZOOM = 8;     // magnification (shows full-res pixels)
 
 export class CapturePage {
     constructor(api) {
@@ -130,7 +132,13 @@ export class CapturePage {
                 <div class="capture-stage">
                     <div class="capture-pane">
                         <header>Photo <small id="cap-photo-meta"></small></header>
-                        <canvas id="cap-photo-canvas" class="capture-canvas"></canvas>
+                        <div class="capture-photo-row">
+                            <canvas id="cap-photo-canvas" class="capture-canvas"></canvas>
+                            <div class="capture-loupe-box">
+                                <canvas id="cap-loupe" width="${LOUPE_PX}" height="${LOUPE_PX}" class="capture-loupe"></canvas>
+                                <div class="capture-loupe-cap">${LOUPE_ZOOM}× zoom — hover to place precisely</div>
+                            </div>
+                        </div>
                         <div class="capture-legend">
                             <span class="lg lg-red"></span> manual solve
                             <span class="lg lg-cyan"></span> auto-align
@@ -181,6 +189,8 @@ export class CapturePage {
         $('#cap-solve').addEventListener('click', () => this._solve());
         $('#cap-save').addEventListener('click', () => this._save());
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
+        $('#cap-photo-canvas').addEventListener('mousemove', (e) => this._updateLoupe(e));
+        $('#cap-photo-canvas').addEventListener('mouseleave', () => this._clearLoupe());
         $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
         $('#cap-detect').addEventListener('click', () => this._detectMarkers());
         $('#cap-register').addEventListener('click', () => this._registerMarker());
@@ -550,6 +560,32 @@ export class CapturePage {
         this._drawPhoto();
         this._refreshButtons();
         this._setStatus(`Added anchor ${this._correspondences[this._correspondences.length - 1].anchor}. ${this._correspondences.length} correspondence(s).`);
+    }
+
+    _updateLoupe(e) {
+        const canvas = this.container.querySelector('#cap-photo-canvas');
+        const loupe = this.container.querySelector('#cap-loupe');
+        if (!this._img || !loupe) return;
+        const rect = canvas.getBoundingClientRect();
+        const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const nx = cx / this._scale, ny = cy / this._scale;     // natural-res coords
+        const src = LOUPE_PX / LOUPE_ZOOM;                       // natural px shown
+        const ctx = loupe.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, LOUPE_PX, LOUPE_PX);
+        ctx.drawImage(this._img, nx - src / 2, ny - src / 2, src, src, 0, 0, LOUPE_PX, LOUPE_PX);
+        ctx.strokeStyle = 'rgba(255,60,60,0.9)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(LOUPE_PX / 2, 0); ctx.lineTo(LOUPE_PX / 2, LOUPE_PX);
+        ctx.moveTo(0, LOUPE_PX / 2); ctx.lineTo(LOUPE_PX, LOUPE_PX / 2);
+        ctx.stroke();
+    }
+
+    _clearLoupe() {
+        const loupe = this.container.querySelector('#cap-loupe');
+        if (loupe) loupe.getContext('2d').clearRect(0, 0, LOUPE_PX, LOUPE_PX);
     }
 
     // ---------------------------------------------------------------

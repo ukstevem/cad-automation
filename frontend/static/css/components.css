@@ -2319,6 +2319,13 @@ tr.group-member-row .group-actions button.cls-active-exc {
     max-width: 100%; border: 1px solid var(--pico-muted-border-color, #ccc);
     border-radius: 6px; cursor: crosshair; background: #000;
 }
+.capture-photo-row { display: flex; gap: 0.6rem; align-items: flex-start; flex-wrap: wrap; }
+.capture-loupe-box { flex: 0 0 auto; }
+.capture-loupe {
+    border: 2px solid #2563eb; border-radius: 6px; background: #000;
+    image-rendering: pixelated; width: 200px; height: 200px;
+}
+.capture-loupe-cap { font-size: 0.72rem; color: var(--pico-muted-color, #666); text-align: center; margin-top: 2px; }
 .capture-3d {
     width: 100%; height: 360px; border-radius: 6px; overflow: hidden;
     background: #111418; cursor: grab;
