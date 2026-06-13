@@ -94,6 +94,32 @@ def test_projection_round_trips():
         assert np.allclose(poly[1], img[b], atol=1e-2)
 
 
+def test_project_polylines_clips_behind_camera():
+    """
+    Edges that fall behind the camera must NOT be projected as stray lines (the
+    'converging on the image centre' distortion artifact). A polyline that straddles
+    the camera plane is clipped to its front portion; a fully-behind one is dropped.
+    """
+    # Camera at origin looking down +Z (identity pose).
+    rvec, tvec = np.zeros((3, 1)), np.zeros((3, 1))
+
+    fully_front = np.array([[-50, 0, 1000.0], [50, 0, 1000.0]])      # both in front
+    straddling = np.array([[0, 0, -500.0], [0, 0, 1000.0]])          # crosses Z=0
+    fully_behind = np.array([[-50, 0, -800.0], [50, 0, -300.0]])     # both behind
+
+    out = P.project_polylines([fully_front, straddling, fully_behind],
+                              rvec, tvec, K, DIST, near=1.0)
+
+    # fully_front → 1 segment; straddling → 1 (clipped); fully_behind → 0.
+    assert len(out) == 2
+    for poly in out:
+        poly = np.asarray(poly)
+        # Every projected point must be finite and not flung wildly off-image.
+        assert np.all(np.isfinite(poly))
+        assert poly[:, 0].min() > -IMG_W and poly[:, 0].max() < 2 * IMG_W
+        assert poly[:, 1].min() > -IMG_H and poly[:, 1].max() < 2 * IMG_H
+
+
 def test_solve_pose_robust_to_noise():
     rng = np.random.default_rng(0)
     img = _ground_truth_image_points() + rng.normal(0, 0.5, size=(8, 2))

@@ -135,23 +135,80 @@ def project_points(
     return proj.reshape(-1, 2)
 
 
+def _clip_polyline_to_front(
+    pts_cam: np.ndarray, near: float
+) -> List[np.ndarray]:
+    """
+    Split a polyline (Nx3, already in CAMERA coords) into sub-polylines that lie in
+    front of the near plane (camera Z >= near). Segments crossing the plane are cut
+    at the crossing point so the line stops cleanly at the plane instead of wrapping.
+
+    Why this matters: cv2.projectPoints will happily project points with Z<=0 (behind
+    the camera). Those produce wildly wrong 2D coords, and the distortion polynomial
+    diverges far outside the image and curls them back toward the principal point —
+    the tell-tale 'extra lines converging on the centre' artifact. Dropping the behind-
+    camera parts removes it.
+    """
+    z = pts_cam[:, 2]
+    front = z >= near
+    segments: List[np.ndarray] = []
+    current: List[np.ndarray] = []
+    for i in range(len(pts_cam)):
+        if front[i]:
+            current.append(pts_cam[i])
+        if i + 1 < len(pts_cam):
+            a, b = pts_cam[i], pts_cam[i + 1]
+            za, zb = a[2], b[2]
+            crosses = (za >= near) != (zb >= near)
+            if crosses:
+                # linear interpolation to the point where Z == near
+                tcr = (near - za) / (zb - za)
+                cross_pt = a + tcr * (b - a)
+                if za >= near:
+                    # leaving the front region → end this segment at the plane
+                    current.append(cross_pt)
+                    if len(current) >= 2:
+                        segments.append(np.asarray(current))
+                    current = []
+                else:
+                    # entering the front region → start a new segment at the plane
+                    current = [cross_pt]
+    if len(current) >= 2:
+        segments.append(np.asarray(current))
+    return segments
+
+
 def project_polylines(
     polylines3d: List[Sequence],
     rvec: np.ndarray,
     tvec: np.ndarray,
     K: np.ndarray,
     dist: np.ndarray,
+    *,
+    near: float = 1.0,
 ) -> List[list]:
     """
     Project a list of 3D polylines (each Nx3 world points) → list of 2D pixel
     polylines, ready to draw as the overlay. Empty polylines are skipped.
+
+    Polylines are clipped to the part in front of the camera near plane (``near`` mm
+    in front) before projection — see ``_clip_polyline_to_front``. This prevents the
+    behind-camera distortion artifact (stray lines converging on the image centre)
+    when the pose places some model edges behind the camera.
     """
+    _require_cv2()
+    R, _ = cv2.Rodrigues(np.asarray(rvec, np.float64).reshape(3, 1))
+    t = np.asarray(tvec, np.float64).reshape(3, 1)
     out: List[list] = []
     for pl in polylines3d:
         pts = np.asarray(pl, dtype=np.float64).reshape(-1, 3)
         if len(pts) == 0:
             continue
-        out.append(project_points(pts, rvec, tvec, K, dist).tolist())
+        pts_cam = (R @ pts.T + t).T  # world → camera coords
+        for seg in _clip_polyline_to_front(pts_cam, near):
+            # seg is already in camera coords → project with identity pose
+            proj = project_points(seg, np.zeros(3), np.zeros(3), K, dist)
+            out.append(proj.tolist())
     return out
 
 
