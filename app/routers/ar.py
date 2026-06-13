@@ -377,6 +377,22 @@ def _decode_photo(raw: bytes):
     return img
 
 
+def _require_resolution_match(profile_data: dict, img) -> None:
+    """
+    Pose-critical guard: a photo whose resolution differs from the calibration's
+    means the intrinsics are wrong → a silently-wrong pose. Reject it (same gate the
+    manual Capture flow applies in the browser).
+    """
+    isz = profile_data.get("image_size")
+    h, w = img.shape[:2]
+    if isz and list(isz) != [w, h]:
+        raise HTTPException(
+            400,
+            f"Photo {w}×{h} does not match calibration profile {isz[0]}×{isz[1]} — "
+            "intrinsics won't match (wrong pose). Shoot at the calibrated resolution/lens.",
+        )
+
+
 @router.post("/register-marker/{filename}")
 async def register_marker(
     filename: str,
@@ -397,6 +413,7 @@ async def register_marker(
         raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
     _profile_data, K, dist = _load_profile_K(profile)
     img = _decode_photo(await photo.read())
+    _require_resolution_match(_profile_data, img)
     dets = _detect_raw(img, dictionary)
     if not dets:
         raise HTTPException(400, "No marker detected in this photo — the whole tag must be visible.")
@@ -445,6 +462,7 @@ async def auto_solve(
         raise HTTPException(503, f"OpenCV unavailable: {_CV2_ERR}")
     _profile_data, K, dist = _load_profile_K(profile)
     img = _decode_photo(await photo.read())
+    _require_resolution_match(_profile_data, img)
     h, w = img.shape[:2]
     dets = _detect_raw(img, dictionary)
     stored = _load_ar_markers(filename)
@@ -475,7 +493,10 @@ async def auto_solve(
 
     obj = np.vstack(obj_pts)
     img2 = np.vstack(img_pts)
-    rvec2, tvec2, _ = P.solve_pose(obj, img2, K, dist)
+    try:
+        rvec2, tvec2, _ = P.solve_pose(obj, img2, K, dist)
+    except P.PoseError as exc:
+        raise HTTPException(400, f"Pose solve failed: {exc}")
     rms = P.reprojection_rms(obj, img2, rvec2, tvec2, K, dist)
 
     geom = await _get_geometry(filename, node_id or None)
@@ -513,6 +534,7 @@ async def calibrate_constellation(
     photo_markers, per_photo = [], []
     for ph in photos:
         img = _decode_photo(await ph.read())
+        _require_resolution_match(_pd, img)
         pm = {}
         for mid, pts in _detect_raw(img, dictionary):
             rvec_m, tvec_m = _marker_pose(pts, marker_size_mm, K, dist)
@@ -570,6 +592,7 @@ async def anchor_constellation(
         raise HTTPException(400, "No constellation calibrated yet — calibrate it first.")
 
     img = _decode_photo(await photo.read())
+    _require_resolution_match(_pd, img)
     dets = _detect_raw(img, dictionary)
     linked = set(con["linked"])
     anchor = next(((mid, pts) for (mid, pts) in dets if mid in linked), None)

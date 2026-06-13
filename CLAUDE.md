@@ -265,11 +265,42 @@ Key JS modules:
 
 **Pico CSS note**: Pico heavily styles `<table>` and can intercept click events. STL file list uses `<div>` elements for reliable click handling.
 
+## AR Weld-Ratification (markers + constellation)
+
+A `PRODUCTION` UI area (Calibrate + Capture tabs) for aligning CAD to a real photo of a
+fabrication, as the basis for weld overlay / robotic guidance. Marker-based (markerless was
+investigated and deferred — see below).
+
+**Pipeline:** camera **calibration** (ChArUco, `app/routers/calibration.py`, profiles in
+`outputs/calibration/<name>.json`) → **AR alignment** (`app/routers/ar.py` + `app/services/pose.py`,
+`constellation.py`; CAD edges via `app/workers/extract_edges.py`):
+
+- `GET  /ar/geometry/{f}` — CAD edges + corner anchors + OBB (world coords; cached in sidecar `ar_geometry`)
+- `GET  /ar/markers.pdf` — printable AprilTag sheet (size/count params)
+- `POST /ar/detect-markers/{f}` — detect AprilTags + per-marker pose
+- `POST /ar/solve/{f}` — manual-correspondence pose (clicked points → solvePnP **SQPNP**)
+- `POST /ar/register-marker/{f}` — store T(marker→model) for all visible tags from one solve (`ar_markers`)
+- `POST /ar/auto-solve/{f}` — detect registered tags, **fuse all** → pose → project edges (no clicking)
+- `POST /ar/calibrate-constellation/{f}` — link many tags across photos into one frame (`ar_constellation`)
+- `POST /ar/anchor-constellation/{f}` — tie constellation to CAD via one solved photo → writes `ar_markers`
+- `POST /ar/capture/{f}` — persist photo + provenance record to `outputs/captures/<run_id>/<id>/`
+
+**Invariants / gotchas:**
+- Pose maths is `app/services/pose.py` (solvePnP uses **SQPNP**, not ITERATIVE — ITERATIVE's DLT needs ≥6
+  non-coplanar pts and threw on 5). Marker pose uses `SOLVEPNP_IPPE_SQUARE`.
+- **Resolution gate:** every pose-critical endpoint calls `_require_resolution_match` — a photo whose
+  resolution ≠ the calibration profile's `image_size` is rejected (wrong intrinsics = silently wrong pose).
+- One calibration profile per camera/lens/zoom; markers same physical size; ArUco detector params tuned
+  aggressive (`_detector_params`) to catch small/oblique tags.
+- Markerless (single-image edge/chamfer/VP-axis) is **NOT viable on bare sections** (deferred, bd `ase`);
+  the viable markerless route is multi-view/depth (future). Full log: vault `AR-weld-ratification-tool.md`.
+
 ## Files Stored
 
 - Uploads: `/uploads/<8-hex>_<original_name>.step` (bind-mounted to `./uploads/`)
 - Analysis cache: `/outputs/analysis/<8-hex>_<stem>.json` (bind-mounted to `./outputs/`)
 - STL meshes: `/outputs/stl/<8-hex>/PartName.stl` (bind-mounted to `./outputs/`)
+- Calibration profiles: `/outputs/calibration/<name>.json`; AR captures: `/outputs/captures/<run_id>/<id>/`
 
 ## Testing
 
