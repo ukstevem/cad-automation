@@ -36,6 +36,7 @@ export class CapturePage {
         this._loupeZoom = LOUPE_ZOOM_DEFAULT;
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
+        this._activeCorr = null;       // anchor id of the point being arrow-nudged
         this._overlayManual = null;    // red — manual-correspondence solve
         this._overlayAuto = null;      // cyan — marker auto-align (compare deviation)
         this._lastSolve = null;
@@ -76,6 +77,7 @@ export class CapturePage {
         this._disposeThree();
         this._correspondences = [];
         this._selectedAnchor = null;
+        this._activeCorr = null;
         this._overlayManual = null;
         this._overlayAuto = null;
         this._markers = null;
@@ -134,7 +136,7 @@ export class CapturePage {
                     <div class="capture-pane">
                         <header>Photo <small id="cap-photo-meta"></small></header>
                         <div class="capture-photo-row">
-                            <canvas id="cap-photo-canvas" class="capture-canvas"></canvas>
+                            <canvas id="cap-photo-canvas" class="capture-canvas" tabindex="0"></canvas>
                             <div class="capture-loupe-box">
                                 <canvas id="cap-loupe" width="${LOUPE_PX}" height="${LOUPE_PX}" class="capture-loupe"></canvas>
                                 <div class="capture-loupe-cap">
@@ -143,7 +145,7 @@ export class CapturePage {
                                         <option value="4" selected>4×</option>
                                         <option value="6">6×</option>
                                         <option value="8">8×</option>
-                                    </select> — hover to place
+                                    </select> — hover to place; arrows nudge, Shift=10px
                                 </div>
                             </div>
                         </div>
@@ -199,6 +201,7 @@ export class CapturePage {
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
         $('#cap-photo-canvas').addEventListener('mousemove', (e) => this._updateLoupe(e));
         $('#cap-photo-canvas').addEventListener('mouseleave', () => this._clearLoupe());
+        $('#cap-photo-canvas').addEventListener('keydown', (e) => this._onCanvasKey(e));
         $('#cap-loupe-zoom').addEventListener('change', (e) => { this._loupeZoom = parseInt(e.target.value) || 4; });
         $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
         $('#cap-detect').addEventListener('click', () => this._detectMarkers());
@@ -381,6 +384,7 @@ export class CapturePage {
             this._img = img;
             this._scale = Math.min(1, MAX_PHOTO_W / img.naturalWidth);
             this._correspondences = [];
+            this._activeCorr = null;
             this._overlayManual = null;
             this._overlayAuto = null;
             this._markers = null;
@@ -501,8 +505,11 @@ export class CapturePage {
         ctx.lineWidth = 2;
         this._correspondences.forEach((c, i) => {
             const x = c.image[0] * this._scale, y = c.image[1] * this._scale;
-            ctx.strokeStyle = '#16a34a'; ctx.fillStyle = '#16a34a';
-            ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.stroke();
+            const active = c.anchor === this._activeCorr;
+            const col = active ? '#facc15' : '#16a34a';   // yellow = arrow-nudge target
+            ctx.strokeStyle = col; ctx.fillStyle = col;
+            ctx.beginPath(); ctx.arc(x, y, active ? 6 : 5, 0, Math.PI * 2); ctx.stroke();
+            if (active) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, Math.PI * 2); ctx.fill(); }
             ctx.font = '12px sans-serif';
             ctx.fillText(String(c.anchor), x + 7, y - 7);
         });
@@ -564,24 +571,31 @@ export class CapturePage {
         this._correspondences = this._correspondences.filter(c => c.anchor !== this._selectedAnchor);
         this._correspondences.push({ anchor: this._selectedAnchor, world, image: [u, v] });
         this._markAnchorUsed(this._selectedAnchor);
+        this._activeCorr = this._selectedAnchor;   // arrow keys now nudge this point
         this._selectedAnchor = null;
-        this._overlay = null;
+        this._overlayManual = null;
         this._drawPhoto();
+        this._renderLoupe(u, v);
+        canvas.focus();                            // so keydown reaches the canvas
         this._refreshButtons();
-        this._setStatus(`Added anchor ${this._correspondences[this._correspondences.length - 1].anchor}. ${this._correspondences.length} correspondence(s).`);
+        this._setStatus(`Added anchor ${this._activeCorr} — fine-tune with arrow keys (Shift=10px), watching the loupe. ${this._correspondences.length} correspondence(s).`);
     }
 
     _updateLoupe(e) {
         const canvas = this.container.querySelector('#cap-photo-canvas');
-        const loupe = this.container.querySelector('#cap-loupe');
-        if (!this._img || !loupe) return;
+        if (!this._img || !canvas) return;
         const rect = canvas.getBoundingClientRect();
         const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
         const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
-        const nx = cx / this._scale, ny = cy / this._scale;     // natural-res coords
+        this._renderLoupe(cx / this._scale, cy / this._scale);
+    }
+
+    _renderLoupe(nx, ny) {
+        const loupe = this.container.querySelector('#cap-loupe');
+        if (!this._img || !loupe) return;
         const src = LOUPE_PX / this._loupeZoom;                  // natural px shown
         const ctx = loupe.getContext('2d');
-        ctx.imageSmoothingEnabled = true;                        // smooth (less blocky)
+        ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, LOUPE_PX, LOUPE_PX);
@@ -591,6 +605,29 @@ export class CapturePage {
         ctx.moveTo(LOUPE_PX / 2, 0); ctx.lineTo(LOUPE_PX / 2, LOUPE_PX);
         ctx.moveTo(0, LOUPE_PX / 2); ctx.lineTo(LOUPE_PX, LOUPE_PX / 2);
         ctx.stroke();
+    }
+
+    _onCanvasKey(e) {
+        if (this._activeCorr == null) return;
+        const step = e.shiftKey ? 10 : 1;
+        const map = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+        const d = map[e.key];
+        if (!d) return;
+        e.preventDefault();
+        this._nudge(d[0], d[1]);
+    }
+
+    _nudge(dx, dy) {
+        if (this._activeCorr == null) return;
+        const c = this._correspondences.find(c => c.anchor === this._activeCorr);
+        if (!c) return;
+        c.image[0] = Math.max(0, Math.min(this._img.naturalWidth - 1, c.image[0] + dx));
+        c.image[1] = Math.max(0, Math.min(this._img.naturalHeight - 1, c.image[1] + dy));
+        this._overlayManual = null;          // moved → previous solve is stale
+        this._drawPhoto();
+        this._renderLoupe(c.image[0], c.image[1]);
+        this._refreshButtons();
+        this._setStatus(`Anchor ${c.anchor} → (${Math.round(c.image[0])}, ${Math.round(c.image[1])}) — arrows nudge, Shift=10px.`);
     }
 
     _clearLoupe() {
@@ -745,11 +782,13 @@ export class CapturePage {
     _undo() {
         const last = this._correspondences.pop();
         if (last) { const m = this._anchorMeshes[last.anchor]; if (m) m.material.color.setHex(0xcccccc); this._three?.render(); }
+        if (last && last.anchor === this._activeCorr) this._activeCorr = null;
         this._overlayManual = null; this._drawPhoto(); this._refreshButtons();
     }
 
     _clearCorr() {
         this._correspondences = [];
+        this._activeCorr = null;
         this._anchorMeshes.forEach(m => m.material.color.setHex(0xcccccc));
         this._three?.render();
         this._overlayManual = null; this._lastSolve = null; this._drawPhoto(); this._refreshButtons();
