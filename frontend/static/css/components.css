@@ -2323,8 +2323,9 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-loupe-box { flex: 0 0 auto; }
 .capture-loupe {
     border: 2px solid #2563eb; border-radius: 6px; background: #000;
-    image-rendering: pixelated; width: 200px; height: 200px;
+    width: 220px; height: 220px;
 }
+.capture-loupe-cap select { font-size: 0.72rem; padding: 0 0.2rem; margin: 0; width: auto; display: inline; height: auto; }
 .capture-loupe-cap { font-size: 0.72rem; color: var(--pico-muted-color, #666); text-align: center; margin-top: 2px; }
 .capture-3d {
     width: 100%; height: 360px; border-radius: 6px; overflow: hidden;

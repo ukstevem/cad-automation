@@ -12,8 +12,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const MAX_PHOTO_W = 900;
-const LOUPE_PX = 200;     // magnifier canvas size
-const LOUPE_ZOOM = 8;     // magnification (shows full-res pixels)
+const LOUPE_PX = 220;     // magnifier canvas size
+const LOUPE_ZOOM_DEFAULT = 4;
 
 export class CapturePage {
     constructor(api) {
@@ -33,6 +33,7 @@ export class CapturePage {
         this._markers = null;          // detected markers [{id, corners, distance_mm}]
         this._conFiles = null;         // FileList for constellation calibration
         this._stream = null;           // live webcam MediaStream
+        this._loupeZoom = LOUPE_ZOOM_DEFAULT;
         this._correspondences = [];    // [{ anchor, world:[x,y,z], image:[u,v] }]
         this._selectedAnchor = null;   // index awaiting a photo click
         this._overlayManual = null;    // red — manual-correspondence solve
@@ -136,7 +137,14 @@ export class CapturePage {
                             <canvas id="cap-photo-canvas" class="capture-canvas"></canvas>
                             <div class="capture-loupe-box">
                                 <canvas id="cap-loupe" width="${LOUPE_PX}" height="${LOUPE_PX}" class="capture-loupe"></canvas>
-                                <div class="capture-loupe-cap">${LOUPE_ZOOM}× zoom — hover to place precisely</div>
+                                <div class="capture-loupe-cap">
+                                    zoom <select id="cap-loupe-zoom">
+                                        <option value="2">2×</option>
+                                        <option value="4" selected>4×</option>
+                                        <option value="6">6×</option>
+                                        <option value="8">8×</option>
+                                    </select> — hover to place
+                                </div>
                             </div>
                         </div>
                         <div class="capture-legend">
@@ -191,6 +199,7 @@ export class CapturePage {
         $('#cap-photo-canvas').addEventListener('click', (e) => this._onPhotoClick(e));
         $('#cap-photo-canvas').addEventListener('mousemove', (e) => this._updateLoupe(e));
         $('#cap-photo-canvas').addEventListener('mouseleave', () => this._clearLoupe());
+        $('#cap-loupe-zoom').addEventListener('change', (e) => { this._loupeZoom = parseInt(e.target.value) || 4; });
         $('#cap-mk-print').addEventListener('click', () => this._printMarkers());
         $('#cap-detect').addEventListener('click', () => this._detectMarkers());
         $('#cap-register').addEventListener('click', () => this._registerMarker());
@@ -570,9 +579,10 @@ export class CapturePage {
         const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
         const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
         const nx = cx / this._scale, ny = cy / this._scale;     // natural-res coords
-        const src = LOUPE_PX / LOUPE_ZOOM;                       // natural px shown
+        const src = LOUPE_PX / this._loupeZoom;                  // natural px shown
         const ctx = loupe.getContext('2d');
-        ctx.imageSmoothingEnabled = false;
+        ctx.imageSmoothingEnabled = true;                        // smooth (less blocky)
+        ctx.imageSmoothingQuality = 'high';
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, LOUPE_PX, LOUPE_PX);
         ctx.drawImage(this._img, nx - src / 2, ny - src / 2, src, src, 0, 0, LOUPE_PX, LOUPE_PX);
