@@ -64,6 +64,11 @@ nul
 .claude/
 *.old
 
+# Local test photo sets (large RAW/JPEG capture dumps — never commit)
+iphone/
+*.dng
+*.DNG
+
 # cad
 
 *.dwg
