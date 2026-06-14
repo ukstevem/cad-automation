@@ -46,6 +46,23 @@ def _round_key(pt, q=0.5):
     return (round(pt[0] / q) * q, round(pt[1] / q) * q, round(pt[2] / q) * q)
 
 
+def _strip_synthetic_solids(nodes):
+    """
+    Drop the display-only solid children the frontend embeds on multi-solid parts.
+
+    Those nodes (node_type == "solid", ids like "0:1:1:2:s3") are NOT real XCAF labels —
+    they exist only so the UI can show a part's solids. If the extractor recurses into
+    them it resolves null labels and finds 0 solids, silently dropping every weldment.
+    Removing them makes the part node a leaf, so its own XCAF label is meshed (which
+    explodes the real solids via TopExp_Explorer in _extract_leaf).
+    """
+    for n in nodes:
+        kids = [c for c in (n.get("children") or []) if c.get("node_type") != "solid"]
+        n["children"] = kids
+        _strip_synthetic_solids(kids)
+    return nodes
+
+
 def main() -> None:
     if len(sys.argv) < 3:
         print("Usage: extract_edges.py <file_path> <analysis_json_path> [node_id]", file=sys.stderr)
@@ -77,6 +94,10 @@ def main() -> None:
                 if subtree is None:
                     raise ValueError(f"node_id {node_id!r} not found in assembly tree")
                 tree_nodes = subtree
+
+            # Remove display-only synthetic solid children so multi-solid weldments
+            # (e.g. Main Frame_Default) are meshed from their own XCAF label.
+            _strip_synthetic_solids(tree_nodes)
 
             from app.services.cnc_shape_analyser import _read_xcaf
             from app.pipeline.connection_detector import (
