@@ -4570,6 +4570,19 @@ export class AnalysisPage {
     _cncResultForItem(item) {
         if (!this._cncAnalysisResults) return null;
 
+        // A multi-solid SOLID node ("<parentRef>:s<N>") — resolve to the
+        // parent's solids[N] FIRST. The synthetic solid ref is not an XCAF
+        // label, so any direct entry under it is stale; the authoritative
+        // per-solid class lives in the parent result's solids[].
+        const sm = String(item.key).match(/^(.*):s(\d+)$/);
+        if (sm) {
+            const parentRes = this._cncAnalysisResults[sm[1]];
+            const idx = parseInt(sm[2], 10);
+            if (parentRes && Array.isArray(parentRes.solids) && parentRes.solids[idx]) {
+                return { result: parentRes.solids[idx], xcafRefId: sm[1], solidIdx: idx };
+            }
+        }
+
         // Direct lookup (single-solid part)
         const direct = this._cncAnalysisResults[item.key];
         if (direct) return { result: direct, xcafRefId: item.key, solidIdx: null };
