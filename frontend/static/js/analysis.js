@@ -626,6 +626,10 @@ export class AnalysisPage {
         // Show the "All Parts" button once the tree is available
         const partsBar = this.container.querySelector('#parts-list-bar');
         if (partsBar) partsBar.hidden = false;
+
+        // Seed the classification breakdown (restored project state will refresh
+        // it again once classifications are applied).
+        this._updateProgress();
     }
 
     /**
@@ -3223,24 +3227,56 @@ export class AnalysisPage {
         const progressEl = this.container.querySelector('#classification-progress');
         if (!progressEl) return;
 
-        // Build per-ref_id classification map (last classification wins per ref_id)
-        const refIdCl = new Map();
-        for (const [nodeId, action] of this.classifications) {
-            const refId = this._nodeRefMap.get(nodeId) || nodeId;
-            refIdCl.set(refId, action);
-        }
+        let cnc = 0, bo = 0, exc = 0, unclassified = 0;
+        const rows = Array.isArray(this._nativeBom) ? this._nativeBom : null;
 
-        let cnc = 0, bo = 0, exc = 0;
-        for (const action of refIdCl.values()) {
-            if (action === 'postprocess') cnc++;
-            else if (action === 'bought-out') bo++;
-            else if (action === 'exclude') exc++;
+        if (rows && rows.length) {
+            // Count one entry per unique prototype ref_id (the BOM unit), using
+            // the same resolver as the BOM so solid-keyed and inherited
+            // classifications are honoured. A ref is "classified" if any of its
+            // instances resolves; the unclassified tally is the completeness
+            // signal (0 ⇒ every fabricable part is triaged).
+            const refAction = new Map();  // ref → action | null (real action wins)
+            for (const row of rows) {
+                const nid = row.node_id;
+                if (!nid) continue;
+                const m = nid.match(/^(.*):s\d+$/);
+                const base = m ? m[1] : nid;
+                const ref = this._nodeRefMap?.get(base) || base;
+                const resolved = this._resolveClassification(nid);
+                const action = resolved ? (resolved.action || 'postprocess') : null;
+                if (!refAction.has(ref)) refAction.set(ref, action);
+                else if (action != null && refAction.get(ref) == null) refAction.set(ref, action);
+            }
+            for (const action of refAction.values()) {
+                if (action === 'postprocess') cnc++;
+                else if (action === 'bought-out') bo++;
+                else if (action === 'exclude') exc++;
+                else unclassified++;
+            }
+        } else {
+            // No BOM yet — legacy per-ref count from classifications (the
+            // unclassified denominator isn't known until the BOM exists).
+            const refIdCl = new Map();
+            for (const [nodeId, action] of this.classifications) {
+                refIdCl.set(this._nodeRefMap.get(nodeId) || nodeId, action);
+            }
+            for (const action of refIdCl.values()) {
+                if (action === 'postprocess') cnc++;
+                else if (action === 'bought-out') bo++;
+                else if (action === 'exclude') exc++;
+            }
         }
 
         const parts = [];
         if (cnc > 0) parts.push(`<span class="prog-cnc">${cnc} CNC</span>`);
         if (bo > 0)  parts.push(`<span class="prog-bo">${bo} BO</span>`);
         if (exc > 0) parts.push(`<span class="prog-exc">${exc} EXC</span>`);
+        if (unclassified > 0) {
+            parts.push(`<span class="prog-unc">${unclassified} unclassified</span>`);
+        } else if (rows && rows.length && (cnc + bo + exc) > 0) {
+            parts.push(`<span class="prog-done">✓ complete</span>`);
+        }
         progressEl.innerHTML = parts.length
             ? parts.join(' <span class="prog-sep">·</span> ')
             : '';

@@ -190,9 +190,16 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.35rem 0.25rem 0.35rem 0;
+    /* Pin to the top of the scrolling tree panel so the search box + the
+       classification breakdown stay visible while traversing the tree.
+       Negative margins make it full-bleed over the panel's 0.5rem padding. */
+    position: sticky;
+    top: -0.5rem;
+    z-index: 5;
+    background: #fff;
+    margin: -0.5rem -0.5rem 0.25rem;
+    padding: 0.5rem 0.5rem 0.35rem;
     border-bottom: 1px solid #e2e8f0;
-    margin-bottom: 0.25rem;
 }
 
 .tree-search-input {
@@ -222,6 +229,8 @@
 .prog-cnc  { color: var(--cad-primary); font-weight: 600; }
 .prog-bo   { color: #15803d;            font-weight: 600; }
 .prog-exc  { color: #a855f7;            font-weight: 600; }
+.prog-unc  { color: #b45309;            font-weight: 700; }  /* amber — work remaining */
+.prog-done { color: #15803d;            font-weight: 700; }  /* green — all triaged */
 .prog-sep  { color: var(--cad-muted); }
 
 /* ===== Assembly tree ===== */
