@@ -46,6 +46,11 @@ def classify_part(features: Optional[Dict[str, Any]],
     """
     f = features or {}
 
+    # 0. No solid geometry (part_no_solid / degenerate) — nothing to fabricate,
+    #    so route to EXCLUDE rather than the uncertain catch-all.
+    if not f.get("features_ok") or f.get("volume_mm3") is None:
+        return {"class": "EXCLUDE", "confidence": 0.90, "reason": "no solid geometry"}
+
     # 1. Known catalogue products are confidently bought-out (name-based).
     cp = match_catalogue_product(part_name)
     if cp:
