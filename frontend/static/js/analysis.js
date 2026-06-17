@@ -628,11 +628,30 @@ export class AnalysisPage {
         if (partsBar) partsBar.hidden = false;
     }
 
-    _renderNode(node, depth) {
+    /**
+     * Human-recognisable name for a tree node.  STEP single-part assemblies
+     * often wrap their geometry in a generic "SOLID"/"COMPOUND" leaf while the
+     * real name sits on the parent assembly.  For solid-bearing leaves with a
+     * generic name, fall back to the parent name; no-solid artifacts keep the
+     * generic name so they stay visually distinct from their solid sibling.
+     */
+    _displayNodeName(node, parentName) {
+        const GENERIC = this._genericLeafNames ||
+            (this._genericLeafNames = new Set(['solid', 'compound', 'shape', 'unnamed', '']));
+        const nm = (node.name || '').trim();
+        if (node.node_type !== 'part_no_solid'
+            && GENERIC.has(nm.toLowerCase())
+            && parentName && parentName.trim()) {
+            return parentName.trim();
+        }
+        return node.name || '';
+    }
+
+    _renderNode(node, depth, parentName = null) {
         const hasChildren = node.children && node.children.length > 0;
         const toggleClass = hasChildren ? 'expanded' : 'leaf';
         const childrenHtml = hasChildren
-            ? '<ul>' + node.children.map(c => this._renderNode(c, depth + 1)).join('') + '</ul>'
+            ? '<ul>' + node.children.map(c => this._renderNode(c, depth + 1, node.name)).join('') + '</ul>'
             : '';
 
         const badgeLabel = this._badgeLabel(node.node_type);
@@ -659,7 +678,7 @@ export class AnalysisPage {
             <li class="tree-node" data-node-id="${this._esc(node.id)}" data-node-type="${this._esc(node.node_type)}" data-node-name="${this._esc(node.name)}" data-ref-id="${this._esc(refId)}" data-chiral-key="${this._esc(chiralKey)}" data-is-mirrored="${isMirrored}" data-solid-count="${node.solid_count || 0}" data-depth="${depth}">
                 <div class="tree-node-row">
                     <button class="tree-toggle ${toggleClass}" aria-label="Toggle">\u25B6</button>
-                    <span class="tree-node-name">${this._esc(node.name)}</span>
+                    <span class="tree-node-name">${this._esc(this._displayNodeName(node, parentName))}</span>
                     ${instanceRef}
                     <span class="node-type-badge ${this._esc(node.node_type)}">${badgeLabel}</span>
                     ${mirroredBadge}
@@ -693,7 +712,7 @@ export class AnalysisPage {
      */
     _buildParentMap(nodes, parentName) {
         for (const node of nodes) {
-            this._parentMap.set(node.id, { name: node.name, parentName });
+            this._parentMap.set(node.id, { name: node.name, parentName, nodeType: node.node_type });
             // Also record nodeId → refId so BOM walk never
             // needs a DOM querySelector to resolve refId (fails for hidden nodes).
             if (node.ref_id) {
@@ -3582,6 +3601,22 @@ export class AnalysisPage {
         return nodeId;
     }
 
+    /**
+     * Recover a recognisable mark for a Full-BOM row whose stored mark is a
+     * generic SOLID/COMPOUND.  Looks up the node's real type + parent name from
+     * the tree so the parent-name fallback matches the tree view and the Excel
+     * export (and so empty no-solid artifacts keep their generic name).  Falls
+     * back to the stored mark for solid-split rows not present in _parentMap.
+     */
+    _bomRowDisplayMark(row) {
+        const info = this._parentMap?.get(row.node_id);
+        if (info) {
+            return this._displayNodeName(
+                { name: row.mark, node_type: info.nodeType }, info.parentName);
+        }
+        return row.mark || '';
+    }
+
     _nativeBomRow(row, cols) {
         const nodeId = row.node_id || '';
         const resolved = this._resolveClassification(nodeId);
@@ -3605,7 +3640,7 @@ export class AnalysisPage {
         }
 
         return `<tr data-node-id="${this._esc(nodeId)}">
-            <td>${this._esc(row.mark || '')}${cncHtml ? ' ' + cncHtml : ''}</td>
+            <td>${this._esc(this._bomRowDisplayMark(row))}${cncHtml ? ' ' + cncHtml : ''}</td>
             <td><span class="nb-entity">${this._esc(row.entity || '')}</span></td>
             <td>${this._esc(row.profile || '')}</td>
             <td>${this._esc(grade)}</td>
@@ -3877,7 +3912,7 @@ export class AnalysisPage {
                     this._csvField(r.guid ?? ''),
                     this._csvField(r.type_guid ?? ''),
                     this._csvField(r.entity ?? ''),
-                    this._csvField(r.mark ?? ''),
+                    this._csvField(this._bomRowDisplayMark(r)),
                     this._csvField(r.profile ?? ''),
                     this._csvField(r.material ?? ''),
                     this._csvField(r.grade ?? ''),
@@ -4177,8 +4212,10 @@ export class AnalysisPage {
                 }
 
             } else {
-                // part_single_solid / part_no_solid
-                this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
+                // part_single_solid / part_no_solid — recover the parent name
+                // for generic SOLID leaves (no-solid artifacts keep theirs).
+                this._bomUpsert(itemMap, refId, this._displayNodeName(node, parentName),
+                                node.id, isMirr, parentName);
             }
         }
     }

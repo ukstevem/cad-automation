@@ -21,6 +21,7 @@ from openpyxl.drawing.image import Image as XlImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.bom_builder import resolve_display_name
 from app.services.bom_manifest import (
     MANIFEST_HEADERS,
     _build_node_to_ref,
@@ -157,9 +158,14 @@ def _build_bom_data(cache: dict) -> dict:
             # the manifest and the NC1 quantity field.
             qty = (bom_assignments.get(ref_id) or {}).get("bom_total_qty", 1)
 
+        # Recover the parent assembly name for generic SOLID/COMPOUND leaves so
+        # the BOM is recognisable against the tree.  Excluded artifacts keep
+        # their generic name to stay distinct from their solid-bearing sibling.
+        display = name if action == "exclude" else resolve_display_name(name, parent)
+
         item = {
             "bom_item": (bom_assignments.get(ref_id) or {}).get("bom_item", ""),
-            "name": name,
+            "name": display,
             "ref_id": ref_id,
             "qty": qty,
             "parent": parent,

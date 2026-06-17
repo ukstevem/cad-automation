@@ -23,6 +23,28 @@ from typing import Any, Dict, List, Optional
 
 _STEP_LEAF_TYPES = ("part_single_solid", "part_multi_solid", "part_no_solid")
 
+# Generic leaf names emitted by STEP exporters when a single-part assembly wraps
+# its geometry in an unnamed SOLID/COMPOUND.  The recognisable name lives on the
+# parent assembly, so for these we fall back to the parent name (see
+# ``resolve_display_name``).
+_GENERIC_LEAF_NAMES = frozenset({"solid", "compound", "shape", "unnamed", ""})
+
+
+def resolve_display_name(
+    name: Optional[str], parent_name: Optional[str] = None
+) -> str:
+    """Return a human-recognisable mark for a part.
+
+    STEP single-part assemblies often look like ``Column Plate CP1 -> SOLID``:
+    the leaf carries a generic name (``SOLID``/``COMPOUND``) while the real name
+    sits on the parent assembly.  When the leaf name is generic and a parent
+    name is available, use the parent name; otherwise keep the leaf name.
+    """
+    leaf = (name or "").strip()
+    if leaf.lower() in _GENERIC_LEAF_NAMES and parent_name and parent_name.strip():
+        return parent_name.strip()
+    return name or ""
+
 
 def build_step_bom(
     tree: List[Dict[str, Any]],
@@ -142,12 +164,20 @@ def _placeholder_row(
     if not assembly_mark:
         assembly_mark = instance.get("parent_name")
 
+    # Keep the generic leaf name for no-solid artifacts (the empty COMPOUND
+    # sibling) so it stays distinct from its solid-bearing partner; for any
+    # other placeholder (e.g. bought-out parts) recover the parent name.
+    if node_type == "part_no_solid":
+        mark = instance.get("name")
+    else:
+        mark = resolve_display_name(instance.get("name"), assembly_mark)
+
     return {
         "node_id": instance.get("node_id"),
         "guid": None,
         "type_guid": None,
         "entity": entity,
-        "mark": instance.get("name"),
+        "mark": mark,
         "profile": "",
         "material": material,
         "grade": grade,
@@ -198,7 +228,9 @@ def _make_row(
         "guid": None,
         "type_guid": None,
         "entity": entity,
-        "mark": (instance.get("name") or "") + mark_suffix,
+        # Solid-bearing part: fall back to the parent assembly name when the
+        # leaf is a generic SOLID/COMPOUND so the mark is recognisable.
+        "mark": resolve_display_name(instance.get("name"), assembly_mark) + mark_suffix,
         "profile": profile,
         "material": material,
         "grade": grade,
