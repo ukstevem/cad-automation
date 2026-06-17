@@ -463,6 +463,12 @@ async def start_cnc_analysis(
         )
     if state == "stale-cnc" and force:
         _clear_cnc_outputs(filename, cache)
+        # Persist the wipe NOW. The worker subprocess re-reads the sidecar from
+        # disk and merges its results in; without this write the in-memory clear
+        # never lands, so orphaned stale refs (classified before a re-run, not in
+        # the current set) survive the merge and the run stays stuck in
+        # stale-cnc forever.
+        atomic_write_json(_analysis_json_path(filename), cache)
 
     # Canonical filter: for any classified refs that fall in the same
     # consolidation group, only the canonical (first) ref is analysed so the

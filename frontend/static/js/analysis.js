@@ -3543,7 +3543,11 @@ export class AnalysisPage {
             this._startConsolidation();
         });
         panel.querySelector('.native-bom-cnc-analyse-btn')?.addEventListener('click', () => {
-            this._startCncAnalysisFromNativeBom(false);
+            // On stale-cnc, force=true so the backend wipes the orphaned stale
+            // results + NC files and re-runs; otherwise it 409s and the stale
+            // banner never clears.
+            const force = this._cncState?.state === 'stale-cnc';
+            this._startCncAnalysisFromNativeBom(force);
         });
 
         panel.querySelectorAll('.nb-view-btn').forEach(btn => {
