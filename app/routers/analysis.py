@@ -14,6 +14,11 @@ import structlog
 
 from app.config import settings
 from app.services.bom_builder import build_step_bom
+from app.services.sidecar import (
+    SidecarCorruptError,
+    atomic_write_json,
+    load_sidecar,
+)
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker scripts
@@ -54,12 +59,15 @@ def _analysis_json_path(filename: str) -> Path:
 
 def _load_cache(filename: str) -> Optional[dict]:
     path = _analysis_json_path(filename)
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("cache_read_failed", filename=filename, error=str(e))
-    return None
+    try:
+        data = load_sidecar(path)
+    except SidecarCorruptError as e:
+        # Corrupt file has been moved aside (.corrupt) so it is preserved and
+        # the next write starts clean — treat as a cache miss so the analysis
+        # is regenerated rather than reading garbage or clobbering on write.
+        logger.warning("cache_read_failed", filename=filename, error=str(e))
+        return None
+    return data or None
 
 
 def _save_analysis(filename: str, analysis_result: dict):
@@ -67,12 +75,10 @@ def _save_analysis(filename: str, analysis_result: dict):
     path = _analysis_json_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+    # Raises SidecarCorruptError (preserving the bad file) rather than falling
+    # back to {} — that fallback would write back only this section and destroy
+    # every other section (analysis/project_state/cnc_*). Better to fail loudly.
+    existing = load_sidecar(path)
 
     existing["analysis"] = {
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
@@ -94,7 +100,7 @@ def _save_analysis(filename: str, analysis_result: dict):
             project_number=existing.get("cnc_project_number", ""),
         )
 
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    atomic_write_json(path, existing)
     logger.info("analysis_cached", filename=filename, path=str(path))
 
 
@@ -107,16 +113,14 @@ def _save_project_state(filename: str, state: dict):
     path = _analysis_json_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+    # Raises SidecarCorruptError (preserving the bad file) rather than falling
+    # back to {} — that fallback would write back only this section and destroy
+    # every other section (analysis/project_state/cnc_*). Better to fail loudly.
+    existing = load_sidecar(path)
 
     existing["project_state"] = state
     _embed_solid_children(existing)
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    atomic_write_json(path, existing)
 
 
 def _embed_solid_children(cache: dict):
@@ -165,12 +169,10 @@ def _save_consolidation(filename: str, result: dict):
     path = _analysis_json_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+    # Raises SidecarCorruptError (preserving the bad file) rather than falling
+    # back to {} — that fallback would write back only this section and destroy
+    # every other section (analysis/project_state/cnc_*). Better to fail loudly.
+    existing = load_sidecar(path)
 
     # Stamp the result so the CNC pipeline can detect when consolidation has
     # been re-run since the last analysis (stale-CNC state).
@@ -178,7 +180,7 @@ def _save_consolidation(filename: str, result: dict):
     result["consolidated_at"] = datetime.now(timezone.utc).isoformat()
 
     existing["consolidation"] = result
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    atomic_write_json(path, existing)
     logger.info(
         "consolidation_cached",
         filename=filename,

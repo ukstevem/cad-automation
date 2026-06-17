@@ -40,6 +40,11 @@ import structlog
 
 from app.config import settings
 from app.services.bom_builder import build_step_bom
+from app.services.sidecar import (
+    SidecarCorruptError,
+    atomic_write_json,
+    load_sidecar,
+)
 from app.services.bom_manifest import (
     canonical_ref_map,
     finalize_cnc_outputs,
@@ -85,12 +90,12 @@ def _cnc_out_dir(filename: str) -> Path:
 
 def _load_cache(filename: str) -> Optional[dict]:
     path = _analysis_json_path(filename)
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("cnc_cache_read_failed", filename=filename, error=str(e))
-    return None
+    try:
+        data = load_sidecar(path)
+    except SidecarCorruptError as e:
+        logger.warning("cnc_cache_read_failed", filename=filename, error=str(e))
+        return None
+    return data or None
 
 
 def _consolidation_state(cache: dict) -> str:
@@ -186,12 +191,10 @@ def _save_cnc_analysis(
     path = _analysis_json_path(filename)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+    # load_sidecar raises (preserving the bad file) on a corrupt sidecar rather
+    # than falling back to {} — the {} fallback is exactly what destroyed the
+    # analysis/project_state sections in run c25bf2c8 (2026-06-17).
+    existing: dict = load_sidecar(path)
 
     # Merge into existing results rather than replacing, so that partial results
     # already saved by the worker (progressive saving) are preserved for any
@@ -221,7 +224,7 @@ def _save_cnc_analysis(
     if native_bom:
         existing.setdefault("analysis", {})["native_bom"] = native_bom
 
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    atomic_write_json(path, existing)
     logger.info(
         "cnc_analysis_cached",
         filename=filename,
@@ -238,7 +241,7 @@ def _save_cnc_analysis(
         finalize_cnc_outputs(existing, out_dir)
         # Paths and hashes changed; re-serialise the sidecar before the
         # manifest builder reads it back.
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        atomic_write_json(path, existing)
     except Exception as e:
         logger.warning("cnc_finalize_failed", filename=filename, error=str(e))
 
@@ -494,9 +497,7 @@ async def start_cnc_analysis(
         # any drift (e.g. files left behind from a prior failed rename).
         try:
             finalize_cnc_outputs(cache, _cnc_out_dir(filename))
-            _analysis_json_path(filename).write_text(
-                json.dumps(cache, indent=2), encoding="utf-8"
-            )
+            atomic_write_json(_analysis_json_path(filename), cache)
             write_manifest_files(cache, _cnc_out_dir(filename))
         except Exception as e:
             logger.warning("cnc_resume_finalize_failed", filename=filename, error=str(e))
