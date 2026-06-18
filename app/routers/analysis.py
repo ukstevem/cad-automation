@@ -198,6 +198,7 @@ def _build_analysis_response(
     filename: str,
     analysis: dict,
     project_state: Optional[dict],
+    classification: Optional[dict] = None,
 ) -> dict:
     """Assemble the full successful analysis response dict."""
     response: dict = {
@@ -207,6 +208,11 @@ def _build_analysis_response(
     }
     if project_state:
         response["project_state"] = project_state
+    # The lightweight refined-class cache (ref_id → {refined_class, ...}). The
+    # frontend loads this so the BOM's Refined column + auto-classify reflect
+    # prior detection on reopen, instead of showing "—" until a re-detect.
+    if classification:
+        response["classification"] = classification
     return response
 
 
@@ -262,7 +268,8 @@ async def get_assembly_tree(filename: str) -> Dict[str, Any]:
     if cache and "analysis" in cache:
         logger.info("analysis_cache_hit", filename=filename)
         return _build_analysis_response(
-            filename, cache["analysis"], cache.get("project_state")
+            filename, cache["analysis"], cache.get("project_state"),
+            cache.get("classification"),
         )
 
     # --- Cache miss: check for an existing in-progress task ---
@@ -364,8 +371,10 @@ async def get_analysis_status(task_id: str) -> Dict[str, Any]:
     analysis = info.results  # dict returned by AssemblyAnalyzer.analyze()
     cache = _load_cache(info.filename)
     project_state = cache.get("project_state") if cache else None
+    classification = cache.get("classification") if cache else None
 
-    response = _build_analysis_response(info.filename, analysis, project_state)
+    response = _build_analysis_response(
+        info.filename, analysis, project_state, classification)
     # The frontend polls on status.status === 'completed' — make sure the field is present
     response["status"] = "completed"
     return response

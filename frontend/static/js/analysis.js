@@ -584,6 +584,15 @@ export class AnalysisPage {
         if (data.project_state) {
             this._restoreProjectState(data.project_state);
         }
+        // Seed the in-memory refined-class results from the persisted cache so
+        // the BOM's Refined column + auto-classify reflect prior detection
+        // immediately (otherwise everything shows "—" until a fresh re-detect).
+        if (data.classification && typeof data.classification === 'object') {
+            this._cncAnalysisResults = this._cncAnalysisResults || {};
+            for (const [ref, res] of Object.entries(data.classification)) {
+                if (res && !this._cncAnalysisResults[ref]) this._cncAnalysisResults[ref] = res;
+            }
+        }
         this._projectStateRestored = true;
         // Classify the (restored) frontier with the lightweight pass, then
         // auto-apply — runs ahead of any heavy CNC analysis.
