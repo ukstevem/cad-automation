@@ -301,6 +301,7 @@ export class AnalysisPage {
                     <div class="workspace-tree-panel">
                         <div class="tree-toolbar">
                             <input id="tree-search" type="search" placeholder="Filter parts…" class="tree-search-input">
+                            <button id="explode-all-btn" class="explode-all-btn" hidden></button>
                             <span id="classification-progress" class="classification-progress"></span>
                         </div>
                         <div id="assembly-tree-container" class="assembly-tree"></div>
@@ -376,6 +377,8 @@ export class AnalysisPage {
                 this._toggleGroupsPanel();
             } else if (e.target.closest('#viewer-maximize-btn')) {
                 this._toggleViewerMaximized();
+            } else if (e.target.id === 'explode-all-btn') {
+                this._explodeAll();
             }
         });
 
@@ -3379,6 +3382,22 @@ export class AnalysisPage {
             ? parts.join(' <span class="prog-sep">·</span> ')
             : '';
 
+        // "Explode all" button — shown only while collapsed assemblies remain.
+        const explodeAllBtn = this.container.querySelector('#explode-all-btn');
+        if (explodeAllBtn) {
+            if (this._explodingAll) {
+                explodeAllBtn.hidden = false;
+                explodeAllBtn.disabled = true;
+                explodeAllBtn.textContent = 'Exploding…';
+            } else if (explodable.length) {
+                explodeAllBtn.hidden = false;
+                explodeAllBtn.disabled = false;
+                explodeAllBtn.textContent = `⊕ Explode all (${explodable.length})`;
+            } else {
+                explodeAllBtn.hidden = true;
+            }
+        }
+
         const explodeChip = progressEl.querySelector('.prog-explode');
         if (explodeChip) {
             explodeChip.addEventListener('click', () => this._jumpToNextExplodable());
@@ -3433,6 +3452,55 @@ export class AnalysisPage {
         };
         walk(this._treeData);
         return out;
+    }
+
+    /**
+     * Explode every collapsed assembly that still hides unclassified parts,
+     * cascading into nested sub-assemblies, after an explicit warning. Each
+     * explode meshes that assembly's children (STL generation), so this can be
+     * heavy on large models — hence the confirmation. BO/EXC and catalogue
+     * bought-out units are skipped (handled as whole units).
+     */
+    async _explodeAll() {
+        if (this._explodingAll) return;
+        const initial = this._collectExplodableAssemblies();
+        if (!initial.length) return;
+        const hidden = initial.reduce((n, a) => n + a.count, 0);
+
+        const ok = confirm(
+            `Explode all ${initial.length} collapsed assemblies?\n\n`
+            + `This reveals ~${hidden} hidden part${hidden === 1 ? '' : 's'} and generates a 3D `
+            + `mesh for each one, cascading into nested sub-assemblies.\n\n`
+            + `⚠ On large models this can take several minutes and use significant CPU. `
+            + `Bought-out / excluded and catalogue (e.g. Unistrut) sub-assemblies are left collapsed.\n\n`
+            + `Continue?`
+        );
+        if (!ok) return;
+
+        this._explodingAll = true;
+        this._updateProgress();
+        try {
+            const treeEl = this.container.querySelector('#assembly-tree-container');
+            let guard = 0;
+            // Each wave explodes the current frontier; exploding marks nodes
+            // exploded synchronously, so the next wave's _collectExplodable…
+            // sees the newly-revealed nested assemblies. The inter-wave delay
+            // spreads the STL-generation load by tree level. Bounded by `guard`.
+            while (guard++ < 80) {
+                if (!this._explodingAll) break;  // allow cancel via re-render/teardown
+                const frontier = this._collectExplodableAssemblies();
+                if (!frontier.length) break;
+                for (const a of frontier) {
+                    if (this.explodedNodes.has(a.id)) continue;
+                    const li = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(a.id)}"]`);
+                    if (li) this._explodeNode(li);
+                }
+                await new Promise(r => setTimeout(r, 1200));
+            }
+        } finally {
+            this._explodingAll = false;
+            this._updateProgress();
+        }
     }
 
     /** Select + scroll to the next frontier assembly that needs exploding. */

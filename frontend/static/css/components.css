@@ -254,6 +254,22 @@
 /* Unexplode/collapse button mirrors the explode button styling */
 .btn-collapse { cursor: pointer; }
 
+/* "Explode all" toolbar button — shown only while collapsed assemblies remain */
+.explode-all-btn {
+    flex-shrink: 0;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.explode-all-btn:hover:not(:disabled) { background: #dbeafe; }
+.explode-all-btn:disabled { opacity: 0.6; cursor: default; }
+
 /* ===== Assembly tree ===== */
 .assembly-tree {
     font-size: 0.83rem;
