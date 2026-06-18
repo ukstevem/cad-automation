@@ -4746,6 +4746,14 @@ export class AnalysisPage {
         const { cncItems, boItems, unknownItems, excludedItems } = this._buildBOMItems();
         const totalClassified = cncItems.length + boItems.length + unknownItems.length + excludedItems.length;
 
+        // Persistent "needs CNC analysis" count: CNC-classified parts with no
+        // full analysis result yet (refined-only or none) — they sit in the BOM
+        // without dimensions/DXF and won't export properly until analysed.
+        const pendingAnalysis = [...cncItems, ...unknownItems].filter(it => {
+            const info = this._cncResultForItem(it);
+            return !info || info.result?.type == null;
+        }).length;
+
         // Build a ref_id → consolidation group lookup for merged display
         const refToGroup = new Map();
         if (consolidationGroups) {
@@ -4965,10 +4973,24 @@ export class AnalysisPage {
             </div>`;
         }
 
+        // Persistent prompt: CNC-classified parts not yet analysed (these have no
+        // dimensions/DXF and would export as "Unknown" until analysed). Shown
+        // even when the consolidation state is "fresh".
+        let pendingBanner = '';
+        if (pendingAnalysis > 0 && cncState !== 'missing') {
+            pendingBanner = `<div class="parts-list-state-banner pending">
+                <span>⚙ ${pendingAnalysis} CNC-classified part${pendingAnalysis === 1 ? '' : 's'} not yet analysed — run <strong>Analyse CNC</strong> to generate dimensions / DXF / NC1.</span>
+            </div>`;
+        }
+
+        const pendingChip = pendingAnalysis > 0
+            ? ` <span class="parts-list-pending-chip" title="CNC-classified parts with no analysis result yet">⚙ ${pendingAnalysis} to analyse</span>`
+            : '';
+
         panel.innerHTML = `
             <div class="parts-list-card">
                 <div class="parts-list-header">
-                    <span>BOM${totalClassified > 0 ? ' &middot; ' + totalClassified : ''}</span>
+                    <span>BOM${totalClassified > 0 ? ' &middot; ' + totalClassified : ''}${pendingChip}</span>
                     <div class="parts-list-header-actions">
                         ${consolidateBtn}
                         ${bomDlBtn}
@@ -4977,6 +4999,7 @@ export class AnalysisPage {
                     </div>
                 </div>
                 ${stateBanner}
+                ${pendingBanner}
                 <div class="parts-list-scroll">
                     <table class="parts-list-table">
                         <thead>

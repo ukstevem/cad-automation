@@ -1168,6 +1168,25 @@ details summary {
     border: 1px solid #fcd34d;
 }
 
+.parts-list-state-banner.pending {
+    background: #fff7ed;
+    color: #9a3412;
+    border: 1px solid #fdba74;
+}
+
+/* Persistent "N to analyse" chip in the BOM header */
+.parts-list-pending-chip {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0 6px;
+    border-radius: 4px;
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    color: #9a3412;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
 .parts-state-consolidate-btn {
     flex-shrink: 0;
     padding: 0.18rem 0.7rem !important;
