@@ -704,6 +704,10 @@ async def save_project_state(
         "stl_map": body.get("stl_map", {}),
         "solid_children": body.get("solid_children", {}),
         "groups": body.get("groups", {}),
+        # User overrides of the auto-detected refined sub-class, keyed by
+        # ref_id (single-solid) or "ref_id:sN" (a multi-solid sub-solid).
+        # Labelling only — does not regenerate NC1/DXF.
+        "refined_overrides": body.get("refined_overrides", {}),
     }
     _save_project_state(filename, state)
 

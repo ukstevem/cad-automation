@@ -1874,6 +1874,25 @@ details summary {
 .native-bom-table tr[data-node-id]:hover {
     background: #f1f5f9;
 }
+
+/* Editable refined sub-class dropdown */
+.nb-refined-select {
+    font-size: 0.78rem;
+    padding: 1px 4px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #fff;
+    color: var(--cad-text);
+    cursor: pointer;
+    max-width: 9rem;
+}
+.nb-refined-select:hover { border-color: var(--cad-primary); }
+/* User-overridden (differs from auto-detect) — amber ring + bold */
+.nb-refined-select.nb-refined-edited {
+    border-color: #b45309;
+    box-shadow: inset 0 0 0 1px #b45309;
+    font-weight: 600;
+}
 .nb-entity {
     display: inline-block;
     font-size: 0.75rem;

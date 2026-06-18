@@ -84,6 +84,33 @@ def _round(v, dp=1):
 # Data assembly — mirrors the frontend _downloadBOM logic
 # ---------------------------------------------------------------
 
+def _apply_refined_overrides(cnc_results: dict, overrides: dict) -> None:
+    """Overwrite refined_class on CNC results from user overrides (in place).
+
+    Keys are ``ref_id`` (single-solid) or ``ref_id:sN`` (a multi-solid
+    sub-solid).  A user override is authoritative, so refined_confidence is set
+    to 1.0 to clear the low-confidence review flag.  Mutates the request-local
+    cache only — never persisted, never touches the base ``type`` or NC files.
+    """
+    import re as _re
+    for key, code in (overrides or {}).items():
+        if not code:
+            continue
+        m = _re.match(r"^(.*):s(\d+)$", key)
+        if m:
+            ref, idx = m.group(1), int(m.group(2))
+            r = cnc_results.get(ref)
+            solids = r.get("solids") if isinstance(r, dict) else None
+            if solids and 0 <= idx < len(solids) and isinstance(solids[idx], dict):
+                solids[idx]["refined_class"] = code
+                solids[idx]["refined_confidence"] = 1.0
+        else:
+            r = cnc_results.get(key)
+            if isinstance(r, dict):
+                r["refined_class"] = code
+                r["refined_confidence"] = 1.0
+
+
 def _build_bom_data(cache: dict) -> dict:
     """
     Extract BOM items from the sidecar cache, applying consolidation
@@ -95,6 +122,13 @@ def _build_bom_data(cache: dict) -> dict:
     classifications: Dict[str, str] = cache.get("project_state", {}).get("classifications", {})
     stl_map_raw: Dict[str, str] = cache.get("project_state", {}).get("stl_map", {}) or {}
     consolidation: List[dict] = cache.get("consolidation", {}).get("part_groups", [])
+
+    # Apply user overrides of the auto-detected refined sub-class onto the
+    # (request-local) CNC results so the Refined Class column reflects them.
+    # Labelling only — base type/NC files are untouched.
+    _apply_refined_overrides(
+        cnc_results, cache.get("project_state", {}).get("refined_overrides", {})
+    )
 
     project_number = cache.get("cnc_project_number", "")
     steel_grade = cache.get("cnc_steel_grade", "")

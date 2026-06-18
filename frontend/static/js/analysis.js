@@ -19,6 +19,23 @@ export class AnalysisPage {
         /** @type {Map<string, string>} node id -> classification (postprocess / bought-out) */
         this.classifications = new Map();
 
+        /**
+         * @type {Map<string, string>} refined-class overrides, keyed by ref_id
+         * (single-solid) or "ref_id:sN" (a multi-solid sub-solid). Value is a
+         * refined code (PLATE/SECTION/FORMED_PLATE/BENT_SECTION/TUBE/unknown).
+         * Persisted under project_state.refined_overrides. Labelling only.
+         */
+        this._refinedOverrides = new Map();
+        /** Refined sub-class vocabulary offered to the user (code → label). */
+        this._refinedOptions = [
+            ['PLATE', 'Plate'],
+            ['SECTION', 'Section'],
+            ['FORMED_PLATE', 'Formed Plate'],
+            ['BENT_SECTION', 'Formed Section'],
+            ['TUBE', 'Tube/Pipe'],
+            ['unknown', 'Unknown'],
+        ];
+
         /** @type {Map<string, string>} nodeId -> STL URL */
         this.stlMap = new Map();
 
@@ -2993,6 +3010,13 @@ export class AnalysisPage {
             }
         }
 
+        // Restore refined sub-class overrides
+        if (state.refined_overrides && typeof state.refined_overrides === 'object') {
+            for (const [key, code] of Object.entries(state.refined_overrides)) {
+                if (code) this._refinedOverrides.set(key, code);
+            }
+        }
+
         // Restore custom groups
         if (state.groups && typeof state.groups === 'object') {
             for (const [gid, g] of Object.entries(state.groups)) {
@@ -3057,6 +3081,7 @@ export class AnalysisPage {
             stl_map: Object.fromEntries(this.stlMap),
             solid_children: Object.fromEntries(this._solidChildrenCache),
             groups: Object.fromEntries(this.groups),
+            refined_overrides: Object.fromEntries(this._refinedOverrides),
         };
 
         try {
@@ -3492,6 +3517,7 @@ export class AnalysisPage {
                     ${hasPour      ? '<th>Pour</th>'   : ''}
                     ${hasFinish    ? '<th>Finish</th>' : ''}
                     ${hasPartClass ? '<th>Class</th>'  : ''}
+                    <th>Refined</th>
                     <th>Classification</th>
                 </tr>`;
             body = rows.map(r => this._nativeBomRow(r, {
@@ -3615,9 +3641,20 @@ export class AnalysisPage {
         });
 
         panel.querySelector('tbody')?.addEventListener('click', (e) => {
+            // Don't navigate when interacting with the refined-class dropdown.
+            if (e.target.closest('.nb-refined-select')) return;
             const tr = e.target.closest('tr[data-node-id]');
             if (!tr) return;
             this._selectAndScrollToNode(this._bomNodeIdToTreeNodeId(tr.dataset.nodeId));
+        });
+
+        panel.querySelector('tbody')?.addEventListener('change', (e) => {
+            const sel = e.target.closest('.nb-refined-select');
+            if (!sel) return;
+            const tr = sel.closest('tr[data-node-id]');
+            const row = tr ? { node_id: tr.dataset.nodeId } : null;
+            const auto = row ? this._autoRefinedForRow(row) : '';
+            this._setRefinedOverride(sel.dataset.refinedKey, sel.value, auto);
         });
     }
 
@@ -3653,6 +3690,75 @@ export class AnalysisPage {
         return row.mark || '';
     }
 
+    /**
+     * Override key for a BOM row's refined sub-class: the prototype ref_id
+     * (single-solid) or "ref_id:sN" (a multi-solid sub-solid).  Mirrors the
+     * key the backend (_apply_refined_overrides) uses, so an override set here
+     * resolves against cnc_analysis[ref] / .solids[N] on export.
+     */
+    _refinedKeyForRow(row) {
+        const nid = row.node_id || '';
+        const m = nid.match(/^(.*):s(\d+)$/);
+        const base = m ? m[1] : nid;
+        const ref = this._nodeRefMap?.get(base) || base;
+        return m ? `${ref}:s${m[2]}` : ref;
+    }
+
+    /** Auto-detected refined class for a row (from its CNC result), or ''. */
+    _autoRefinedForRow(row) {
+        const info = this._cncResultForNativeBomRow(row);
+        return (info && info.result && info.result.refined_class) || '';
+    }
+
+    /** Effective refined code = user override if set, else the auto class. */
+    _effectiveRefinedForRow(row) {
+        return this._refinedOverrides.get(this._refinedKeyForRow(row))
+            || this._autoRefinedForRow(row) || '';
+    }
+
+    /** Human label for a refined code (falls back to the raw code). */
+    _refinedLabel(code) {
+        if (!code) return '';
+        const hit = this._refinedOptions.find(([c]) => c.toLowerCase() === code.toLowerCase());
+        return hit ? hit[1] : code;
+    }
+
+    /** Editable <select> for a row's refined sub-class (per-instance view). */
+    _refinedSelectHtml(row) {
+        const key = this._refinedKeyForRow(row);
+        const auto = this._autoRefinedForRow(row);
+        const override = this._refinedOverrides.get(key) || '';
+        const current = (override || auto || '').toLowerCase();
+        const blank = current ? '' : '<option value="" selected>—</option>';
+        const opts = this._refinedOptions.map(([code, label]) => {
+            const sel = code.toLowerCase() === current ? ' selected' : '';
+            return `<option value="${code}"${sel}>${this._esc(label)}</option>`;
+        }).join('');
+        const editedCls = override ? ' nb-refined-edited' : '';
+        const title = auto ? `auto-detected: ${this._refinedLabel(auto)}` : 'no auto-detection';
+        return `<select class="nb-refined-select${editedCls}" data-refined-key="${this._esc(key)}" title="${this._esc(title)}">${blank}${opts}</select>`;
+    }
+
+    /** Apply a refined-class override from the BOM dropdown and persist it. */
+    _setRefinedOverride(key, code, auto) {
+        if (!key) return;
+        // Picking the auto-detected value clears the override (back to auto).
+        if (!code || (auto && code.toLowerCase() === auto.toLowerCase())) {
+            this._refinedOverrides.delete(key);
+        } else {
+            this._refinedOverrides.set(key, code);
+        }
+        const isOverride = this._refinedOverrides.has(key);
+        // Reflect on every row sharing this ref (multiple instances/solids).
+        const panel = this.container?.querySelector('#native-bom-panel');
+        panel?.querySelectorAll(`.nb-refined-select[data-refined-key="${CSS.escape(key)}"]`)
+            .forEach(s => {
+                s.value = code || '';
+                s.classList.toggle('nb-refined-edited', isOverride);
+            });
+        this._debouncedSave();
+    }
+
     _nativeBomRow(row, cols) {
         const nodeId = row.node_id || '';
         const resolved = this._resolveClassification(nodeId);
@@ -3665,9 +3771,9 @@ export class AnalysisPage {
         const grade = row.grade || row.material || '';
 
         // CNC badge + DXF/NC1 download link when a CNC result exists for the
-        // row's ref_id.  Rendered inline next to the part mark to match the
-        // Standard BOM layout.
-        const cncHtml = this._nativeBomCncHtml(row, this._currentFilename);
+        // row's ref_id.  The refined badge is omitted here — the editable
+        // "Refined" column is authoritative in the per-instance view.
+        const cncHtml = this._nativeBomCncHtml(row, this._currentFilename, { omitRefined: true });
 
         let groupCell = '';
         if (cols.hasGroups) {
@@ -3688,6 +3794,7 @@ export class AnalysisPage {
             ${cols.hasPour      ? `<td>${this._esc(row.pour ?? '')}</td>` : ''}
             ${cols.hasFinish    ? `<td>${this._esc(row.finish ?? '')}</td>` : ''}
             ${cols.hasPartClass ? `<td>${this._esc(row.part_class ?? '')}</td>` : ''}
+            <td>${this._refinedSelectHtml(row)}</td>
             <td>${displayedCls}</td>
         </tr>`;
     }
@@ -3937,7 +4044,7 @@ export class AnalysisPage {
                 'length_mm', 'weight_kg', 'volume_m3', 'area_m2',
                 'assembly_mark', 'assembly_position',
                 'pour', 'phase', 'finish', 'part_class',
-                'source', 'classification', 'group',
+                'source', 'classification', 'refined_class', 'group',
             ];
             lines = [headers.join(',')];
             for (const r of rows) {
@@ -3964,6 +4071,7 @@ export class AnalysisPage {
                     this._csvField(r.part_class ?? ''),
                     this._csvField(r.source ?? ''),
                     this._csvField(this._classificationLabelPlain(resolved)),
+                    this._csvField(this._refinedLabel(this._effectiveRefinedForRow(r))),
                     this._csvField(grp ? grp.groupPath : ''),
                 ].join(','));
             }
@@ -4031,6 +4139,7 @@ export class AnalysisPage {
                 rows: rows.map(r => ({
                     ...r,
                     classification: this._classificationLabelPlain(this._resolveClassification(r.node_id)),
+                    refined_class: this._refinedLabel(this._effectiveRefinedForRow(r)),
                     group: this._groupContainingNodeId(r.node_id)?.groupPath || null,
                 })),
             };
@@ -4712,10 +4821,10 @@ export class AnalysisPage {
     }
 
     /** Native-BOM counterpart of _cncResultHtml: badge + optional DXF/NC1 link. */
-    _nativeBomCncHtml(row, filename) {
+    _nativeBomCncHtml(row, filename, opts = {}) {
         const info = this._cncResultForNativeBomRow(row);
         if (!info) return '';
-        return this._renderCncInfo(info, filename);
+        return this._renderCncInfo(info, filename, opts);
     }
 
     /**
@@ -4728,7 +4837,7 @@ export class AnalysisPage {
     }
 
     /** Shared render path used by both Standard and Full BOM for CNC badges. */
-    _renderCncInfo(info, filename) {
+    _renderCncInfo(info, filename, opts = {}) {
         if (!info) return '';
         const { result, xcafRefId, solidIdx } = info;
         let badge = '';
@@ -4751,7 +4860,7 @@ export class AnalysisPage {
         const refined = result.refined_class || '';
         const rConf = result.refined_confidence;
         let refinedBadge = '';
-        if (refined) {
+        if (refined && !opts.omitRefined) {
             const colors = {
                 section: '#e6a13c', plate: '#4caf50', formed_plate: '#e3496b',
                 bent_section: '#46c2c2', bought_out: '#8a7bd8', exclude: '#777',
