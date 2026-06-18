@@ -301,6 +301,7 @@ export class AnalysisPage {
                     <div class="workspace-tree-panel">
                         <div class="tree-toolbar">
                             <input id="tree-search" type="search" placeholder="Filter parts…" class="tree-search-input">
+                            <span id="detecting-indicator" class="detecting-indicator" hidden><span class="detecting-spinner"></span>Detecting…</span>
                             <button id="explode-all-btn" class="explode-all-btn" hidden></button>
                             <span id="classification-progress" class="classification-progress"></span>
                         </div>
@@ -3282,6 +3283,7 @@ export class AnalysisPage {
         const refIds = [...refs.keys()].filter(r => !this._classifyInFlight.has(r));
         if (refIds.length) {
             refIds.forEach(r => this._classifyInFlight.add(r));
+            this._updateDetectingIndicator();
             const memberIds = {};
             for (const r of refIds) memberIds[r] = refs.get(r);
             try {
@@ -3297,11 +3299,23 @@ export class AnalysisPage {
                 console.warn('classifyFrontier failed:', e);
             } finally {
                 refIds.forEach(r => this._classifyInFlight.delete(r));
+                this._updateDetectingIndicator();
             }
         }
         // Always apply — an explode may reveal solids whose classes come from a
         // parent that is already cached (no new POST needed).
         this._autoClassifyFromRefinedResults();
+    }
+
+    /**
+     * Show/hide the "Detecting…" indicator based on whether any auto-detect
+     * (classify) request is currently in flight. Auto-detect runs as
+     * synchronous bursts, so this is the only signal that it's working.
+     */
+    _updateDetectingIndicator() {
+        const el = this.container?.querySelector('#detecting-indicator');
+        if (!el) return;
+        el.hidden = !(this._classifyInFlight && this._classifyInFlight.size > 0);
     }
 
     // ---------------------------------------------------------------
