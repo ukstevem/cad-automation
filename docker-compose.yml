@@ -18,6 +18,10 @@ services:
       - ./outputs:/app/outputs
     environment:
       - PYTHONUNBUFFERED=1
+      # uvicorn --reload uses watchfiles, whose inotify events don't fire across
+      # the Windows Docker Desktop bind mount — backend edits were silently NOT
+      # picked up until a manual restart. Force polling so --reload works.
+      - WATCHFILES_FORCE_POLLING=true
       - UPLOAD_DIR=/app/uploads
       - TEMP_DIR=/app/temp
       - OUTPUT_DIR=/app/outputs
