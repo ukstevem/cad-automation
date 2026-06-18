@@ -4054,7 +4054,13 @@ export class AnalysisPage {
     _refinedSelectCore(key, auto) {
         const override = this._refinedOverrides.get(key) || '';
         const current = (override || auto || '').toLowerCase();
-        const blank = current ? '' : '<option value="" selected>—</option>';
+        // Only highlight a value that's actually a fabrication sub-class. Codes
+        // like EXCLUDE / BOUGHT_OUT (the auto-detector's verdict for no-solid or
+        // catalogue parts) aren't in this dropdown — without this the <select>
+        // would silently fall back to its first option ("Plate"), making an
+        // excluded no-solid part read as a plate. Show "—" for those.
+        const matched = this._refinedOptions.some(([code]) => code.toLowerCase() === current);
+        const blank = matched ? '' : '<option value="" selected>—</option>';
         const opts = this._refinedOptions.map(([code, label]) => {
             const sel = code.toLowerCase() === current ? ' selected' : '';
             return `<option value="${code}"${sel}>${this._esc(label)}</option>`;
