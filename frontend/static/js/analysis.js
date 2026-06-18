@@ -3685,7 +3685,13 @@ export class AnalysisPage {
             this.api.getCncResult(filename)
                 .then(resp => {
                     if (resp?.results) {
-                        this._cncAnalysisResults = resp.results;
+                        // Merge — never replace. A wholesale assign here wiped the
+                        // refined-class cache loaded at analysis open (resp.results
+                        // is {} until CNC analysis has run), leaving the BOM
+                        // Refined column blank. Real CNC results override the
+                        // lightweight refined entries for the same ref.
+                        this._cncAnalysisResults = Object.assign(
+                            {}, this._cncAnalysisResults || {}, resp.results);
                         this._cncAnalysing = false;
                     }
                 }),
@@ -3733,7 +3739,10 @@ export class AnalysisPage {
             this._cncLoading = true;
             this.api.getCncResult(filename)
                 .then(resp => {
-                    if (resp?.results) this._cncAnalysisResults = resp.results;
+                    if (resp?.results) {
+                        this._cncAnalysisResults = Object.assign(
+                            {}, this._cncAnalysisResults || {}, resp.results);
+                    }
                     if (panel && !panel.hidden) this._renderNativeBom();
                 })
                 .catch(() => {})
