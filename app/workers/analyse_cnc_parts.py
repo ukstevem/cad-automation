@@ -21,6 +21,7 @@ uvicorn remains fully responsive while geometry analysis runs.
 import faulthandler
 import gc
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -80,15 +81,28 @@ def main() -> None:
         Progressive saving ensures partial progress survives a timeout or crash.
         Only the current ref_id is updated; all other sidecar sections are
         preserved (assembly analysis, project state, consolidation, etc.).
+
+        Safety (run c2c2ac88, 2026-06-18): NEVER fall back to ``{}`` on a parse
+        error — that rewrites the whole file with only ``cnc_analysis`` and
+        destroys ``analysis``/``project_state``. On any unreadable sidecar we
+        skip this save (refuse to clobber). Writes are atomic (temp + replace).
         """
         path = Path(analysis_json_path)
         try:
             existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+        except json.JSONDecodeError as e:
+            print(f"WARNING: sidecar unparseable — skipping partial save for {ref_id}: {e}",
+                  file=sys.stderr)
+            return
+        except OSError as e:
+            print(f"WARNING: sidecar read failed — skipping partial save for {ref_id}: {e}",
+                  file=sys.stderr)
+            return
         existing.setdefault("cnc_analysis", {})[ref_id] = result
+        tmp = path.with_name(path.name + ".tmp")
         try:
-            path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
         except OSError as e:
             print(f"WARNING: could not write partial result for {ref_id}: {e}", file=sys.stderr)
 

@@ -367,9 +367,22 @@ async def classify_parts(filename: str, body: Dict[str, Any] = Body(...)) -> Dic
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
             raise HTTPException(status_code=500,
                                 detail={"error": f"Classify worker exit {proc.returncode}: {stderr[:300]}"})
-        # Worker saved progressively to the sidecar; parse stdout for the results.
+        # The worker no longer writes the sidecar (that subprocess race destroyed
+        # analysis/project_state on run c2c2ac88). Parse its stdout and persist
+        # the new results here, via the safe atomic helpers, preserving every
+        # other section. On a corrupt sidecar we refuse to write (never clobber).
         json_line = next((l for l in stdout.splitlines() if l.strip().startswith("{")), "{}")
-        classification.update(json.loads(json_line).get("results", {}))
+        new_results = json.loads(json_line).get("results", {})
+        classification.update(new_results)
+        if new_results:
+            sidecar_path = _analysis_json_path(filename)
+            try:
+                existing = load_sidecar(sidecar_path)
+                existing.setdefault("classification", {}).update(new_results)
+                atomic_write_json(sidecar_path, existing)
+            except SidecarCorruptError as exc:
+                logger.error("classify_persist_skipped_corrupt",
+                             filename=filename, error=str(exc))
 
     return {"filename": filename,
             "results": {r: _cached(r) or classification.get(r) for r in ref_ids}}

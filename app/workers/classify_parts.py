@@ -10,8 +10,14 @@ tree) via ``classify_ref`` — WITHOUT generating any NC1/DXF.  This is the chea
 pass that assists the top-down triage before the heavy CNC analysis runs.
 
 Prints ``{"results": {ref_id: {refined_class, refined_confidence, ...}}}`` to
-stdout.  Results are also saved progressively into the sidecar's
-``classification`` key so partial progress survives a timeout/crash.
+stdout.  The CALLER (the classify endpoint) persists these into the sidecar's
+``classification`` key via the safe, atomic sidecar helpers.
+
+This worker must NEVER write the sidecar itself: as a subprocess it raced with
+the FastAPI process's writes and, on a corrupt/partial read, fell back to ``{}``
+and wrote back only its own section — destroying ``analysis`` + ``project_state``
+(run c2c2ac88, 2026-06-18). Persistence now happens once, in the parent, through
+``load_sidecar``/``atomic_write_json``.
 
 Same OCC-subprocess discipline as analyse_cnc_parts.py (stderr-only logging,
 project root on sys.path, 64 MB-stack thread).
@@ -59,17 +65,8 @@ def main() -> None:
     result_holder: list = [None]
     error_holder: list = [None]
 
-    def _save_partial(ref_id: str, result: dict) -> None:
-        path = Path(analysis_json_path)
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (json.JSONDecodeError, OSError):
-            existing = {}
-        existing.setdefault("classification", {})[ref_id] = result
-        try:
-            path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        except OSError as e:
-            print(f"WARNING: could not write classification for {ref_id}: {e}", file=sys.stderr)
+    # NOTE: this worker deliberately does NOT write the sidecar — see the module
+    # docstring. The parent endpoint persists the returned results safely.
 
     def run() -> None:
         try:
@@ -92,11 +89,6 @@ def main() -> None:
                     r = {"refined_class": None, "error": str(exc)}
                 results[ref_id] = r
                 gc.collect()
-                try:
-                    _save_partial(ref_id, r)
-                except Exception as save_exc:
-                    print(f"WARNING: _save_partial failed for {ref_id}: {save_exc}",
-                          file=sys.stderr)
 
             result_holder[0] = {"results": results}
         except Exception as exc:
