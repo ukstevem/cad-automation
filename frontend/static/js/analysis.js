@@ -3651,10 +3651,8 @@ export class AnalysisPage {
         panel.querySelector('tbody')?.addEventListener('change', (e) => {
             const sel = e.target.closest('.nb-refined-select');
             if (!sel) return;
-            const tr = sel.closest('tr[data-node-id]');
-            const row = tr ? { node_id: tr.dataset.nodeId } : null;
-            const auto = row ? this._autoRefinedForRow(row) : '';
-            this._setRefinedOverride(sel.dataset.refinedKey, sel.value, auto);
+            const key = sel.dataset.refinedKey;
+            this._setRefinedOverride(key, sel.value, this._autoRefinedForKey(key));
         });
     }
 
@@ -3710,6 +3708,28 @@ export class AnalysisPage {
         return (info && info.result && info.result.refined_class) || '';
     }
 
+    /** Auto-detected refined class for a Standard-BOM item, or ''. */
+    _autoRefinedForItem(item) {
+        const info = this._cncResultForItem(item);
+        return (info && info.result && info.result.refined_class) || '';
+    }
+
+    /**
+     * Auto-detected refined class for an override key (ref_id or ref_id:sN).
+     * Lets a change-handler recover the auto value without rebuilding the row.
+     */
+    _autoRefinedForKey(key) {
+        if (!this._cncAnalysisResults || !key) return '';
+        const m = String(key).match(/^(.*):s(\d+)$/);
+        if (m) {
+            const pr = this._cncAnalysisResults[m[1]];
+            const s = pr && Array.isArray(pr.solids) ? pr.solids[parseInt(m[2], 10)] : null;
+            return (s && s.refined_class) || '';
+        }
+        const r = this._cncAnalysisResults[key];
+        return (r && r.refined_class) || '';
+    }
+
     /** Effective refined code = user override if set, else the auto class. */
     _effectiveRefinedForRow(row) {
         return this._refinedOverrides.get(this._refinedKeyForRow(row))
@@ -3723,10 +3743,8 @@ export class AnalysisPage {
         return hit ? hit[1] : code;
     }
 
-    /** Editable <select> for a row's refined sub-class (per-instance view). */
-    _refinedSelectHtml(row) {
-        const key = this._refinedKeyForRow(row);
-        const auto = this._autoRefinedForRow(row);
+    /** Build the editable refined <select> for an override key + auto value. */
+    _refinedSelectCore(key, auto) {
         const override = this._refinedOverrides.get(key) || '';
         const current = (override || auto || '').toLowerCase();
         const blank = current ? '' : '<option value="" selected>—</option>';
@@ -3739,7 +3757,17 @@ export class AnalysisPage {
         return `<select class="nb-refined-select${editedCls}" data-refined-key="${this._esc(key)}" title="${this._esc(title)}">${blank}${opts}</select>`;
     }
 
-    /** Apply a refined-class override from the BOM dropdown and persist it. */
+    /** Editable refined <select> for a Full-BOM (native_bom) row. */
+    _refinedSelectHtml(row) {
+        return this._refinedSelectCore(this._refinedKeyForRow(row), this._autoRefinedForRow(row));
+    }
+
+    /** Editable refined <select> for a Standard-BOM item (key === XCAF ref). */
+    _refinedSelectForItem(item) {
+        return this._refinedSelectCore(item.key, this._autoRefinedForItem(item));
+    }
+
+    /** Apply a refined-class override from a BOM dropdown and persist it. */
     _setRefinedOverride(key, code, auto) {
         if (!key) return;
         // Picking the auto-detected value clears the override (back to auto).
@@ -3749,9 +3777,9 @@ export class AnalysisPage {
             this._refinedOverrides.set(key, code);
         }
         const isOverride = this._refinedOverrides.has(key);
-        // Reflect on every row sharing this ref (multiple instances/solids).
-        const panel = this.container?.querySelector('#native-bom-panel');
-        panel?.querySelectorAll(`.nb-refined-select[data-refined-key="${CSS.escape(key)}"]`)
+        // Reflect on every select sharing this ref across BOTH BOM panels
+        // (Standard + Full) — multiple instances/solids share one ref.
+        this.container?.querySelectorAll(`.nb-refined-select[data-refined-key="${CSS.escape(key)}"]`)
             .forEach(s => {
                 s.value = code || '';
                 s.classList.toggle('nb-refined-edited', isOverride);
@@ -4465,9 +4493,11 @@ export class AnalysisPage {
                         const cncHtml = isCnc && members[0]
                             ? this._cncResultHtml(members[0], filename) : '';
                         const grpNid = members[0]?.nodeIds?.[0] || '';
+                        const grpRefined = members[0] ? this._refinedSelectForItem(members[0]) : '';
                         merged.push(`<tr data-bom-node-id="${grpNid}">
                             <td>${this._esc(g.canonical_name)}${mergeTag}${cncHtml ? ' ' + cncHtml : ''}</td>
                             <td class="parts-list-qty">${qty}${mirrorNote}</td>
+                            <td class="parts-list-refined">${grpRefined}</td>
                             <td class="parts-list-parents">${parentsCells}</td>
                         </tr>`);
                     } else {
@@ -4546,31 +4576,31 @@ export class AnalysisPage {
         let tbody = '';
         if (unknownItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-unknown">
-                <td colspan="3">\u26a0 Unmatched Sections &middot; ${unknownItems.length} — profile not in library</td>
+                <td colspan="4">\u26a0 Unmatched Sections &middot; ${unknownItems.length} — profile not in library</td>
             </tr>`;
             tbody += renderRows(unknownItems, true);
         }
         if (cncItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-pp">
-                <td colspan="2">Post Process &middot; ${cncItems.length}</td>
+                <td colspan="3">Post Process &middot; ${cncItems.length}</td>
                 <td class="parts-list-section-action">${analyseBtn}${dxfZipLink}${nc1ZipLink}</td>
             </tr>`;
             tbody += renderRows(cncItems, true);
         }
         if (boItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-bo">
-                <td colspan="3">Bought Out &middot; ${boItems.length}</td>
+                <td colspan="4">Bought Out &middot; ${boItems.length}</td>
             </tr>`;
             tbody += renderRows(boItems, false);
         }
         if (excludedItems.length > 0) {
             tbody += `<tr class="parts-list-section-header parts-list-section-exc">
-                <td colspan="3">Excluded &middot; ${excludedItems.length}</td>
+                <td colspan="4">Excluded &middot; ${excludedItems.length}</td>
             </tr>`;
             tbody += renderRows(excludedItems, false);
         }
         if (totalClassified === 0) {
-            tbody = `<tr><td colspan="3" class="parts-list-empty-msg">No items classified yet — use CNC / BO / EXC buttons in the tree.</td></tr>`;
+            tbody = `<tr><td colspan="4" class="parts-list-empty-msg">No items classified yet — use CNC / BO / EXC buttons in the tree.</td></tr>`;
         }
 
         const consolidateBtn = this._consolidating
@@ -4634,6 +4664,7 @@ export class AnalysisPage {
                             <tr>
                                 <th>Part</th>
                                 <th class="parts-list-qty">Qty</th>
+                                <th>Refined</th>
                                 <th class="parts-list-used-in-header">Used In</th>
                             </tr>
                         </thead>
@@ -4689,8 +4720,18 @@ export class AnalysisPage {
             this._renderCuttingList();
         }
 
+        // Refined sub-class dropdown → store + persist the override
+        panel.querySelector('.parts-list-table tbody')?.addEventListener('change', (e) => {
+            const sel = e.target.closest('.nb-refined-select');
+            if (!sel) return;
+            const key = sel.dataset.refinedKey;
+            this._setRefinedOverride(key, sel.value, this._autoRefinedForKey(key));
+        });
+
         // Click a BOM row → select + scroll to the first occurrence in the tree
         panel.querySelector('.parts-list-table tbody')?.addEventListener('click', (e) => {
+            // Don't navigate when interacting with the refined-class dropdown.
+            if (e.target.closest('.nb-refined-select')) return;
             const tr = e.target.closest('tr[data-bom-node-id]');
             if (!tr) return;
             const nodeId = tr.dataset.bomNodeId;
@@ -4731,6 +4772,7 @@ export class AnalysisPage {
         return `<tr data-bom-node-id="${nid}">
             <td>${this._esc(item.name)}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
+            <td class="parts-list-refined">${this._refinedSelectForItem(item)}</td>
             <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
         </tr>`;
     }
@@ -4743,6 +4785,7 @@ export class AnalysisPage {
         return `<tr data-bom-node-id="${nid}">
             <td>${this._esc(item.name)}${cncHtml ? ' ' + cncHtml : ''}</td>
             <td class="parts-list-qty">${item.qty}${mirrorNote}</td>
+            <td class="parts-list-refined">${this._refinedSelectForItem(item)}</td>
             <td class="parts-list-parents">${this._parentCellsHtml(item)}</td>
         </tr>`;
     }
