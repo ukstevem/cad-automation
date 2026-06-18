@@ -427,7 +427,10 @@ export class ApiClient {
     }
 
     async _get(path) {
-        const res = await fetch(`${this.baseUrl}${path}`);
+        // no-store: API responses are dynamic — never serve a stale cached copy
+        // (a cached /analysis/assembly response once hid the newly-added
+        // classification field even after a hard refresh).
+        const res = await fetch(`${this.baseUrl}${path}`, { cache: 'no-store' });
         if (!res.ok) throw await this._handleError(res);
         return res.json();
     }

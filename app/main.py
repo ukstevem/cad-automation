@@ -86,6 +86,10 @@ async def _revalidate_static_assets(request: Request, call_next):
     path = request.url.path
     if path.startswith("/static/") and path.endswith((".js", ".css")):
         response.headers["Cache-Control"] = "no-cache"
+    elif path.startswith("/api/"):
+        # Dynamic JSON — never cache (a cached /analysis/assembly response once
+        # hid the newly-added classification field even after a hard refresh).
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
