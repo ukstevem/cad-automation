@@ -253,6 +253,18 @@
 .prog-unc  { color: #b45309;            font-weight: 700; }  /* amber — work remaining */
 .prog-done { color: #15803d;            font-weight: 700; }  /* green — all triaged */
 .prog-sep  { color: var(--cad-muted); }
+/* Clickable "N to review" chip — jumps to the next undetermined exposed part */
+.prog-review {
+    color: #9a3412;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid #fed7aa;
+    background: #fff7ed;
+    border-radius: 4px;
+    padding: 0 6px;
+}
+.prog-review:hover { background: #ffedd5; }
+
 /* Clickable "N to explode" chip — jumps to the next collapsed assembly */
 .prog-explode {
     color: #1d4ed8;

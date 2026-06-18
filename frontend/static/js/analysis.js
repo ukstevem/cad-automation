@@ -3381,6 +3381,16 @@ export class AnalysisPage {
             parts.push(`<span class="prog-done">✓ complete</span>`);
         }
 
+        // Exposed parts that still need a human decision (auto-detect was
+        // uncertain / low-confidence, or never determined them). These are
+        // classifiable right now — surface a chip that jumps to the next one.
+        const review = this._collectReviewItems();
+        if (review.length) {
+            parts.push(`<span class="prog-review" role="button" tabindex="0" `
+                + `title="${review.length} exposed part${review.length === 1 ? '' : 's'} the auto-detect left undetermined (low confidence) — click to jump to the next and classify it">`
+                + `⚠ ${review.length} to review</span>`);
+        }
+
         // Unexploded assemblies (at the visible frontier) that still hide
         // unclassified parts — the user can't classify those until they explode.
         // Surface a clickable chip that jumps to the next one so they're easy to find.
@@ -3395,6 +3405,14 @@ export class AnalysisPage {
         progressEl.innerHTML = parts.length
             ? parts.join(' <span class="prog-sep">·</span> ')
             : '';
+
+        const reviewChip = progressEl.querySelector('.prog-review');
+        if (reviewChip) {
+            reviewChip.addEventListener('click', () => this._jumpToNextReview());
+            reviewChip.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._jumpToNextReview(); }
+            });
+        }
 
         // "Explode all" button — shown only while collapsed assemblies remain.
         const explodeAllBtn = this.container.querySelector('#explode-all-btn');
@@ -3514,6 +3532,51 @@ export class AnalysisPage {
         } finally {
             this._explodingAll = false;
             this._updateProgress();
+        }
+    }
+
+    /**
+     * Exposed leaf parts (under exploded, non-BO/EXC assemblies) that are still
+     * unclassified — i.e. the auto-detect was uncertain (low confidence) or
+     * never determined them. These are classifiable right now. Deduped by ref
+     * (classifying one instance classifies them all). Returns [{id, ref}].
+     */
+    _collectReviewItems() {
+        if (!this._treeData) return [];
+        const out = [];
+        const seenRef = new Set();
+        const walk = (nodes) => {
+            for (const node of nodes) {
+                if (node.node_type === 'assembly') {
+                    const cls = this.classifications.get(node.id);
+                    if (cls === 'bought-out' || cls === 'exclude') continue;
+                    if (this._catalogueBOMatch(node.name)) continue;
+                    if (this.explodedNodes.has(node.id)) walk(node.children || []);
+                    continue;
+                }
+                if (this._resolveClassification(node.id) == null) {
+                    const ref = node.ref_id || node.id;
+                    if (!seenRef.has(ref)) { seenRef.add(ref); out.push({ id: node.id, ref }); }
+                }
+            }
+        };
+        walk(this._treeData);
+        return out;
+    }
+
+    /** Select + scroll to the next exposed undetermined part to classify. */
+    _jumpToNextReview() {
+        const list = this._collectReviewItems();
+        if (!list.length) return;
+        this._reviewJumpIdx = ((this._reviewJumpIdx ?? -1) + 1) % list.length;
+        const target = list[this._reviewJumpIdx];
+        this._selectAndScrollToNode(target.id);
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const li = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(target.id)}"]`);
+        const row = li?.querySelector(':scope > .tree-node-row');
+        if (row) {
+            row.classList.add('explode-flash');
+            setTimeout(() => row.classList.remove('explode-flash'), 1400);
         }
     }
 
