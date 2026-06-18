@@ -277,8 +277,14 @@ def _write_cnc_sheet(
     items: List[dict],
     category_fill: PatternFill,
     thumb_cache: dict,
+    suppress_nc: bool = False,
 ):
-    """Write a sheet for CNC items (sections/plates) with thumbnails."""
+    """Write a sheet for CNC items (sections/plates) with thumbnails.
+
+    ``suppress_nc`` blanks the DXF/NC1 columns (used for the Formed Plate sheet:
+    the analyser's flat-projection DXF does NOT account for the forming/bends,
+    so it must not be offered — a flat-pattern development is required first).
+    """
     ws = wb.create_sheet(sheet_name)
 
     headers = [
@@ -310,8 +316,14 @@ def _write_cnc_sheet(
         if mass_each is None and cnc.get("volume_mm3"):
             mass_each = _round(cnc["volume_mm3"] * STEEL_DENSITY, 3)
 
-        dxf_name = Path(cnc["dxf_path"]).name if cnc.get("dxf_path") else ""
-        nc1_name = Path(cnc["nc1_path"]).name if cnc.get("nc1_path") else ""
+        if suppress_nc:
+            # Formed parts: the flat-projection DXF/NC1 ignore the bends, so
+            # never present them — flag that a flat pattern is needed instead.
+            dxf_name = "flat pattern req'd"
+            nc1_name = ""
+        else:
+            dxf_name = Path(cnc["dxf_path"]).name if cnc.get("dxf_path") else ""
+            nc1_name = Path(cnc["nc1_path"]).name if cnc.get("nc1_path") else ""
 
         # For unknowns, show measured CSA in the designation column
         designation = cnc.get("designation", "")
@@ -640,7 +652,7 @@ def generate_bom_xlsx(filename: str) -> Optional[bytes]:
         # development exists, so they get their own sheet (full detail +
         # thumbnails; the DXF/NC1 columns are intentionally blank).
         _write_cnc_sheet(wb, "Formed Plate", bom["formed_items"],
-                         _CAT_FILLS["formed"], thumb_cache)
+                         _CAT_FILLS["formed"], thumb_cache, suppress_nc=True)
 
     if bom["unknown_items"]:
         _write_cnc_sheet(wb, "Unknown Items", bom["unknown_items"],

@@ -4749,9 +4749,19 @@ export class AnalysisPage {
         // Persistent "needs CNC analysis" count: CNC-classified parts with no
         // full analysis result yet (refined-only or none) — they sit in the BOM
         // without dimensions/DXF and won't export properly until analysed.
+        // Consolidation-aware: a non-canonical group member has no result under
+        // its own ref, but its canonical twin (refs[0]) carries the shared NC —
+        // resolve to canonical first, else every group member reads as pending.
+        const refToCanon = new Map();
+        for (const g of (this._consolidationGroups || [])) {
+            const refs = g.ref_ids || [];
+            for (const r of refs) refToCanon.set(r, refs[0]);
+        }
         const pendingAnalysis = [...cncItems, ...unknownItems].filter(it => {
-            const info = this._cncResultForItem(it);
-            return !info || info.result?.type == null;
+            const canon = refToCanon.get(it.key) || it.key;
+            const res = (this._cncAnalysisResults || {})[canon]
+                     || (this._cncAnalysisResults || {})[it.key];
+            return !res || res.type == null;
         }).length;
 
         // Build a ref_id → consolidation group lookup for merged display
