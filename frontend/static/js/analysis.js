@@ -4474,8 +4474,14 @@ export class AnalysisPage {
     }
 
     _refreshNativeBomIfOpen() {
-        const panel = this.container?.querySelector('#native-bom-panel');
-        if (panel && !panel.hidden) this._renderNativeBom();
+        // Refresh whichever BOM panel is open after a classification change.
+        // Previously only the Full BOM refreshed, so classifying a part from the
+        // tree left the Standard BOM stale — the part wouldn't appear until the
+        // panel was reopened.
+        const full = this.container?.querySelector('#native-bom-panel');
+        if (full && !full.hidden) this._renderNativeBom();
+        const standard = this.container?.querySelector('#parts-list-panel');
+        if (standard && !standard.hidden) this._renderPartsList(this._consolidationGroups);
     }
 
     /**
