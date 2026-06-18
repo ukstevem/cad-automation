@@ -72,6 +72,23 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _revalidate_static_assets(request: Request, call_next):
+    """Force the browser to revalidate static JS/CSS on every load.
+
+    StaticFiles sends an ETag/Last-Modified but no Cache-Control, so browsers
+    fall back to heuristic caching and can serve a stale bundle after a deploy
+    (a plain reload won't pick up new analysis.js). ``no-cache`` makes the
+    browser revalidate (conditional GET → 304 when unchanged, fresh 200 when
+    the file changed), so edits land without a manual hard-refresh.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") and path.endswith((".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # Custom exception handlers
 @app.exception_handler(CADAutomationException)
 async def cad_exception_handler(request: Request, exc: CADAutomationException):
