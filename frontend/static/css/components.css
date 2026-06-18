@@ -232,6 +232,27 @@
 .prog-unc  { color: #b45309;            font-weight: 700; }  /* amber — work remaining */
 .prog-done { color: #15803d;            font-weight: 700; }  /* green — all triaged */
 .prog-sep  { color: var(--cad-muted); }
+/* Clickable "N to explode" chip — jumps to the next collapsed assembly */
+.prog-explode {
+    color: #1d4ed8;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    border-radius: 4px;
+    padding: 0 6px;
+}
+.prog-explode:hover { background: #dbeafe; }
+
+/* Brief highlight when jumping to an assembly that needs exploding */
+@keyframes explode-flash-kf {
+    0%   { background: #fde68a; }
+    100% { background: transparent; }
+}
+.tree-node-row.explode-flash { animation: explode-flash-kf 1.4s ease-out; }
+
+/* Unexplode/collapse button mirrors the explode button styling */
+.btn-collapse { cursor: pointer; }
 
 /* ===== Assembly tree ===== */
 .assembly-tree {

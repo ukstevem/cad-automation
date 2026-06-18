@@ -767,12 +767,14 @@ export class AnalysisPage {
         switch (node.node_type) {
             case 'assembly':
                 btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Explode</button>');
+                btns.push('<button class="btn-collapse"    data-action="collapse"    hidden>▽ Collapse</button>');
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
                 btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
                 btns.push('<button class="btn-unclassify"  data-action="unclassify"  hidden>✕</button>');
                 break;
             case 'part_multi_solid':
                 btns.push('<button class="btn-explode"     data-action="explode"     hidden>▶ Solids</button>');
+                btns.push('<button class="btn-collapse"    data-action="collapse"    hidden>▽ Collapse</button>');
                 btns.push('<button class="btn-postprocess" data-action="postprocess" hidden>CNC</button>');
                 btns.push('<button class="btn-bought-out"  data-action="bought-out"  hidden>BO</button>');
                 btns.push('<button class="btn-exclude"     data-action="exclude"     hidden>EXC</button>');
@@ -820,8 +822,16 @@ export class AnalysisPage {
                 return;
             }
 
+            // 2b. Collapse (unexplode) button
+            const collapseBtn = e.target.closest('.btn-collapse');
+            if (collapseBtn) {
+                const li = collapseBtn.closest('.tree-node');
+                this._collapseNode(li);
+                return;
+            }
+
             // 3. Classification buttons (Postprocess, Bought-out) and Unclassify
-            const actionBtn = e.target.closest('[data-action]:not(.btn-explode)');
+            const actionBtn = e.target.closest('[data-action]:not(.btn-explode):not(.btn-collapse)');
             if (actionBtn) {
                 const li = actionBtn.closest('.tree-node');
                 const nodeId = li.dataset.nodeId;
@@ -894,6 +904,13 @@ export class AnalysisPage {
             const explodeBtn = row.querySelector('.btn-explode');
             if (explodeBtn) {
                 explodeBtn.hidden = !hasStl || isExploded;
+            }
+
+            // Collapse (unexplode) button: visible only when exploded, so the
+            // user can re-collapse an assembly/multi-solid back to a unit.
+            const collapseBtn = row.querySelector('.btn-collapse');
+            if (collapseBtn) {
+                collapseBtn.hidden = !isExploded;
             }
 
             // BO button: visible when has STL; stays visible even when exploded
@@ -2571,6 +2588,43 @@ export class AnalysisPage {
     }
 
     /**
+     * Collapse (unexplode) an assembly / multi-solid back to a single unit.
+     * Hides the revealed children and clears the exploded flag (for this node
+     * and its chirality siblings). The solid-children cache is kept so a later
+     * re-explode is instant. Descendant classifications are left intact.
+     */
+    _collapseNode(li) {
+        const nodeId = li.dataset.nodeId;
+        const nodeType = li.dataset.nodeType;
+        const chiralKey = li.dataset.chiralKey;
+        if (!this.explodedNodes.has(nodeId)) return;
+
+        const siblings = this._findSiblings(chiralKey, nodeId, nodeType);
+        for (const el of [li, ...siblings]) this._unmarkExploded(el);
+
+        this._debouncedSave();
+        this._updateTreeSelectability();
+        this._updateProgress();
+        this._refreshAssemblyColors?.();
+    }
+
+    /** Clear the exploded state + collapse the children UL for one node. */
+    _unmarkExploded(li) {
+        const nodeId = li.dataset.nodeId;
+        this.explodedNodes.delete(nodeId);
+
+        const row = li.querySelector(':scope > .tree-node-row');
+        if (row) row.classList.remove('node-exploded');
+
+        const childUl = li.querySelector(':scope > ul');
+        const toggleBtn = row?.querySelector('.tree-toggle');
+        if (childUl) {
+            childUl.hidden = true;
+            if (toggleBtn) toggleBtn.classList.remove('expanded');
+        }
+    }
+
+    /**
      * Mark a single node as visually exploded.
      */
     _markExploded(li) {
@@ -3133,6 +3187,13 @@ export class AnalysisPage {
                     // Respect the human triage: don't descend into bought-out /
                     // excluded assemblies, or ones not yet exploded.
                     if (cls === 'bought-out' || cls === 'exclude') continue;
+                    // Catalogue bought-out sub-assembly (e.g. Unistrut): classify
+                    // the whole unit BO and don't descend — no need to explode it.
+                    if (!cls && this._catalogueBOMatch(node.name)) {
+                        this.classifications.set(node.id, 'bought-out');
+                        changed++;
+                        continue;
+                    }
                     if (this.explodedNodes.has(node.id) && node.children) walk(node.children);
                     continue;
                 }
@@ -3302,9 +3363,92 @@ export class AnalysisPage {
         } else if (rows && rows.length && (cnc + bo + exc) > 0) {
             parts.push(`<span class="prog-done">✓ complete</span>`);
         }
+
+        // Unexploded assemblies (at the visible frontier) that still hide
+        // unclassified parts — the user can't classify those until they explode.
+        // Surface a clickable chip that jumps to the next one so they're easy to find.
+        const explodable = this._collectExplodableAssemblies();
+        if (explodable.length) {
+            const hidden = explodable.reduce((n, a) => n + a.count, 0);
+            parts.push(`<span class="prog-explode" role="button" tabindex="0" `
+                + `title="${explodable.length} assembl${explodable.length === 1 ? 'y' : 'ies'} still collapsed, hiding ${hidden} unclassified part${hidden === 1 ? '' : 's'} — click to jump to the next">`
+                + `⊕ ${explodable.length} to explode</span>`);
+        }
+
         progressEl.innerHTML = parts.length
             ? parts.join(' <span class="prog-sep">·</span> ')
             : '';
+
+        const explodeChip = progressEl.querySelector('.prog-explode');
+        if (explodeChip) {
+            explodeChip.addEventListener('click', () => this._jumpToNextExplodable());
+            explodeChip.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._jumpToNextExplodable(); }
+            });
+        }
+    }
+
+    /** Catalogue bought-out match for an assembly/part name (mirrors the
+     *  backend match_catalogue_product rules — currently Unistrut). */
+    _catalogueBOMatch(name) {
+        if (!name) return false;
+        // Unistrut strut-channel, but not "UNIST PLATE" support plates.
+        return /unist/i.test(name) && !/plate/i.test(name);
+    }
+
+    /**
+     * Frontier unexploded assemblies that still contain unclassified leaf parts.
+     * "Frontier" = all ancestors exploded (so the node is visible with an
+     * Explode button). BO/EXC assemblies and catalogue bought-out units are
+     * skipped — they're handled as a whole, no need to explode.
+     * Returns [{id, count}] where count = unclassified leaf descendants.
+     */
+    _collectExplodableAssemblies() {
+        if (!this._treeData) return [];
+        const out = [];
+        const unclassifiedLeaves = (node) => {
+            let n = 0;
+            const rec = (nd) => {
+                for (const c of nd.children || []) {
+                    // Only assemblies are containers; every part_* node (incl.
+                    // multi-solid, whose solids aren't in the server tree) is a
+                    // classifiable leaf.
+                    if (c.node_type === 'assembly') rec(c);
+                    else if (this._resolveClassification(c.id) == null) n++;
+                }
+            };
+            rec(node);
+            return n;
+        };
+        const walk = (nodes) => {
+            for (const node of nodes) {
+                if (node.node_type !== 'assembly') continue;
+                const cls = this.classifications.get(node.id);
+                if (cls === 'bought-out' || cls === 'exclude') continue;
+                if (this._catalogueBOMatch(node.name)) continue;
+                if (this.explodedNodes.has(node.id)) { walk(node.children || []); continue; }
+                const count = unclassifiedLeaves(node);
+                if (count > 0) out.push({ id: node.id, count });
+            }
+        };
+        walk(this._treeData);
+        return out;
+    }
+
+    /** Select + scroll to the next frontier assembly that needs exploding. */
+    _jumpToNextExplodable() {
+        const list = this._collectExplodableAssemblies();
+        if (!list.length) return;
+        this._explodeJumpIdx = ((this._explodeJumpIdx ?? -1) + 1) % list.length;
+        const target = list[this._explodeJumpIdx];
+        this._selectAndScrollToNode(target.id);
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const li = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(target.id)}"]`);
+        const row = li?.querySelector(':scope > .tree-node-row');
+        if (row) {
+            row.classList.add('explode-flash');
+            setTimeout(() => row.classList.remove('explode-flash'), 1400);
+        }
     }
 
     /**
