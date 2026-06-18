@@ -54,6 +54,7 @@ _THIN_BORDER = Border(
 # Category fill colours (light tints matching the frontend)
 _CAT_FILLS = {
     "cnc":      PatternFill(start_color="DCEAFB", end_color="DCEAFB", fill_type="solid"),  # blue
+    "formed":   PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"),  # orange
     "unknown":  PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid"),  # amber
     "bo":       PatternFill(start_color="D4EDDA", end_color="D4EDDA", fill_type="solid"),  # green
     "excluded": PatternFill(start_color="E8D5F5", end_color="E8D5F5", fill_type="solid"),  # purple
@@ -152,6 +153,7 @@ def _build_bom_data(cache: dict) -> dict:
 
     # Categorise classified refs
     cnc_items: List[dict] = []
+    formed_items: List[dict] = []  # formed plate / formed section — no NC/DXF yet
     unknown_items: List[dict] = []
     bo_items: List[dict] = []
     excluded_items: List[dict] = []
@@ -208,7 +210,14 @@ def _build_bom_data(cache: dict) -> dict:
         }
 
         if action == "postprocess":
-            if cnc_res and cnc_res.get("type") not in (None, "unknown"):
+            # Formed plate / formed (bent) section: a flat-pattern development is
+            # needed before NC1/DXF can be produced, so keep them in their own
+            # bucket rather than mixed with ready-to-cut CNC items. The refined
+            # class reflects any user override (applied above).
+            refined = (cnc_res or {}).get("refined_class")
+            if refined in ("FORMED_PLATE", "BENT_SECTION"):
+                formed_items.append(item)
+            elif cnc_res and cnc_res.get("type") not in (None, "unknown"):
                 cnc_items.append(item)
             else:
                 unknown_items.append(item)
@@ -221,6 +230,7 @@ def _build_bom_data(cache: dict) -> dict:
         "project_number": project_number,
         "steel_grade": steel_grade,
         "cnc_items": cnc_items,
+        "formed_items": formed_items,
         "unknown_items": unknown_items,
         "bo_items": bo_items,
         "excluded_items": excluded_items,
@@ -552,6 +562,9 @@ def _write_summary_sheet(wb: Workbook, bom: dict, filename: str,
             if (i.get("cnc") or {}).get("mass_kg")
         ), 1)),
         ("", ""),
+        ("Formed Plate (types)", len(bom.get("formed_items", []))),
+        ("Formed Plate (total qty)", sum(i["qty"] for i in bom.get("formed_items", []))),
+        ("", ""),
         ("Unknown Items (types)", len(bom["unknown_items"])),
         ("Unknown Items (total qty)", sum(i["qty"] for i in bom["unknown_items"])),
         ("", ""),
@@ -621,6 +634,13 @@ def generate_bom_xlsx(filename: str) -> Optional[bytes]:
     if bom["cnc_items"]:
         _write_cnc_sheet(wb, "CNC Items", bom["cnc_items"],
                          _CAT_FILLS["cnc"], thumb_cache)
+
+    if bom.get("formed_items"):
+        # Formed plate / formed section — no NC1/DXF until flat-pattern
+        # development exists, so they get their own sheet (full detail +
+        # thumbnails; the DXF/NC1 columns are intentionally blank).
+        _write_cnc_sheet(wb, "Formed Plate", bom["formed_items"],
+                         _CAT_FILLS["formed"], thumb_cache)
 
     if bom["unknown_items"]:
         _write_cnc_sheet(wb, "Unknown Items", bom["unknown_items"],
