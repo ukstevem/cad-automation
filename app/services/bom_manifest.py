@@ -32,6 +32,23 @@ logger = structlog.get_logger()
 # part under "<prototype_ref_id>:s<n>" keys.
 _SOLID_KEY_RE = re.compile(r"^(.*):s\d+$")
 
+# Refined sub-classes that need a flat-pattern / bending development before any
+# NC1/DXF can be produced — these must be excluded from all NC output (the
+# analyser's flat-projection DXF ignores the forming and would mislead).
+_FORMED_REFINED = frozenset({"FORMED_PLATE", "BENT_SECTION"})
+
+
+def effective_refined(overrides: dict, ref_id: str,
+                      solid_idx: Optional[int], result: dict) -> str:
+    """Effective refined class: user override (by ref_id / ref_id:sN) else auto."""
+    key = f"{ref_id}:s{solid_idx}" if solid_idx is not None else ref_id
+    return (overrides or {}).get(key) or (result or {}).get("refined_class") or ""
+
+
+def is_formed_refined(code: Optional[str]) -> bool:
+    """True if a refined code needs flat-pattern dev (no straight NC1/DXF)."""
+    return (code or "") in _FORMED_REFINED
+
 
 def _walk_count_instances(tree: list) -> Dict[str, int]:
     """Per-ref placement count from the assembly tree (matches the worker)."""
@@ -206,6 +223,7 @@ def build_manifest_rows(cache: dict) -> List[Dict[str, Any]]:
 
     bom_assignments = assign_bom_items(cache)
     instance_counts = _walk_count_instances(tree)
+    overrides = (cache.get("project_state") or {}).get("refined_overrides", {}) or {}
 
     rows: List[Dict[str, Any]] = []
 
@@ -217,6 +235,10 @@ def build_manifest_rows(cache: dict) -> List[Dict[str, Any]]:
         def _row_for(r: dict, solid_idx: Optional[int]) -> Optional[Dict[str, Any]]:
             fp = r.get("nc1_path") or r.get("dxf_path")
             if not fp:
+                return None
+            # Formed plate / formed section: the flat-projection NC1/DXF ignores
+            # the bends, so exclude it from the manifest (NC Index, zip, csv).
+            if effective_refined(overrides, ref_id, solid_idx, r) in _FORMED_REFINED:
                 return None
             dims = r.get("dims") or {}
             return {

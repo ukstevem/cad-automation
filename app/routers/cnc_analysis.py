@@ -47,7 +47,9 @@ from app.services.sidecar import (
 )
 from app.services.bom_manifest import (
     canonical_ref_map,
+    effective_refined,
     finalize_cnc_outputs,
+    is_formed_refined,
     write_manifest_files,
 )
 from app.services.task_manager import task_manager, TaskStatus
@@ -698,6 +700,11 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
     #   Non-canonical ref_ids map to a different canonical; skip them in the loop.
     # group_all_refs: canonical_ref_id → [all ref_ids in that group]
     #   Used to populate consolidated_ref_ids in the manifest.
+    # User overrides of the refined sub-class — exclusion is based on the
+    # EFFECTIVE refined class so that overriding a formed part to a straight
+    # type (e.g. PLATE) re-includes its (already-generated) DXF/NC1.
+    overrides: dict = (cache.get("project_state") or {}).get("refined_overrides", {}) or {}
+
     canonical_map: dict = {}
     group_all_refs: dict = {}
     part_groups = cache.get("consolidation", {}).get("part_groups", [])
@@ -720,6 +727,11 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
     def _collect(ref_id: str, result: dict, solid_idx: Optional[int], consolidated_ref_ids: Optional[List[str]] = None) -> None:
         path_str = result.get(path_key)
         if not path_str:
+            return
+        # Formed plate / formed section: its flat-projection DXF/NC1 ignores the
+        # bends — exclude from the ZIP unless the user overrode it to a straight
+        # type (effective refined no longer formed).
+        if is_formed_refined(effective_refined(overrides, ref_id, solid_idx, result)):
             return
         fp = Path(path_str)
         if not fp.exists():
