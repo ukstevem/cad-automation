@@ -2,6 +2,12 @@ services:
   api:
     build: .
     container_name: cad-automation-api
+    # Run WITHOUT uvicorn --reload: on the Windows Docker bind mount the
+    # watchfiles reloader either doesn't detect edits (inotify) or, with
+    # polling, fires phantom restarts and crashes (os error 5) — each restart
+    # kills in-flight analysis/classify/STL subprocesses (symptom: "stuck
+    # detecting"). Stable single process; restart manually after backend edits.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
@@ -18,10 +24,6 @@ services:
       - ./outputs:/app/outputs
     environment:
       - PYTHONUNBUFFERED=1
-      # uvicorn --reload uses watchfiles, whose inotify events don't fire across
-      # the Windows Docker Desktop bind mount — backend edits were silently NOT
-      # picked up until a manual restart. Force polling so --reload works.
-      - WATCHFILES_FORCE_POLLING=true
       - UPLOAD_DIR=/app/uploads
       - TEMP_DIR=/app/temp
       - OUTPUT_DIR=/app/outputs
