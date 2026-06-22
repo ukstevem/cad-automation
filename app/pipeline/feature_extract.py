@@ -282,14 +282,24 @@ def _count_holes(mask):
     return sum(1 for k in range(1, cur+1) if (lbl == k).sum() > 3)
 
 
+# Minimum arc (deg) of a convex cylinder to count as a forming bend. The 30°
+# original floor missed gently-formed plates (e.g. a large-radius ~8° form on a
+# column plate: R/t_eff=2.25, convex, but only 8° of arc) — they fell to the
+# uncertain FORMED_PLATE@0.4 fallback and were never auto-picked-up. Holes are
+# excluded by the convex test + the 270° ceiling; toe radii by R/t_eff>=0.9, so
+# a low floor stays safe for flats/sections (which have no qualifying convex
+# cylinder anyway, and flats are gated out earlier by t_eff_thin_ratio).
+_BEND_MIN_ARC = 5.0
+
+
 def _count_convex_bends(solid, t_eff):
     """Count convex cylindrical faces that look like sheet/section bends.
 
     A formed-plate bend is a CONVEX cylinder (material on the axis side) whose
     radius is at least the metal gauge (R/t_eff >= 0.9) spanning a partial arc
-    (30-270 deg).  This excludes drilled holes (concave) and rolled-section toe
-    radii (R < gauge).  Empirically: 0 for plates/straight sections, >=1 for
-    formed plates, and a large count for curved tubes (bent section).
+    (``_BEND_MIN_ARC``-270 deg).  This excludes drilled holes (concave) and
+    rolled-section toe radii (R < gauge).  Empirically: 0 for plates/straight
+    sections, >=1 for formed plates, and a large count for curved tubes.
     """
     import numpy as np
     from OCP.TopExp import TopExp_Explorer
@@ -330,7 +340,7 @@ def _count_convex_bends(solid, t_eff):
                 rad /= nn
                 # step from the face toward the axis: inside => material on the
                 # axis side => convex outer surface (a bend, not a hole/fillet).
-                if inside(P - 0.15 * rad) and 30 <= arc <= 270 and R / t_eff >= 0.9:
+                if inside(P - 0.15 * rad) and _BEND_MIN_ARC <= arc <= 270 and R / t_eff >= 0.9:
                     n += 1
         exp.Next()
     return n
