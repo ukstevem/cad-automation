@@ -926,25 +926,31 @@ export class AnalysisPage {
                 collapseBtn.hidden = !isExploded;
             }
 
-            // BO button: visible when has STL; stays visible even when exploded
-            // so the user can mark exploded items as bought-out
+            // Classification (CNC/BO/EXC) is metadata — NOT gated on hasStl, so
+            // parts whose STL hasn't generated yet (e.g. deep in a large
+            // assembly, or the "to review" items) can still be triaged. The 3D
+            // preview still needs the STL, but the decision doesn't.
+
+            // BO button: stays visible even when exploded so the user can mark
+            // exploded items as bought-out.
             const boughtOutBtn = row.querySelector('.btn-bought-out');
             if (boughtOutBtn) {
-                boughtOutBtn.hidden = !hasStl;
+                boughtOutBtn.hidden = false;
                 boughtOutBtn.classList.toggle('btn-active', isClassified && currentAction === 'bought-out');
             }
 
-            // EXC button: visible when has STL; stays visible even when exploded
+            // EXC button: visible (incl. when exploded).
             const excludeBtn = row.querySelector('.btn-exclude');
             if (excludeBtn) {
-                excludeBtn.hidden = !hasStl;
+                excludeBtn.hidden = false;
                 excludeBtn.classList.toggle('btn-active', isClassified && currentAction === 'exclude');
             }
 
-            // CNC button: visible when has STL and not exploded; active when currently CNC
+            // CNC button: visible when not exploded (exploded → classify solids);
+            // active when currently CNC.
             const ppBtn = row.querySelector('.btn-postprocess');
             if (ppBtn) {
-                ppBtn.hidden = !hasStl || isExploded;
+                ppBtn.hidden = isExploded;
                 ppBtn.classList.toggle('btn-active', isClassified && currentAction === 'postprocess');
             }
 
