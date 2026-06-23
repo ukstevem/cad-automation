@@ -1026,7 +1026,16 @@ export class AnalysisPage {
                     row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
                 }
                 this._highlightSelectedInAssembly(nodeId);
+                return;
             }
+            // No mesh yet (e.g. a "to review" part deep in the tree) — generate
+            // it on demand so the user can actually see it to make a decision.
+            this._selectedNodeId = nodeId;
+            for (const row of treeEl.querySelectorAll('.tree-node-row')) {
+                const li = row.closest('.tree-node');
+                row.classList.toggle('node-selected', li.dataset.nodeId === nodeId);
+            }
+            this._generateStlOnDemand(nodeId);
             return;
         }
 
@@ -1051,6 +1060,65 @@ export class AnalysisPage {
      * Select a tree node and scroll it into view (used by BOM row clicks).
      * Expands collapsed ancestor nodes so the target is visible.
      */
+    /**
+     * Generate a single part's STL on demand (when it has no mesh yet) by
+     * meshing its parent assembly's children, then preview it if the user is
+     * still on that node. Used so "to review" parts deep in a large assembly —
+     * whose STLs weren't generated up front — can be seen and decided on.
+     */
+    async _generateStlOnDemand(nodeId) {
+        const filename = this._currentFilename;
+        if (!filename || !nodeId) return;
+        this._onDemandStl = this._onDemandStl || new Set();
+        if (this._onDemandStl.has(nodeId)) return;  // already generating
+
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        const targetLi = treeEl?.querySelector(`.tree-node[data-node-id="${CSS.escape(nodeId)}"]`);
+        const parentLi = targetLi?.parentElement?.closest('.tree-node');
+        const parentId = parentLi?.dataset.nodeId;
+        if (!parentId) return;  // top-level (should already have an STL)
+
+        this._onDemandStl.add(nodeId);
+        const spinner = targetLi?.querySelector(':scope > .tree-node-row > .node-stl-spinner');
+        if (spinner) spinner.hidden = false;
+
+        const done = () => {
+            this._onDemandStl.delete(nodeId);
+            if (spinner) spinner.hidden = true;
+        };
+        try {
+            const data = await this.api.generateSTLChildren(filename, parentId);
+            const taskId = data?.task_id;
+            if (!taskId) { done(); this._previewIfReady(nodeId); return; }
+            const timer = setInterval(async () => {
+                try {
+                    const s = await this.api.getSTLStatus(taskId);
+                    if (s.status === 'completed') {
+                        clearInterval(timer);
+                        this._populateStlMap(s.results, filename);
+                        done();
+                        this._updateTreeSelectability();
+                        this._previewIfReady(nodeId);
+                    } else if (s.status === 'failed') {
+                        clearInterval(timer);
+                        done();
+                        console.warn('on-demand STL failed:', s.error);
+                    }
+                } catch (e) { /* keep polling through transient hiccups */ }
+            }, 1500);
+        } catch (e) {
+            done();
+            console.warn('on-demand STL generation failed:', e);
+        }
+    }
+
+    /** Load a node's STL into the viewer if it's now available and still selected. */
+    _previewIfReady(nodeId) {
+        if (this._selectedNodeId !== nodeId) return;  // user moved on
+        const url = this.stlMap.get(nodeId);
+        if (url) this._loadInViewer(url);
+    }
+
     _selectAndScrollToNode(nodeId) {
         const treeEl = this.container.querySelector('#assembly-tree-container');
         if (!treeEl) return;
