@@ -161,6 +161,27 @@ async def update_nesting_task(project_number: str, req: UpdateNestingTaskRequest
 NESTING_BASE = settings.NESTING_BASE_URL
 
 
+async def _fetch_cutting_list(task_id: str) -> dict:
+    """Fetch the formatted cutting list for a task from the nesting service."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{NESTING_BASE}/api/v1/nesting/cutting-list/{task_id}"
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Nesting service returned {exc.response.status_code}",
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach nesting service: {exc}",
+        )
+
+
 @router.get("/{project_number}/nesting-pdf")
 async def get_nesting_pdf(project_number: str):
     """
@@ -174,28 +195,34 @@ async def get_nesting_pdf(project_number: str):
     if not task_id:
         raise HTTPException(status_code=400, detail="No nesting task saved for this project")
 
-    # Fetch cutting list from nesting service
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{NESTING_BASE}/api/v1/nesting/cutting-list/{task_id}"
-            )
-            resp.raise_for_status()
-            cutting_list = resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Nesting service returned {exc.response.status_code}",
-        )
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Cannot reach nesting service: {exc}",
-        )
-
+    cutting_list = await _fetch_cutting_list(task_id)
     pdf_bytes = render_cutting_list_pdf(cutting_list, project_number=project_number)
 
     safe_name = re.sub(r'[^\w\-]', '_', project_number)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="cutting_list_{safe_name}.pdf"',
+        },
+    )
+
+
+@router.get("/nesting-pdf/by-task/{task_id}")
+async def get_nesting_pdf_by_task(task_id: str):
+    """
+    Render a cutting-list PDF for an arbitrary nesting task_id.
+
+    Used by the Analysis tab, which runs nesting ad-hoc and holds a live
+    task_id rather than a saved project. The PDF is keyed solely by task_id.
+    """
+    from app.services.nesting_pdf import render_cutting_list_pdf
+
+    cutting_list = await _fetch_cutting_list(task_id)
+    pdf_bytes = render_cutting_list_pdf(cutting_list)
+
+    label = cutting_list.get("job_label") or task_id
+    safe_name = re.sub(r'[^\w\-]', '_', str(label))
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

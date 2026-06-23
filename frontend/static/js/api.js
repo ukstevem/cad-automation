@@ -200,6 +200,10 @@ export class ApiClient {
         return `${this.baseUrl}/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-pdf`;
     }
 
+    getNestingPdfByTaskUrl(taskId) {
+        return `${this.baseUrl}/api/v1/projects/nesting-pdf/by-task/${encodeURIComponent(taskId)}`;
+    }
+
     async updateProjectNestingTask(projectNumber, nestingTaskId, nestingStartedAt) {
         return this._put(
             `/api/v1/projects/${encodeURIComponent(projectNumber)}/nesting-task`,

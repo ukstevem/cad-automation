@@ -6319,6 +6319,7 @@ export class AnalysisPage {
             <div class="nesting-results-header">
                 <span class="nesting-results-title">Cutting List</span>
                 <div class="nesting-results-actions">
+                    <button class="nesting-pdf-btn outline">\u2193 PDF</button>
                     <button class="nesting-csv-btn outline">\u2193 CSV</button>
                     <button class="nesting-close-btn outline">\u2715</button>
                 </div>
@@ -6414,6 +6415,17 @@ export class AnalysisPage {
         }
 
         panel.innerHTML = html;
+
+        // PDF download
+        panel.querySelector('.nesting-pdf-btn')?.addEventListener('click', () => {
+            if (!this._nestingTaskId) return;
+            const a = document.createElement('a');
+            a.href = this.api.getNestingPdfByTaskUrl(this._nestingTaskId);
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
 
         // CSV download
         panel.querySelector('.nesting-csv-btn')?.addEventListener('click', async () => {
