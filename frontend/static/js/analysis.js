@@ -3425,6 +3425,25 @@ export class AnalysisPage {
                 // SOLID nodes are covered by their parent multi-solid classify
                 // (which returns solids[]); never send their synthetic ref.
                 if (node.node_type === 'solid') continue;
+
+                if (node.node_type === 'part_multi_solid') {
+                    // Lazy detection: classifying a multi-solid analyses ALL of
+                    // its solids, which on a large part can exceed the CNC
+                    // timeout and kill the subprocess. Don't detect it until the
+                    // user explodes it; then detect its revealed solids (the
+                    // classify worker returns solids[] for the parent ref). Do
+                    // NOT descend into the synthetic solid children — they are
+                    // covered by the parent's solids[].
+                    if (cls === 'bought-out' || cls === 'exclude') continue;
+                    if (!this.explodedNodes.has(node.id)) continue;
+                    const msRef = node.ref_id || node.id;
+                    const msRes = this._cncAnalysisResults && this._cncAnalysisResults[msRef];
+                    if (!(msRes && Array.isArray(msRes.solids)) && !refs.has(msRef)) {
+                        refs.set(msRef, node.name || '');
+                    }
+                    continue;
+                }
+
                 const refId = node.ref_id || node.id;
                 const res = this._cncAnalysisResults && this._cncAnalysisResults[refId];
                 if (!cls && !(res && res.refined_class != null) && !refs.has(refId)) {
