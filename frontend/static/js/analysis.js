@@ -2833,7 +2833,7 @@ export class AnalysisPage {
         if (cached) {
             const allLis = [li, ...siblings];
             for (const el of allLis) this._createSolidChildrenDOM(el, cached);
-            this._updateTreeSelectability();
+            this._onSolidChildrenReady(chiralKey, cached);
             this._debouncedSave();
             return;
         }
@@ -2889,7 +2889,9 @@ export class AnalysisPage {
                         if (spinner) spinner.hidden = true;
                     }
 
-                    this._updateTreeSelectability();
+                    // Wire the solids into the tree + auto-classify them now
+                    // (they exist only in the cache/DOM until this point).
+                    this._onSolidChildrenReady(chiralKey, childrenInfo);
                     this._debouncedSave();
 
                 } else if (status.status === 'failed') {
@@ -2970,6 +2972,75 @@ export class AnalysisPage {
             toggle.classList.remove('leaf');
             toggle.classList.add('expanded');
         }
+    }
+
+    /**
+     * Embed generated solid children into the in-memory tree (this._treeData)
+     * for every part_multi_solid matching `chiralKey`.
+     *
+     * The classification and BOM walks operate on this._treeData, NOT the DOM.
+     * On a fresh explode the solids exist only in the cache/DOM, so those walks
+     * can't reach them — the sub-solids never get auto-detected/classified
+     * (bd cad-automation-stage2-ov9). This mirrors the backend's
+     * _embed_solid_children (see analysis.py) so a fresh explode behaves exactly
+     * like a reopen. Idempotent: re-embedding replaces the children.
+     */
+    _embedSolidChildrenInTree(chiralKey, childrenInfo) {
+        if (!this._treeData || !childrenInfo || !childrenInfo.length) return;
+        const toNodes = () => childrenInfo.map(c => ({
+            id: c.nodeId,
+            name: c.name,
+            node_type: 'solid',
+            ref_id: c.nodeId,
+            solid_count: 0,
+            children: [],
+        }));
+        const walk = (nodes) => {
+            for (const node of nodes) {
+                if (node.node_type === 'part_multi_solid') {
+                    const refId = node.ref_id || node.id;
+                    const suffix = node.is_mirrored ? 'M' : 'N';
+                    if (`${refId}:${suffix}` === chiralKey) node.children = toNodes();
+                }
+                if (node.children && node.children.length) walk(node.children);
+            }
+        };
+        walk(this._treeData);
+    }
+
+    /**
+     * Reflect Map-level classifications (set by _autoClassifyFromRefinedResults)
+     * onto the just-created solid tree rows, so the CNC/BO badges appear without
+     * requiring a save + reopen.
+     */
+    _syncSolidClassificationDom(childrenInfo) {
+        const treeEl = this.container.querySelector('#assembly-tree-container');
+        if (!treeEl || !childrenInfo) return;
+        for (const c of childrenInfo) {
+            const action = this.classifications.get(c.nodeId);
+            if (!action) continue;
+            for (const el of treeEl.querySelectorAll(
+                `.tree-node[data-node-id="${CSS.escape(c.nodeId)}"]`)) {
+                el.classList.add('node-classified');
+                el.dataset.classification = action;
+            }
+        }
+    }
+
+    /**
+     * Once an explosion's solids materialise (cached or freshly generated), wire
+     * them into the tree data, auto-classify from their per-solid refined_class,
+     * push the resulting badges to the DOM, and refresh the BOM/colours. Without
+     * this the sub-solids sit unclassified until a save+reopen re-embeds them.
+     */
+    _onSolidChildrenReady(chiralKey, childrenInfo) {
+        this._embedSolidChildrenInTree(chiralKey, childrenInfo);
+        this._autoClassifyFromRefinedResults();
+        this._syncSolidClassificationDom(childrenInfo);
+        this._updateTreeSelectability();
+        this._updateProgress();
+        this._refreshAssemblyColors?.();
+        this._renderPartsList(this._consolidationGroups);
     }
 
     // ---------------------------------------------------------------
@@ -3250,6 +3321,7 @@ export class AnalysisPage {
      */
     _autoClassifyFromRefinedResults() {
         if (!this._cncAnalysisResults || !this._projectStateRestored || !this._treeData) return;
+        const treeEl = this.container.querySelector('#assembly-tree-container');
         const MAP = {
             section: 'postprocess', plate: 'postprocess',
             formed_plate: 'postprocess', bent_section: 'postprocess',
@@ -3264,6 +3336,17 @@ export class AnalysisPage {
             const conf = res.refined_confidence;
             if (action && conf != null && conf >= 0.5) {
                 this.classifications.set(node.id, action);
+                // Reflect onto the tree row(s) NOW. Auto-classify must update the
+                // DOM, not just the Map — otherwise badges only appear after a
+                // reload re-applies saved classifications via _restoreProjectState
+                // (the "classified in state/BOM but blank in tree" bug, ...-ov9).
+                if (treeEl) {
+                    for (const el of treeEl.querySelectorAll(
+                        `.tree-node[data-node-id="${CSS.escape(node.id)}"]`)) {
+                        el.classList.add('node-classified');
+                        el.dataset.classification = action;
+                    }
+                }
                 changed++;
             }
         };
