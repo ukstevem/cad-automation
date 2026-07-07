@@ -24,7 +24,9 @@ from openpyxl.utils import get_column_letter
 from app.services.bom_builder import resolve_display_name
 from app.services.bom_manifest import (
     MANIFEST_HEADERS,
+    _SOLID_KEY_RE,
     _build_node_to_ref,
+    _walk_count_instances,
     assign_bom_items,
     build_manifest_rows,
     build_ref_to_stl,
@@ -160,11 +162,82 @@ def _build_bom_data(cache: dict) -> dict:
 
     seen_refs: set = set()  # track refs we've already emitted a row for
 
+    # A multi-solid part whose sub-solids are classified individually ("<ref>:s<n>"
+    # keys) is a flat collection of discrete parts, not a weldment — emit each
+    # unique solid as its own BOM row, deduped by intra_solid_groups, mirroring
+    # the frontend. (Weldments classify the parent ref itself and fall through to
+    # the collapse-to-parent path below.)
+    intra_canon: Dict[Tuple[str, int], int] = {}
+    intra_size: Dict[Tuple[str, int], int] = {}
+    for g in (cache.get("consolidation") or {}).get("intra_solid_groups", []):
+        rid = g.get("ref_id")
+        idxs = g.get("solid_indices", []) or []
+        if rid is None or len(idxs) <= 1:
+            continue
+        canon = idxs[0]
+        for i in idxs:
+            intra_canon[(rid, i)] = canon
+        intra_size[(rid, canon)] = len(idxs)
+    instance_counts = _walk_count_instances(tree)
+    seen_solids: set = set()   # (parent_ref, canonical idx) already emitted
+    solid_bom_idx = 0
+
+    def _bucket(action: str, cnc_res: Optional[dict], item: dict) -> None:
+        if action == "postprocess":
+            # Formed plate / formed (bent) section needs a flat-pattern before
+            # NC1/DXF, so keep them separate from ready-to-cut CNC items.
+            refined = (cnc_res or {}).get("refined_class")
+            if refined in ("FORMED_PLATE", "BENT_SECTION"):
+                formed_items.append(item)
+            elif cnc_res and cnc_res.get("type") not in (None, "unknown"):
+                cnc_items.append(item)
+            else:
+                unknown_items.append(item)
+        elif action == "bought-out":
+            bo_items.append(item)
+        elif action == "exclude":
+            excluded_items.append(item)
+
     for node_id, action in classifications.items():
-        # Classifications are stored against instance node IDs (and "<ref>:s<n>"
-        # solid keys for per-solid classified multi-solid parts); resolve to the
-        # prototype ref_id so the lookups against cnc_results, member_names,
-        # parent_names, and stl_map (all keyed by ref_id) succeed.
+        if action not in ("postprocess", "bought-out", "exclude"):
+            continue
+
+        solid_m = _SOLID_KEY_RE.match(node_id)
+        if solid_m:
+            parent_ref = solid_m.group(1)
+            try:
+                idx = int(node_id.rsplit(":s", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            canon = intra_canon.get((parent_ref, idx), idx)
+            ckey = (parent_ref, canon)
+            if ckey in seen_solids:
+                continue
+            seen_solids.add(ckey)
+            parent_res = cnc_results.get(parent_ref) or {}
+            solids = parent_res.get("solids") or []
+            cnc_res = solids[idx] if 0 <= idx < len(solids) else None
+            solid_bom_idx += 1
+            parent_instances = instance_counts.get(parent_ref, 1) or 1
+            # Use the shared per-solid BOM Item from assign_bom_items so the BOM
+            # sheet and the NC Index carry identical IDs (fall back to a local
+            # counter only if the assignment is somehow missing).
+            assignment = bom_assignments.get(node_id) or {}
+            item = {
+                "bom_item": assignment.get("bom_item") or f"B{solid_bom_idx:03d}",
+                "name": f"{member_names.get(parent_ref, parent_ref)} - Solid {idx + 1}",
+                "ref_id": node_id,
+                "qty": assignment.get("bom_total_qty") or (intra_size.get(ckey, 1) * parent_instances),
+                "parent": parent_names.get(parent_ref, ""),
+                "stl_url": stl_map_raw.get(node_id, ""),
+                "cnc": cnc_res,
+            }
+            _bucket(action, cnc_res, item)
+            continue
+
+        # Single-solid part / instance: resolve to the prototype ref_id so the
+        # lookups against cnc_results, member_names, parent_names, and stl_map
+        # (all keyed by ref_id) succeed.
         ref_id = resolve_classification_ref(node_id, node_to_ref)
         if ref_id in seen_refs:
             continue
@@ -208,23 +281,7 @@ def _build_bom_data(cache: dict) -> dict:
             "stl_url": stl_url,
             "cnc": cnc_res,
         }
-
-        if action == "postprocess":
-            # Formed plate / formed (bent) section: a flat-pattern development is
-            # needed before NC1/DXF can be produced, so keep them in their own
-            # bucket rather than mixed with ready-to-cut CNC items. The refined
-            # class reflects any user override (applied above).
-            refined = (cnc_res or {}).get("refined_class")
-            if refined in ("FORMED_PLATE", "BENT_SECTION"):
-                formed_items.append(item)
-            elif cnc_res and cnc_res.get("type") not in (None, "unknown"):
-                cnc_items.append(item)
-            else:
-                unknown_items.append(item)
-        elif action == "bought-out":
-            bo_items.append(item)
-        elif action == "exclude":
-            excluded_items.append(item)
+        _bucket(action, cnc_res, item)
 
     return {
         "project_number": project_number,

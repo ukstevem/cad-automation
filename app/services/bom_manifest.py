@@ -154,16 +154,59 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     node_to_ref = _build_node_to_ref(tree)
     instance_counts = _walk_count_instances(tree)
 
+    # Intra-solid dedup for multi-solid parts whose sub-solids are classified
+    # individually ("<ref>:s<n>" keys) — a flat collection of discrete parts.
+    # Each unique solid (deduped by intra_solid_groups) gets its own BOM Item.
+    # A genuine weldment classifies its parent ref (not the solids) and takes
+    # the collapse-to-parent path below.
+    intra_canon: Dict[Tuple[str, int], int] = {}
+    intra_size: Dict[Tuple[str, int], int] = {}
+    for g in (cache.get("consolidation") or {}).get("intra_solid_groups", []):
+        rid = g.get("ref_id")
+        idxs = g.get("solid_indices", []) or []
+        if rid is None or len(idxs) <= 1:
+            continue
+        canon = idxs[0]
+        for i in idxs:
+            intra_canon[(rid, i)] = canon
+        intra_size[(rid, canon)] = len(idxs)
+
     out: Dict[str, Dict[str, Any]] = {}
     seen_refs: set = set()
+    seen_solids: Dict[Tuple[str, int], Dict[str, Any]] = {}
     bom_idx = 0
 
     for node_id, action in classifications.items():
         if action not in ("postprocess", "bought-out", "exclude"):
             continue
-        # Resolve instance node_id → prototype ref_id.  Solid-level keys
-        # ("<ref>:s<n>") collapse onto their parent multi-solid part so all of
-        # its solids share one BOM Item rather than fragmenting per solid.
+
+        # Per-solid classification of a multi-solid part: emit one BOM Item per
+        # unique solid (identical solids share one), keyed by the solid key.
+        solid_m = _SOLID_KEY_RE.match(node_id)
+        if solid_m:
+            parent_ref = solid_m.group(1)
+            try:
+                idx = int(node_id.rsplit(":s", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            canon = intra_canon.get((parent_ref, idx), idx)
+            ckey = (parent_ref, canon)
+            if ckey in seen_solids:
+                out[node_id] = seen_solids[ckey]
+                continue
+            bom_idx += 1
+            parent_instances = instance_counts.get(parent_ref, 1) or 1
+            entry = {
+                "bom_item": f"B{bom_idx:03d}",
+                "bom_total_qty": intra_size.get(ckey, 1) * parent_instances,
+                "action": action,
+                "group_name": "",
+            }
+            seen_solids[ckey] = entry
+            out[node_id] = entry
+            continue
+
+        # Resolve instance node_id → prototype ref_id (single-solid parts).
         ref_id = resolve_classification_ref(node_id, node_to_ref)
         if ref_id in seen_refs:
             continue
@@ -227,54 +270,75 @@ def build_manifest_rows(cache: dict) -> List[Dict[str, Any]]:
 
     rows: List[Dict[str, Any]] = []
 
-    for ref_id, result in cnc_results.items():
-        assignment = bom_assignments.get(ref_id)
-        if not assignment or assignment["action"] != "postprocess":
+    # Intra-solid dedup for per-solid multi-solid parts (mirror assign_bom_items),
+    # so the NC Index lists one entry per unique CNC solid, not per placement.
+    intra_canon: Dict[Tuple[str, int], int] = {}
+    for g in (cache.get("consolidation") or {}).get("intra_solid_groups", []):
+        rid = g.get("ref_id")
+        idxs = g.get("solid_indices", []) or []
+        if rid is None or len(idxs) <= 1:
             continue
+        for i in idxs:
+            intra_canon[(rid, i)] = idxs[0]
 
-        def _row_for(r: dict, solid_idx: Optional[int]) -> Optional[Dict[str, Any]]:
-            fp = r.get("nc1_path") or r.get("dxf_path")
-            if not fp:
-                return None
-            # Formed plate / formed section: the flat-projection NC1/DXF ignores
-            # the bends, so exclude it from the manifest (NC Index, zip, csv).
-            if effective_refined(overrides, ref_id, solid_idx, r) in _FORMED_REFINED:
-                return None
-            dims = r.get("dims") or {}
-            return {
-                "bom_item": assignment["bom_item"],
-                "filename": Path(fp).name,
-                "ext": Path(fp).suffix.lstrip(".").lower(),
-                "nc1_hash": r.get("nc1_hash", "") or "",
-                "ref_id": ref_id,
-                "solid_idx": solid_idx if solid_idx is not None else "",
-                "consolidation_group": assignment["group_name"],
-                "member_name": (
-                    member_names.get(ref_id)
-                    or ref_to_canonical_name.get(ref_id, "")
-                ),
-                "parent_assembly": parent_names.get(ref_id, ""),
-                "type": r.get("type", ""),
-                "category": r.get("category", ""),
-                "designation": r.get("designation", ""),
-                "profile_type": r.get("profile_type", ""),
-                "L_mm": dims.get("L"),
-                "H_mm": dims.get("H"),
-                "W_mm": dims.get("W"),
-                "T_mm": dims.get("T"),
-                "qty": instance_counts.get(ref_id, 1),
-                "bom_total_qty": assignment["bom_total_qty"],
-                "mass_kg": r.get("mass_kg"),
-                "stl_url": ref_to_stl.get(ref_id, ""),
-            }
+    def _row_for(ref_id: str, assignment: dict, r: dict,
+                 solid_idx: Optional[int]) -> Optional[Dict[str, Any]]:
+        fp = r.get("nc1_path") or r.get("dxf_path")
+        if not fp:
+            return None
+        # Formed plate / formed section: the flat-projection NC1/DXF ignores
+        # the bends, so exclude it from the manifest (NC Index, zip, csv).
+        if effective_refined(overrides, ref_id, solid_idx, r) in _FORMED_REFINED:
+            return None
+        dims = r.get("dims") or {}
+        return {
+            "bom_item": assignment["bom_item"],
+            "filename": Path(fp).name,
+            "ext": Path(fp).suffix.lstrip(".").lower(),
+            "nc1_hash": r.get("nc1_hash", "") or "",
+            "ref_id": ref_id,
+            "solid_idx": solid_idx if solid_idx is not None else "",
+            "consolidation_group": assignment["group_name"],
+            "member_name": (
+                member_names.get(ref_id)
+                or ref_to_canonical_name.get(ref_id, "")
+            ),
+            "parent_assembly": parent_names.get(ref_id, ""),
+            "type": r.get("type", ""),
+            "category": r.get("category", ""),
+            "designation": r.get("designation", ""),
+            "profile_type": r.get("profile_type", ""),
+            "L_mm": dims.get("L"),
+            "H_mm": dims.get("H"),
+            "W_mm": dims.get("W"),
+            "T_mm": dims.get("T"),
+            "qty": instance_counts.get(ref_id, 1),
+            "bom_total_qty": assignment["bom_total_qty"],
+            "mass_kg": r.get("mass_kg"),
+            "stl_url": ref_to_stl.get(ref_id, ""),
+        }
 
+    for ref_id, result in cnc_results.items():
         if result.get("type") == "multi_solid":
+            # Per-solid: look up the per-solid BOM Item, keep only CNC
+            # (postprocess) solids, and dedup identical solids.
+            seen: set = set()
             for idx, solid in enumerate(result.get("solids", []) or []):
-                row = _row_for(solid, idx)
+                assignment = bom_assignments.get(f"{ref_id}:s{idx}")
+                if not assignment or assignment["action"] != "postprocess":
+                    continue
+                canon = intra_canon.get((ref_id, idx), idx)
+                if (ref_id, canon) in seen:
+                    continue
+                seen.add((ref_id, canon))
+                row = _row_for(ref_id, assignment, solid, idx)
                 if row:
                     rows.append(row)
         else:
-            row = _row_for(result, None)
+            assignment = bom_assignments.get(ref_id)
+            if not assignment or assignment["action"] != "postprocess":
+                continue
+            row = _row_for(ref_id, assignment, result, None)
             if row:
                 rows.append(row)
 

@@ -4845,15 +4845,28 @@ export class AnalysisPage {
                 if (this.explodedNodes.has(node.id)) {
                     const chiralKey = `${refId}:${isMirr ? 'M' : 'N'}`;
                     const altKey    = `${refId}:${isMirr ? 'N' : 'M'}`;
-                    const solids    = this._solidChildrenCache.get(chiralKey)
+                    let solids      = this._solidChildrenCache.get(chiralKey)
                                    ?? this._solidChildrenCache.get(altKey);
+                    // Fall back to the solids embedded in the tree node itself
+                    // (backend _embed_solid_children on reopen, or
+                    // _embedSolidChildrenInTree on a live explode) when the
+                    // runtime cache is empty. The tree renders from these, so
+                    // without this fallback the BOM collapses to a single
+                    // "Product" row while the tree shows every solid — the
+                    // cache/tree source split.
+                    if (!(solids && solids.length > 0)
+                        && Array.isArray(node.children) && node.children.length > 0) {
+                        solids = node.children
+                            .filter(c => c.node_type === 'solid')
+                            .map(c => ({ nodeId: c.id, name: c.name }));
+                    }
                     if (solids && solids.length > 0) {
                         for (const solid of solids) {
                             this._bomUpsert(itemMap, solid.nodeId, solid.name,
                                             solid.nodeId, isMirr, node.name);
                         }
                     } else {
-                        // Solid children not yet loaded — show the multi-solid itself
+                        // Genuinely no solids known yet — show the multi-solid itself.
                         this._bomUpsert(itemMap, refId, node.name, node.id, isMirr, parentName);
                     }
                 } else {
@@ -5212,7 +5225,12 @@ export class AnalysisPage {
         });
 
         panel.querySelector('.parts-bom-dl-btn')?.addEventListener('click', () => {
-            this._downloadBOM(allCncItems, boItems, unknownItems, excludedItems);
+            // Rebuild from current state at click time — a render that happened
+            // before the solids materialised would otherwise pin the export to a
+            // single collapsed "Product" row via this handler's closure.
+            const b = this._buildBOMItems();
+            this._downloadBOM([...b.unknownItems, ...b.cncItems],
+                              b.boItems, b.unknownItems, b.excludedItems);
         });
 
         panel.querySelector('.parts-bom-xlsx-btn')?.addEventListener('click', () => {

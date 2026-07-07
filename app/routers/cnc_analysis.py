@@ -721,6 +721,26 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
             canonical_map[rid] = canon
         group_all_refs[canon] = grp_refs
 
+    # Solid-level dedup for multi-solid parts: geometrically identical solids
+    # within one part are grouped in intra_solid_groups. Emit only the canonical
+    # solid per group so duplicate solids don't each produce a file.
+    solid_canonical: dict = {}          # (ref_id, solid_idx) -> canonical idx
+    solid_group_all: dict = {}          # (ref_id, canonical idx) -> [all idxs]
+    for g in cache.get("consolidation", {}).get("intra_solid_groups", []):
+        rid = g.get("ref_id")
+        idxs = g.get("solid_indices", [])
+        if rid is None or len(idxs) <= 1:
+            continue
+        canon_idx = idxs[0]
+        for i in idxs:
+            solid_canonical[(rid, i)] = canon_idx
+        solid_group_all[(rid, canon_idx)] = idxs
+
+    # Per-solid classifications — a multi-solid's analysis produces geometry for
+    # EVERY solid it contains (including excluded / bought-out ones), so the
+    # export must be filtered to CNC (postprocess) solids only.
+    classifications: dict = (cache.get("project_state") or {}).get("classifications", {})
+
     # Collect (arc_name, file_path, meta) for each output file
     entries: List[tuple] = []
 
@@ -764,7 +784,17 @@ async def download_all_cnc_files(filename: str, ext: str) -> Response:
         consolidated = group_all_refs.get(ref_id, [ref_id])
         if result.get("type") == "multi_solid":
             for idx, solid in enumerate(result.get("solids", [])):
-                _collect(ref_id, solid, idx, consolidated)
+                # Only CNC-classified solids belong in the export — skip
+                # exclude / bought-out / unclassified.
+                if classifications.get(f"{ref_id}:s{idx}") != "postprocess":
+                    continue
+                # Keep only the canonical solid of each intra-solid group so
+                # geometrically identical solids emit a single file.
+                if solid_canonical.get((ref_id, idx), idx) != idx:
+                    continue
+                solid_cons = [f"{ref_id}:s{i}"
+                              for i in solid_group_all.get((ref_id, idx), [idx])]
+                _collect(ref_id, solid, idx, solid_cons)
         else:
             _collect(ref_id, result, None, consolidated)
 
