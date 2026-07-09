@@ -352,14 +352,19 @@ async def classify_parts(filename: str, body: Dict[str, Any] = Body(...)) -> Dic
     if pending:
         analysis_json_path = str(_analysis_json_path(filename))
         try:
+            # ref_ids + member_ids go on stdin, NOT argv — a flat file with a few
+            # thousand top-level parts overflows ARG_MAX ("[Errno 7] Argument
+            # list too long") when they're passed as command-line arguments.
+            worker_input = json.dumps({"ref_ids": pending, "member_ids": member_ids})
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, str(_CLASSIFY_WORKER),
-                str(file_path), analysis_json_path,
-                json.dumps(pending), json.dumps(member_ids), steel_grade,
+                str(file_path), analysis_json_path, steel_grade,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=float(_CNC_TIMEOUT))
+                proc.communicate(input=worker_input.encode("utf-8")),
+                timeout=float(_CNC_TIMEOUT))
         except Exception as exc:
             logger.error("classify_worker_failed", filename=filename, error=str(exc))
             raise HTTPException(status_code=500,
@@ -529,9 +534,6 @@ async def start_cnc_analysis(
     out_dir = _cnc_out_dir(filename)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ref_ids_json = json.dumps(pending_ref_ids)
-    member_ids_json = json.dumps(member_ids)
-    parent_names_json = json.dumps(parent_names)
     # project_number / steel_grade are plain strings — pass directly as argv
 
     # Per-ref instance counts from the cached assembly tree.  Each NC1 file is
@@ -539,7 +541,15 @@ async def start_cnc_analysis(
     # already live in separate consolidation groups via the fingerprint).
     tree = ((cache or {}).get("analysis") or {}).get("assembly_tree") or []
     instance_counts = _count_ref_instances(tree)
-    instance_counts_json = json.dumps(instance_counts)
+
+    # ref_ids + the other large maps go on stdin, NOT argv — a flat file with a
+    # few thousand parts overflows ARG_MAX when they're command-line arguments.
+    worker_input = json.dumps({
+        "ref_ids": pending_ref_ids,
+        "member_ids": member_ids,
+        "parent_names": parent_names,
+        "instance_counts": instance_counts,
+    }).encode("utf-8")
 
     async def run_cnc_async(_progress_callback):
         """Run the CNC worker in a subprocess."""
@@ -549,13 +559,10 @@ async def start_cnc_analysis(
                 str(_CNC_WORKER),
                 str(file_path),
                 analysis_json_path,
-                ref_ids_json,
                 str(out_dir),
-                member_ids_json,
-                parent_names_json,
                 project_number,
                 steel_grade,
-                instance_counts_json,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -564,7 +571,7 @@ async def start_cnc_analysis(
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
+                proc.communicate(input=worker_input),
                 timeout=float(_CNC_TIMEOUT),
             )
         except asyncio.TimeoutError:

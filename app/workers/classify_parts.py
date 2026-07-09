@@ -44,23 +44,25 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 
 def main() -> None:
-    if len(sys.argv) < 4:
+    if len(sys.argv) < 3:
         print("Usage: classify_parts.py <file_path> <analysis_json_path> "
-              "<ref_ids_json> [member_ids_json] [steel_grade]", file=sys.stderr)
+              "[steel_grade]  (ref_ids + member_ids JSON on stdin)", file=sys.stderr)
         sys.exit(1)
 
     file_path = sys.argv[1]
     analysis_json_path = sys.argv[2]
-    ref_ids_json = sys.argv[3]
-    member_ids_json = sys.argv[4] if len(sys.argv) > 4 else "{}"
-    steel_grade = sys.argv[5] if len(sys.argv) > 5 else ""
+    steel_grade = sys.argv[3] if len(sys.argv) > 3 else ""
 
     project_root = Path(__file__).parent.parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    ref_ids = json.loads(ref_ids_json)
-    member_ids = json.loads(member_ids_json)
+    # ref_ids + member_ids arrive on stdin as JSON — passing a few thousand refs
+    # via argv exceeds ARG_MAX on Linux.
+    _stdin = sys.stdin.read()
+    _payload = json.loads(_stdin) if _stdin.strip() else {}
+    ref_ids = _payload.get("ref_ids", [])
+    member_ids = _payload.get("member_ids", {})
 
     result_holder: list = [None]
     error_holder: list = [None]

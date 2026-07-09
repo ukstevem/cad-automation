@@ -44,33 +44,34 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 
 def main() -> None:
-    if len(sys.argv) < 5:
+    if len(sys.argv) < 4:
         print(
             "Usage: analyse_cnc_parts.py <file_path> <analysis_json_path>"
-            " <ref_ids_json> <out_dir> [member_ids_json]",
+            " <out_dir> [project_number] [steel_grade]"
+            "  (ref_ids/member_ids/parent_names/instance_counts JSON on stdin)",
             file=sys.stderr,
         )
         sys.exit(1)
 
     file_path = sys.argv[1]
     analysis_json_path = sys.argv[2]
-    ref_ids_json = sys.argv[3]
-    out_dir = Path(sys.argv[4])
-    member_ids_json = sys.argv[5] if len(sys.argv) > 5 else "{}"
-    parent_names_json = sys.argv[6] if len(sys.argv) > 6 else "{}"
-    project_number = sys.argv[7] if len(sys.argv) > 7 else ""
-    steel_grade = sys.argv[8] if len(sys.argv) > 8 else ""
-    instance_counts_json = sys.argv[9] if len(sys.argv) > 9 else "{}"
+    out_dir = Path(sys.argv[3])
+    project_number = sys.argv[4] if len(sys.argv) > 4 else ""
+    steel_grade = sys.argv[5] if len(sys.argv) > 5 else ""
 
     # Ensure the project root is on sys.path so 'app' package is importable.
     project_root = Path(__file__).parent.parent.parent
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    ref_ids = json.loads(ref_ids_json)
-    member_ids = json.loads(member_ids_json)
-    parent_names = json.loads(parent_names_json)
-    instance_counts = json.loads(instance_counts_json) or {}
+    # Large JSON payloads arrive on stdin — passing a few thousand refs via argv
+    # exceeds ARG_MAX ("[Errno 7] Argument list too long") on Linux.
+    _stdin = sys.stdin.read()
+    _payload = json.loads(_stdin) if _stdin.strip() else {}
+    ref_ids = _payload.get("ref_ids", [])
+    member_ids = _payload.get("member_ids", {})
+    parent_names = _payload.get("parent_names", {})
+    instance_counts = _payload.get("instance_counts", {}) or {}
 
     result_holder: list = [None]
     error_holder: list = [None]

@@ -3469,19 +3469,32 @@ export class AnalysisPage {
         if (refIds.length) {
             refIds.forEach(r => this._classifyInFlight.add(r));
             this._updateDetectingIndicator();
-            const memberIds = {};
-            for (const r of refIds) memberIds[r] = refs.get(r);
+            // Classify in batches: a flat model can expose thousands of parts at
+            // once, and one giant request blocks for minutes (and is all-or-
+            // nothing). Batching streams results in — the tree/BOM fill as each
+            // batch lands — and keeps any single request small.
+            const BATCH = 250;
             try {
-                const resp = await this.api.classifyParts(
-                    this._currentFilename, refIds, memberIds, this._lastSteelGrade || '');
-                if (resp?.results) {
-                    this._cncAnalysisResults = this._cncAnalysisResults || {};
-                    for (const [r, res] of Object.entries(resp.results)) {
-                        if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
+                for (let i = 0; i < refIds.length; i += BATCH) {
+                    const batch = refIds.slice(i, i + BATCH);
+                    const memberIds = {};
+                    for (const r of batch) memberIds[r] = refs.get(r);
+                    try {
+                        const resp = await this.api.classifyParts(
+                            this._currentFilename, batch, memberIds, this._lastSteelGrade || '');
+                        if (resp?.results) {
+                            this._cncAnalysisResults = this._cncAnalysisResults || {};
+                            for (const [r, res] of Object.entries(resp.results)) {
+                                if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
+                            }
+                        }
+                        // Apply after each batch so classifications appear
+                        // progressively rather than all at the end.
+                        this._autoClassifyFromRefinedResults();
+                    } catch (e) {
+                        console.warn('classifyFrontier batch failed:', e);
                     }
                 }
-            } catch (e) {
-                console.warn('classifyFrontier failed:', e);
             } finally {
                 refIds.forEach(r => this._classifyInFlight.delete(r));
                 this._updateDetectingIndicator();
