@@ -69,10 +69,17 @@ def classify_part(features: Optional[Dict[str, Any]],
     if vol is not None and vol < EXCLUDE_VOL_MM3:
         return {"class": "EXCLUDE", "confidence": 0.90, "reason": "tiny/degenerate"}
 
-    # 4. Closed hollow cross-section -> box section.
+    # 4. Closed hollow cross-section -> box/tube section. Only trust it when the
+    #    section library actually matched (rule 7's verdict). An unmatched hollow
+    #    means the OBB / cross-section doesn't correspond to an available tube
+    #    size (handrail posts and other non-standard tube), so keep the SECTION
+    #    suggestion but below the 0.5 auto-apply threshold for review — mirrors
+    #    the unmatched "flanged" path below.
     holes = f.get("n_holes")
     if holes is not None and holes >= 1:
-        return {"class": "SECTION", "confidence": 0.90, "reason": "hollow box"}
+        if rule_type == "section":
+            return {"class": "SECTION", "confidence": 0.90, "reason": "hollow box"}
+        return {"class": "SECTION", "confidence": 0.45, "reason": "hollow, no library match"}
 
     # 5. Many convex bends -> curved tube (bent section).
     nb = f.get("n_convex_bends")
