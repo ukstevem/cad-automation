@@ -167,6 +167,23 @@ export class ApiClient {
         );
     }
 
+    /** Start (or reconnect to) a parallel background classification task. */
+    async classifyFrontier(filename, refIds, memberIds = {}, steelGrade = '') {
+        return this._postJson(
+            `/api/v1/cnc-analysis/classify-frontier/${encodeURIComponent(filename)}`,
+            { ref_ids: refIds, member_ids: memberIds, steel_grade: steelGrade },
+        );
+    }
+
+    async classifyFrontierStatus(taskId) {
+        return this._get(`/api/v1/cnc-analysis/classify-frontier/status/${encodeURIComponent(taskId)}`);
+    }
+
+    /** Read-only cached refined-class map (for merging partial results). */
+    async getClassification(filename) {
+        return this._get(`/api/v1/cnc-analysis/classification/${encodeURIComponent(filename)}`);
+    }
+
     // ── Projects ───────────────────────────────────────────────────
 
     async listProjects() {

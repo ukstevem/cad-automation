@@ -225,6 +225,11 @@ export class AnalysisPage {
             clearInterval(this._cncPollTimer);
             this._cncPollTimer = null;
         }
+        if (this._frontierPollTimer) {
+            clearTimeout(this._frontierPollTimer);
+            this._frontierPollTimer = null;
+        }
+        this._frontierClassifying = false;
         if (this._nestingPollTimer) {
             clearInterval(this._nestingPollTimer);
             this._nestingPollTimer = null;
@@ -3463,46 +3468,83 @@ export class AnalysisPage {
      */
     async _classifyFrontier() {
         if (!this._currentFilename || !this._treeData || !this._projectStateRestored) return;
+        // A frontier task is already running/polling — don't start a second.
+        if (this._frontierClassifying) { this._autoClassifyFromRefinedResults(); return; }
+
         const refs = this._collectFrontierRefs();
-        this._classifyInFlight = this._classifyInFlight || new Set();
-        const refIds = [...refs.keys()].filter(r => !this._classifyInFlight.has(r));
-        if (refIds.length) {
-            refIds.forEach(r => this._classifyInFlight.add(r));
-            this._updateDetectingIndicator();
-            // Classify in batches: a flat model can expose thousands of parts at
-            // once, and one giant request blocks for minutes (and is all-or-
-            // nothing). Batching streams results in — the tree/BOM fill as each
-            // batch lands — and keeps any single request small.
-            const BATCH = 250;
-            try {
-                for (let i = 0; i < refIds.length; i += BATCH) {
-                    const batch = refIds.slice(i, i + BATCH);
-                    const memberIds = {};
-                    for (const r of batch) memberIds[r] = refs.get(r);
-                    try {
-                        const resp = await this.api.classifyParts(
-                            this._currentFilename, batch, memberIds, this._lastSteelGrade || '');
-                        if (resp?.results) {
-                            this._cncAnalysisResults = this._cncAnalysisResults || {};
-                            for (const [r, res] of Object.entries(resp.results)) {
-                                if (res && !this._cncAnalysisResults[r]) this._cncAnalysisResults[r] = res;
-                            }
-                        }
-                        // Apply after each batch so classifications appear
-                        // progressively rather than all at the end.
-                        this._autoClassifyFromRefinedResults();
-                    } catch (e) {
-                        console.warn('classifyFrontier batch failed:', e);
-                    }
-                }
-            } finally {
-                refIds.forEach(r => this._classifyInFlight.delete(r));
-                this._updateDetectingIndicator();
-            }
+        const refIds = [...refs.keys()];
+        if (!refIds.length) { this._autoClassifyFromRefinedResults(); return; }
+
+        const memberIds = {};
+        for (const r of refIds) memberIds[r] = refs.get(r);
+
+        // Classification runs as a parallel background task server-side: it fans
+        // the parts across cores, persists as it goes, and survives navigation.
+        // A flat model can expose thousands of parts at once, far too slow (and
+        // too big for one request) to do inline.
+        let resp;
+        try {
+            resp = await this.api.classifyFrontier(
+                this._currentFilename, refIds, memberIds, this._lastSteelGrade || '');
+        } catch (e) {
+            console.warn('classifyFrontier start failed:', e);
+            return;
         }
-        // Always apply — an explode may reveal solids whose classes come from a
-        // parent that is already cached (no new POST needed).
-        this._autoClassifyFromRefinedResults();
+        if (!resp || !resp.task_id) {
+            // Nothing pending (all already classified) — just apply.
+            this._autoClassifyFromRefinedResults();
+            return;
+        }
+        this._frontierClassifying = true;
+        this._updateDetectingIndicator();
+        this._pollFrontierClassify(resp.task_id, this._currentFilename);
+    }
+
+    /**
+     * Poll a background classify task, merging the growing classification map
+     * from the sidecar so parts light up progressively. Stops (without cancelling
+     * the server task) if the user switches files.
+     */
+    async _pollFrontierClassify(taskId, filename) {
+        const beforeCount = Object.keys(this._cncAnalysisResults || {}).length;
+        const tick = async () => {
+            if (filename !== this._currentFilename) {
+                this._frontierClassifying = false;
+                this._updateDetectingIndicator();
+                return;
+            }
+            let st = null;
+            try { st = await this.api.classifyFrontierStatus(taskId); }
+            catch { /* transient — try again */ }
+
+            // Merge whatever's classified so far and apply progressively.
+            try {
+                const data = await this.api.getClassification(filename);
+                if (data?.classification) {
+                    this._cncAnalysisResults = this._cncAnalysisResults || {};
+                    for (const [r, res] of Object.entries(data.classification)) {
+                        if (res) this._cncAnalysisResults[r] = res;
+                    }
+                    this._autoClassifyFromRefinedResults();
+                }
+            } catch { /* ignore transient fetch errors */ }
+
+            if (st && (st.status === 'completed' || st.status === 'failed')) {
+                this._frontierClassifying = false;
+                this._updateDetectingIndicator();
+                // If this task only covered a subset (e.g. reconnected to a
+                // smaller in-flight task) and it made progress, continue with the
+                // parts that are still pending. Requiring progress prevents a loop
+                // on refs that persistently fail to classify.
+                if (st.status === 'completed' && filename === this._currentFilename
+                    && Object.keys(this._cncAnalysisResults || {}).length > beforeCount) {
+                    this._classifyFrontier();
+                }
+                return;
+            }
+            this._frontierPollTimer = setTimeout(tick, 8000);
+        };
+        tick();
     }
 
     /**
@@ -3513,7 +3555,8 @@ export class AnalysisPage {
     _updateDetectingIndicator() {
         const el = this.container?.querySelector('#detecting-indicator');
         if (!el) return;
-        el.hidden = !(this._classifyInFlight && this._classifyInFlight.size > 0);
+        el.hidden = !this._frontierClassifying
+            && !(this._classifyInFlight && this._classifyInFlight.size > 0);
     }
 
     // ---------------------------------------------------------------

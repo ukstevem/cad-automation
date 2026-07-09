@@ -27,6 +27,7 @@ GET  /cnc-analysis/download/{filename}/{safe_ref}/{ext}
 import asyncio
 import io
 import json
+import os
 import re
 import sys
 import zipfile
@@ -393,6 +394,127 @@ async def classify_parts(filename: str, body: Dict[str, Any] = Body(...)) -> Dic
 
     return {"filename": filename,
             "results": {r: _cached(r) or classification.get(r) for r in ref_ids}}
+
+
+# ── Parallel background frontier classification ──────────────────────────────
+# Flat models with thousands of top-level parts are too slow for per-request
+# classification (per-part geometry ~seconds; one 117 MB file open ~1 min, and
+# the old frontend batching re-opened the file per batch). This runs the whole
+# frontier as ONE background task that fans chunks across cores, persists
+# incrementally, and reports progress — and it survives navigation because the
+# task lives server-side. Leave one core for uvicorn so the app stays responsive.
+_CLASSIFY_CONCURRENCY = max(1, (os.cpu_count() or 2) - 1)
+_CLASSIFY_CHUNK = 200
+
+
+async def _classify_chunk(file_path: Path, analysis_json_path: str,
+                          chunk: List[str], member_ids: dict,
+                          steel_grade: str) -> dict:
+    """Run one classify_parts.py subprocess for a chunk of refs (payload on stdin)."""
+    worker_input = json.dumps({
+        "ref_ids": chunk,
+        "member_ids": {r: member_ids.get(r, "") for r in chunk},
+    }).encode("utf-8")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(_CLASSIFY_WORKER),
+        str(file_path), analysis_json_path, steel_grade,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+        proc.communicate(input=worker_input), timeout=float(_CNC_TIMEOUT))
+    if proc.returncode != 0:
+        stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"classify chunk exit {proc.returncode}: {stderr[:200]}")
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    json_line = next((l for l in stdout.splitlines() if l.strip().startswith("{")), "{}")
+    return json.loads(json_line).get("results", {})
+
+
+@router.post("/cnc-analysis/classify-frontier/{filename}")
+async def classify_frontier(filename: str, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Start (or reconnect to) a background task that classifies many refs in
+    parallel across CPU cores. Idempotent per file: a running task is returned
+    rather than duplicated. Results persist to the sidecar as chunks complete."""
+    file_path = Path(settings.UPLOAD_DIR) / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404,
+                            detail={"error": "File not found", "filename": filename})
+
+    # Reconnect to an in-flight task for this file rather than starting another.
+    for t in task_manager.get_tasks_for_file(filename, task_type="classify_frontier"):
+        if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            return {"task_id": t.task_id, "status": t.status.value, "total": t.total_items}
+
+    ref_ids: List[str] = body.get("ref_ids", [])
+    member_ids: dict = body.get("member_ids", {})
+    steel_grade: str = body.get("steel_grade", "") or ""
+
+    cache = _load_cache(filename) or {}
+    classification = dict(cache.get("classification") or {})
+    cnc = cache.get("cnc_analysis") or {}
+
+    def _already(r: str) -> bool:
+        if r in classification:
+            return True
+        c = cnc.get(r)
+        return isinstance(c, dict) and c.get("refined_class") is not None
+
+    pending = [r for r in ref_ids if not _already(r)]
+    if not pending:
+        return {"task_id": None, "status": "completed", "total": 0}
+
+    analysis_json_path = str(_analysis_json_path(filename))
+    chunks = [pending[i:i + _CLASSIFY_CHUNK]
+              for i in range(0, len(pending), _CLASSIFY_CHUNK)]
+    total = len(pending)
+    persist_lock = asyncio.Lock()   # serialise sidecar read-modify-write
+    sem = asyncio.Semaphore(_CLASSIFY_CONCURRENCY)
+    state = {"done": 0}
+
+    async def run_async(progress_callback):
+        progress_callback(0, total, "")
+
+        async def do_chunk(chunk: List[str]):
+            async with sem:
+                results = await _classify_chunk(
+                    file_path, analysis_json_path, chunk, member_ids, steel_grade)
+                if results:
+                    async with persist_lock:
+                        try:
+                            existing = load_sidecar(_analysis_json_path(filename))
+                            existing.setdefault("classification", {}).update(results)
+                            atomic_write_json(_analysis_json_path(filename), existing)
+                        except SidecarCorruptError as exc:
+                            logger.error("classify_frontier_persist_skipped_corrupt",
+                                         filename=filename, error=str(exc))
+                state["done"] += len(chunk)
+                progress_callback(state["done"], total, "")
+
+        # A failing chunk shouldn't abort the others — log and keep going.
+        await asyncio.gather(*[do_chunk(c) for c in chunks], return_exceptions=True)
+        return {"classified": state["done"], "total": total}
+
+    task_id = task_manager.submit_async("classify_frontier", filename, run_async)
+    return {"task_id": task_id, "status": "pending", "total": total,
+            "chunks": len(chunks), "concurrency": _CLASSIFY_CONCURRENCY}
+
+
+@router.get("/cnc-analysis/classify-frontier/status/{task_id}")
+async def classify_frontier_status(task_id: str) -> Dict[str, Any]:
+    info = task_manager.get_task(task_id)
+    if not info:
+        raise HTTPException(status_code=404,
+                            detail={"error": "Task not found", "task_id": task_id})
+    return info.to_dict()
+
+
+@router.get("/cnc-analysis/classification/{filename}")
+async def get_classification(filename: str) -> Dict[str, Any]:
+    """Read-only: the cached lightweight classification (refined_class) map, so
+    the frontend can merge partial results while the background task runs."""
+    cache = _load_cache(filename) or {}
+    return {"filename": filename, "classification": cache.get("classification") or {}}
 
 
 @router.post("/cnc-analysis/analyse/{filename}")
