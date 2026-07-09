@@ -449,6 +449,7 @@ async def classify_frontier(filename: str, body: Dict[str, Any] = Body(...)) -> 
     ref_ids: List[str] = body.get("ref_ids", [])
     member_ids: dict = body.get("member_ids", {})
     steel_grade: str = body.get("steel_grade", "") or ""
+    force: bool = bool(body.get("force", False))
 
     cache = _load_cache(filename) or {}
     classification = dict(cache.get("classification") or {})
@@ -460,7 +461,9 @@ async def classify_frontier(filename: str, body: Dict[str, Any] = Body(...)) -> 
         c = cnc.get(r)
         return isinstance(c, dict) and c.get("refined_class") is not None
 
-    pending = [r for r in ref_ids if not _already(r)]
+    # force=True re-classifies everything (e.g. after a classifier rule change);
+    # otherwise skip refs that already carry a refined_class.
+    pending = list(ref_ids) if force else [r for r in ref_ids if not _already(r)]
     if not pending:
         return {"task_id": None, "status": "completed", "total": 0}
 

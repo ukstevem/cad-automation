@@ -87,10 +87,16 @@ def classify_part(features: Optional[Dict[str, Any]],
     if rule_type == "section":
         return {"class": "SECTION", "confidence": 0.85, "reason": "library match"}
 
-    # 8. Distinct flanges (web<<flange) -> open rolled section.
+    # 8. Distinct flanges (web<<flange) -> looks like an open rolled section, but
+    #    the library did NOT match (rule 7 above didn't fire), so the OBB /
+    #    cross-section doesn't correspond to an available standard profile. Keep
+    #    the SECTION *suggestion* but below the 0.5 auto-apply threshold, so it
+    #    surfaces for review instead of auto-committing to CNC. This is where
+    #    handrail standards and other non-standard "sections" (frequently
+    #    bought-out) land — geometry alone can't tell procured from fabricated.
     thk = f.get("thk_max_over_teff")
     if thk is not None and thk >= SECTION_THK_RATIO:
-        return {"class": "SECTION", "confidence": 0.70, "reason": "flanged profile"}
+        return {"class": "SECTION", "confidence": 0.45, "reason": "flanged, no library match"}
 
     # 9. Uncertain catch-all: thin uniform open wall — most likely formed, but
     #    could be an unmatched angle. Low confidence -> flag for review.
