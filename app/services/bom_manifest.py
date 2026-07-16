@@ -129,6 +129,30 @@ def build_ref_to_stl(stl_map: Dict[str, str], tree: list) -> Dict[str, str]:
     return out
 
 
+def _pinned_items(cache: dict) -> Dict[str, str]:
+    """{key: "B042"} previously issued for this run, from the sidecar."""
+    return (cache.get("bom_items") or {}).get("assignments") or {}
+
+
+def pin_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
+    """Compute the assignment and record it in ``cache["bom_items"]``.
+
+    Call this from anything that persists the sidecar after the classification
+    set can have changed.  Once a key is pinned it keeps its B-number for the
+    life of the run; only genuinely new keys draw a fresh one.  The caller
+    writes the sidecar.
+    """
+    assignment = assign_bom_items(cache)
+    pins = dict(_pinned_items(cache))
+    for key, entry in assignment.items():
+        pins[key] = entry["bom_item"]
+    cache["bom_items"] = {
+        "assignments": pins,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return assignment
+
+
 def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     """
     Walk classifications in insertion order and assign a BOM Item ID (B001…)
@@ -138,6 +162,16 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     the function resolves each one to its ref_id via the assembly tree before
     looking it up in the consolidation map.  Several instance classifications
     that resolve to the same ref_id collapse to a single BOM Item.
+
+    B-numbers are **pinned**: any key already recorded in ``cache["bom_items"]``
+    keeps the number it was issued, and only unpinned keys draw the next free
+    one.  Without this the numbering is pure insertion order, so re-classifying
+    a run renumbers every item after the first change — silently invalidating an
+    already-issued BOM *and* the ``B###.nc1`` files named after it (a part that
+    drops below the auto-apply confidence threshold leaves ``classifications``
+    entirely and shifts everything behind it).  A part merely changing action
+    keeps its slot either way, since all of postprocess/bought-out/exclude are
+    numbered here.
 
     Returns {ref_id: {"bom_item": "B042", "bom_total_qty": int, "action": str,
                        "group_name": str|""}}.
@@ -174,7 +208,28 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     seen_refs: set = set()
     seen_solids: Dict[Tuple[str, int], Dict[str, Any]] = {}
-    bom_idx = 0
+
+    pins = _pinned_items(cache)
+    # Every pinned number is reserved up-front, so a fresh allocation can never
+    # land on one still owned by a part that just hasn't been walked yet.
+    taken: set = set(pins.values())
+    counter = {"n": 0}
+
+    def _next_free() -> str:
+        while True:
+            counter["n"] += 1
+            cand = f"B{counter['n']:03d}"
+            if cand not in taken:
+                taken.add(cand)
+                return cand
+
+    def _item_for(*keys: str) -> str:
+        """The pinned B-number for any of *keys*, else the next free one."""
+        for k in keys:
+            pinned = pins.get(k)
+            if pinned:
+                return pinned
+        return _next_free()
 
     for node_id, action in classifications.items():
         if action not in ("postprocess", "bought-out", "exclude"):
@@ -194,10 +249,9 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
             if ckey in seen_solids:
                 out[node_id] = seen_solids[ckey]
                 continue
-            bom_idx += 1
             parent_instances = instance_counts.get(parent_ref, 1) or 1
             entry = {
-                "bom_item": f"B{bom_idx:03d}",
+                "bom_item": _item_for(node_id, f"{parent_ref}:s{canon}"),
                 "bom_total_qty": intra_size.get(ckey, 1) * parent_instances,
                 "action": action,
                 "group_name": "",
@@ -217,8 +271,10 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
             # classifications for any group member don't re-allocate IDs.
             for rid in group["ref_ids"]:
                 seen_refs.add(rid)
-            bom_idx += 1
-            item_id = f"B{bom_idx:03d}"
+            # Pin lookup spans the whole group: the number was issued against
+            # whichever member happened to be walked first last time, which need
+            # not be the one that gets here now.
+            item_id = _item_for(*group["ref_ids"])
             total = group.get("total_count") or sum(
                 instance_counts.get(r, 0) for r in group["ref_ids"]
             ) or 1
@@ -232,9 +288,8 @@ def assign_bom_items(cache: dict) -> Dict[str, Dict[str, Any]]:
                 }
         else:
             seen_refs.add(ref_id)
-            bom_idx += 1
             out[ref_id] = {
-                "bom_item": f"B{bom_idx:03d}",
+                "bom_item": _item_for(ref_id),
                 "bom_total_qty": instance_counts.get(ref_id, 1),
                 "action": action,
                 "group_name": "",

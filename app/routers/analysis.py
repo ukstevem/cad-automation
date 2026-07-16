@@ -19,6 +19,7 @@ from app.services.sidecar import (
     atomic_write_json,
     load_sidecar,
 )
+from app.services.bom_manifest import pin_bom_items
 from app.services.task_manager import task_manager, TaskStatus
 
 # Path to the standalone worker scripts
@@ -120,6 +121,15 @@ def _save_project_state(filename: str, state: dict):
 
     existing["project_state"] = state
     _embed_solid_children(existing)
+    # Pin BOM item numbers as soon as they're issued.  They're allocated from
+    # the classifications' insertion order, so without a pin every re-classify
+    # renumbers everything after the first change — invalidating an already-
+    # issued BOM and the B###.nc1 files named after it.  Best-effort: a BOM
+    # numbering failure must never cost the user their project state.
+    try:
+        pin_bom_items(existing)
+    except Exception as e:
+        logger.warning("bom_pin_failed", filename=filename, error=str(e))
     atomic_write_json(path, existing)
 
 

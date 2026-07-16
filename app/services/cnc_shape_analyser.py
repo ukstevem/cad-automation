@@ -175,6 +175,35 @@ def _iter_solids(shape):
         exp.Next()
 
 
+def _closed_wire_count(shape, L: float) -> Optional[int]:
+    """Closed wire loops in the cross-section at mid-length (or fallbacks).
+
+    A hollow shape produces >=2 loops (outer boundary + bore); a solid one
+    produces 1.  Returns None when OCC can't slice the shape, which callers must
+    treat as "unknown", not "solid".  Relaxed tolerance handles smooth circular
+    boundaries that the section algorithm may not close cleanly.
+    """
+    for frac in (0.50, 0.25, 0.75):
+        try:
+            x_pos = L * frac
+            plane = gp_Pln(gp_Ax3(gp_Pnt(x_pos, 0, 0), gp_Dir(1, 0, 0)))
+            sec = BRepAlgoAPI_Section(shape, plane)
+            sec.ComputePCurveOn1(True)
+            sec.Approximation(True)
+            sec.Build()
+            if not sec.IsDone():
+                continue
+            fb = ShapeAnalysis_FreeBounds(sec.Shape(), 1e-3, False, False)
+            seq = fb.GetClosedWires()
+            if seq is not None and hasattr(seq, "Length"):
+                n = int(seq.Length())
+                if n > 0:
+                    return n
+        except Exception:
+            continue
+    return None
+
+
 def _detect_hollow_section(shape, obb: Dict,
                            ref_id: str, solid_idx: int,
                            parent_name: Optional[str] = None,
@@ -212,31 +241,7 @@ def _detect_hollow_section(shape, obb: Dict,
     roundness = abs(H - W) / max(H, W, 1.0)
 
     def _wire_count() -> Optional[int]:
-        """
-        Try to count closed wire loops in the cross-section at mid-length
-        (and fallback positions). Returns count or None if OCC can't slice it.
-        A hollow shape produces ≥2 loops; a solid shape produces 1.
-        Uses relaxed tolerance (1mm) to handle smooth circular boundaries.
-        """
-        for frac in (0.50, 0.25, 0.75):
-            try:
-                x_pos = L * frac
-                plane = gp_Pln(gp_Ax3(gp_Pnt(x_pos, 0, 0), gp_Dir(1, 0, 0)))
-                sec = BRepAlgoAPI_Section(shape, plane)
-                sec.ComputePCurveOn1(True)
-                sec.Approximation(True)
-                sec.Build()
-                if not sec.IsDone():
-                    continue
-                fb = ShapeAnalysis_FreeBounds(sec.Shape(), 1e-3, False, False)
-                seq = fb.GetClosedWires()
-                if seq is not None and hasattr(seq, "Length"):
-                    n = int(seq.Length())
-                    if n > 0:
-                        return n
-            except Exception:
-                continue
-        return None
+        return _closed_wire_count(shape, L)
 
     # ----------------------------------------------------------------
     # CHS check: H ≈ W → circular bounding cross-section
@@ -280,6 +285,7 @@ def _detect_hollow_section(shape, obb: Dict,
                             "nc1_hash": None,
                             "match_score": None,
                             "analysed_at": datetime.now(timezone.utc).isoformat(),
+                            "library_matched": False,
                             "note": "CHS auto-detected",
                         }
 
@@ -319,6 +325,7 @@ def _detect_hollow_section(shape, obb: Dict,
                     "nc1_hash": None,
                     "match_score": None,
                     "analysed_at": datetime.now(timezone.utc).isoformat(),
+                    "library_matched": False,
                     "note": f"{category} auto-detected",
                 }
 
@@ -355,7 +362,17 @@ def _analyse_single(shape, solid_idx: int, ref_id: str, member_id: str,
             feats = extract_solid_features(shape, section=True)
             result["features"] = feats
             from app.pipeline.part_classifier import classify_part
-            refined = classify_part(feats, result.get("type"), member_id)
+            # rule_type must mean "matched a standard LIBRARY profile", not
+            # merely "we produced a section".  The CHS/RHS detector auto-detects
+            # a section with no library behind it, and passing that in as
+            # "section" promotes the classifier's hollow rule from review (0.45)
+            # to auto-CNC (0.90) — re-burying the handrail standards this is
+            # meant to surface.  The heavy result also overrides the light one in
+            # the UI, so the two must agree.
+            _rule_type = result.get("type")
+            if _rule_type == "section" and not result.get("library_matched"):
+                _rule_type = None
+            refined = classify_part(feats, _rule_type, member_id)
             result["refined_class"] = refined["class"]
             result["refined_confidence"] = refined["confidence"]
             result["refined_reason"] = refined["reason"]
@@ -470,13 +487,34 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
         logger.info("early_plate_detected", ref_id=ref_id,
                      thin=round(_thin, 1), mid=round(_mid, 1), long=round(_long, 1))
 
+    # Step 3c: hollow cross-section?  The section library holds only OPEN
+    # profiles (UB/UC/UBP/RSJ/RSC/PFC/EA/UEA) — no CHS/SHS/RHS — so ANY library
+    # match on a hollow section is spurious.  classify_profile's PASS 3
+    # angle-biased fallback fires on a low fill ratio, a band a round tube
+    # (~0.27) shares with an angle, so a 33.7 CHS handrail standard matched
+    # EA 35x35x4 and Step 4 returned a section before Step 6's CHS/RHS detector
+    # could claim it — cutting an NC1 that described a round tube as an angle.
+    # Decide once, here, and keep every library-match path below off the shape;
+    # the retries would otherwise re-match the same wrong profile.  Only pay for
+    # the slice inside PASS 3's fill band, and only trust a confirmed >=2 loops
+    # (None means OCC couldn't slice it — don't infer "solid" from that).
+    _hollow_xsec = False
+    if section_area > 0 and not _obvious_plate:
+        _fill_cs = section_area / max(H_cs * W_cs, 1e-9)
+        if _fill_cs < 0.70:
+            _n_wires = _closed_wire_count(aligned, L)
+            _hollow_xsec = _n_wires is not None and _n_wires >= 2
+            if _hollow_xsec:
+                logger.info("hollow_xsec_detected", ref_id=ref_id,
+                            n_wires=_n_wires, fill=round(_fill_cs, 3))
+
     # Step 4: try to classify as a standard section profile
     # Skip if alignment is suspect — the distorted cross-section can produce
     # false positives (e.g. a channel cross-section cut on a diagonal looks
     # like an equal angle).  The AABB retry (Step 4c) will handle these.
     # Also skip if shape is obviously a plate.
     profile_match = None
-    if not _alignment_suspect and not _obvious_plate:
+    if not _alignment_suspect and not _obvious_plate and not _hollow_xsec:
         try:
             profile_match = classify_profile(cs, section_lib)
         except Exception as e:
@@ -546,7 +584,8 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
     # Skip when alignment is suspect — axis rotations of a distorted shape
     # are also unreliable; the AABB retry (Step 4c) uses the original shape.
     axis_retry_candidates = []
-    for rot_label, rot_fn, rot_args in [] if (_alignment_suspect or _obvious_plate) else [
+    for rot_label, rot_fn, rot_args in [] if (_alignment_suspect or _obvious_plate
+                                              or _hollow_xsec) else [
         ("Y-as-X", _rotZ, 1),   # +90 deg about Z: old Y becomes new X
         ("Z-as-X", _rotY, 3),   # +270 deg about Y: old Z becomes new X
     ]:
@@ -588,8 +627,9 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
     # Step 4c: AABB-axis retry for mesh-converted shapes.
     # Mesh triangulation creates diagonal edges longer than the actual extrusion
     # edges, causing align_by_longest_straight_edge to rotate the shape off-axis.
-    # Skip for obvious plates — go straight to the plate path.
-    if not _obvious_plate:
+    # Skip for obvious plates — go straight to the plate path.  Hollow sections
+    # skip too: the library can't hold their profile, so any match is wrong.
+    if not _obvious_plate and not _hollow_xsec:
       try:
         from OCP.BRepBndLib import BRepBndLib
         from OCP.Bnd import Bnd_Box as _Bnd_Box
@@ -681,7 +721,8 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
     _min_hw = min(H_cs, W_cs)
     _max_hw = max(H_cs, W_cs)
     _is_plate_like = _min_hw < 15.0 and _max_hw / max(_min_hw, 0.1) > 4.0
-    if _alignment_suspect and section_area > 0 and not _is_plate_like and not _obvious_plate:
+    if (_alignment_suspect and section_area > 0 and not _is_plate_like
+            and not _obvious_plate and not _hollow_xsec):
         try:
             # Match on area with relaxed dims.  Use a direct single-pass
             # approach: classify_profile internally escalates tolerances
@@ -893,6 +934,7 @@ def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: 
             "nc1_path": str(nc1_path),
             "nc1_hash": nc1_hash,
             "match_score": _score,
+            "library_matched": True,
             "confidence": match_confidence(_score),
             "analysed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -1023,6 +1065,14 @@ def _light_rule_type(feats: Dict[str, Any], steel_grade: Optional[str]) -> Optio
     """
     h, w, area = feats.get("cs_H"), feats.get("cs_W"), feats.get("section_area")
     if not (h and w and area):
+        return None
+    # The library holds only OPEN profiles (UB/UC/UBP/RSJ/RSC/PFC/EA/UEA) — it has
+    # no CHS/SHS/RHS at all — so a hollow cross-section can only ever match one by
+    # coincidence.  classify_profile's angle-biased pass keys off a low fill ratio,
+    # a band a round tube (~0.27) shares with an angle, so a 33.7 CHS handrail
+    # standard matched EA 35x35x4.  That false "section" verdict then promoted the
+    # caller's hollow rule from review (0.45) to auto-CNC (0.90).  Refuse to match.
+    if (feats.get("n_holes") or 0) >= 1:
         return None
     cs = {"span_web": h, "span_flange": w, "area": area,
           "length": feats.get("obb_length") or 0.0}

@@ -33,6 +33,11 @@ FORMED_MIN_BENDS = 1
 PLATE_TTHIN = 0.45
 # Open profile with distinct flanges (web<<flange) — I/UC/PFC.
 SECTION_THK_RATIO = 1.5
+# Fastener gate. inertia_ratio_21 (I2/I1) ~ 1 means two equal principal inertias,
+# i.e. a solid of revolution about the long axis; elongation bounds it to a
+# stubby one (a long threaded rod or tube is not a bolt).
+FASTENER_I21_TOL = 0.03
+FASTENER_MAX_ELONGATION = 8.0
 
 
 def classify_part(features: Optional[Dict[str, Any]],
@@ -81,6 +86,24 @@ def classify_part(features: Optional[Dict[str, Any]],
             return {"class": "SECTION", "confidence": 0.90, "reason": "hollow box"}
         return {"class": "SECTION", "confidence": 0.45, "reason": "hollow, no library match"}
 
+    # 4b. Headed solid of revolution -> a fastener, which is always purchased.
+    #     A bolt's hex head is thicker than its shank, so rule 8 below reads the
+    #     head as a "flange" and calls the bolt a SECTION (M20s landed in the CNC
+    #     BOM as B155 qty 245).  Geometry is the only signal available: the
+    #     name-based catalogue match can't help on models exported without part
+    #     names.  Checked after rule 4 so hollow round tube (handrail standards
+    #     are axisymmetric too) is already gone, and before the bend rules so an
+    #     incidental head chamfer can't divert a bolt into FORMED_PLATE.  A plain
+    #     round bar has no head, so its thk ratio stays ~1 and it falls through.
+    thk_ratio = f.get("thk_max_over_teff")
+    i21 = f.get("inertia_ratio_21")
+    elong = f.get("elongation")
+    if (i21 is not None and abs(i21 - 1.0) <= FASTENER_I21_TOL
+            and elong is not None and elong <= FASTENER_MAX_ELONGATION
+            and thk_ratio is not None and thk_ratio >= SECTION_THK_RATIO):
+        return {"class": "BOUGHT_OUT", "confidence": 0.85,
+                "reason": "fastener (headed, axisymmetric)"}
+
     # 5. Many convex bends -> curved tube (bent section).
     nb = f.get("n_convex_bends")
     if nb is not None and nb >= BENT_MIN_BENDS:
@@ -101,8 +124,7 @@ def classify_part(features: Optional[Dict[str, Any]],
     #    surfaces for review instead of auto-committing to CNC. This is where
     #    handrail standards and other non-standard "sections" (frequently
     #    bought-out) land — geometry alone can't tell procured from fabricated.
-    thk = f.get("thk_max_over_teff")
-    if thk is not None and thk >= SECTION_THK_RATIO:
+    if thk_ratio is not None and thk_ratio >= SECTION_THK_RATIO:
         return {"class": "SECTION", "confidence": 0.45, "reason": "flanged, no library match"}
 
     # 9. Uncertain catch-all: thin uniform open wall — most likely formed, but
