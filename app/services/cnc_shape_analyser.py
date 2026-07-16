@@ -28,7 +28,8 @@ from OCP.IFSelect import IFSelect_RetDone
 from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
 from OCP.TDF import TDF_Label, TDF_Tool
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_SOLID
+from OCP.TopAbs import TopAbs_SOLID, TopAbs_EDGE
+from OCP.TopTools import TopTools_HSequenceOfShape
 from OCP.TopoDS import TopoDS
 from OCP.gp import gp_Pnt, gp_Dir, gp_Ax3, gp_Pln
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
@@ -175,17 +176,35 @@ def _iter_solids(shape):
         exp.Next()
 
 
-def _closed_wire_count(shape, L: float) -> Optional[int]:
+def _closed_wire_count(shape) -> Optional[int]:
     """Closed wire loops in the cross-section at mid-length (or fallbacks).
 
     A hollow shape produces >=2 loops (outer boundary + bore); a solid one
     produces 1.  Returns None when OCC can't slice the shape, which callers must
     treat as "unknown", not "solid".  Relaxed tolerance handles smooth circular
     boundaries that the section algorithm may not close cleanly.
+
+    Slices at the shape's ACTUAL x-range: ``align_by_longest_straight_edge``
+    only rotates, it never moves the shape to the origin, so an aligned solid
+    still sits wherever it was in world space (observed: x from -2525 to +62,
+    and x from 31413 to 32547).  Slicing at ``L * frac`` assumed x in [0, L] and
+    put the plane outside the solid, so this always returned None — silently, in
+    the direction of "unknown".
     """
+    try:
+        from OCP.Bnd import Bnd_Box
+        from OCP.BRepBndLib import BRepBndLib
+        _bb = Bnd_Box()
+        BRepBndLib.Add_s(shape, _bb)
+        x_min, _, _, x_max, _, _ = _bb.Get()
+    except Exception:
+        return None
+    if not (x_max > x_min):
+        return None
+
     for frac in (0.50, 0.25, 0.75):
         try:
-            x_pos = L * frac
+            x_pos = x_min + (x_max - x_min) * frac
             plane = gp_Pln(gp_Ax3(gp_Pnt(x_pos, 0, 0), gp_Dir(1, 0, 0)))
             sec = BRepAlgoAPI_Section(shape, plane)
             sec.ComputePCurveOn1(True)
@@ -193,12 +212,29 @@ def _closed_wire_count(shape, L: float) -> Optional[int]:
             sec.Build()
             if not sec.IsDone():
                 continue
-            fb = ShapeAnalysis_FreeBounds(sec.Shape(), 1e-3, False, False)
-            seq = fb.GetClosedWires()
-            if seq is not None and hasattr(seq, "Length"):
-                n = int(seq.Length())
-                if n > 0:
-                    return n
+
+            # The section is a compound of loose EDGES with no faces, so
+            # ShapeAnalysis_FreeBounds' free-bound analysis finds nothing in it
+            # (its GetClosedWires() returns an empty TopoDS_Compound — and a
+            # Compound, not a sequence, so the old `hasattr(seq, "Length")`
+            # guard was never true and this silently always returned None).
+            # Stitch the edges into wires explicitly instead.
+            edges = TopTools_HSequenceOfShape()
+            exp = TopExp_Explorer(sec.Shape(), TopAbs_EDGE)
+            while exp.More():
+                edges.Append(exp.Current())
+                exp.Next()
+            if edges.Length() == 0:
+                continue
+
+            wires = TopTools_HSequenceOfShape()
+            ShapeAnalysis_FreeBounds.ConnectEdgesToWires_s(edges, 1e-3, False, wires)
+            n_closed = 0
+            for i in range(1, wires.Length() + 1):
+                if TopoDS.Wire_s(wires.Value(i)).Closed():
+                    n_closed += 1
+            if n_closed > 0:
+                return n_closed
         except Exception:
             continue
     return None
@@ -241,7 +277,7 @@ def _detect_hollow_section(shape, obb: Dict,
     roundness = abs(H - W) / max(H, W, 1.0)
 
     def _wire_count() -> Optional[int]:
-        return _closed_wire_count(shape, L)
+        return _closed_wire_count(shape)
 
     # ----------------------------------------------------------------
     # CHS check: H ≈ W → circular bounding cross-section
@@ -502,7 +538,7 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
     if section_area > 0 and not _obvious_plate:
         _fill_cs = section_area / max(H_cs * W_cs, 1e-9)
         if _fill_cs < 0.70:
-            _n_wires = _closed_wire_count(aligned, L)
+            _n_wires = _closed_wire_count(aligned)
             _hollow_xsec = _n_wires is not None and _n_wires >= 2
             if _hollow_xsec:
                 logger.info("hollow_xsec_detected", ref_id=ref_id,
