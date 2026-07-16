@@ -36,8 +36,21 @@ SECTION_THK_RATIO = 1.5
 # Fastener gate. inertia_ratio_21 (I2/I1) ~ 1 means two equal principal inertias,
 # i.e. a solid of revolution about the long axis; elongation bounds it to a
 # stubby one (a long threaded rod or tube is not a bolt).
+#
+# The shape ratios alone are NOT enough — they have no scale, and a *bent*
+# member lands right on top of them: its bounding box goes near-square, so
+# elongation and inertia_ratio_21 both drift to ~1 by coincidence, while the
+# mid-length raster slices across the curve and reports a nonsense "head"
+# thickness ratio.  A curved UB (2030x1901, 8.2M mm3) and a 90-degree CHS bend
+# (1290x1290, 2.9M mm3) both read as "stubby axisymmetric with a head".  So bound
+# the gate by absolute size: a fastener is a SMALL, SHORT part (M20 bolt:
+# 68 long, 37 across the head corners, 39k mm3 — 200x smaller than those).
+# M36x300 is about the largest common structural bolt; M64's head is ~110 across
+# corners.  Anything bigger falls through to the section rules for review.
 FASTENER_I21_TOL = 0.03
 FASTENER_MAX_ELONGATION = 8.0
+FASTENER_MAX_DIM_LONG = 300.0   # mm — overall length
+FASTENER_MAX_DIM_MID = 150.0    # mm — head across corners
 
 
 def classify_part(features: Optional[Dict[str, Any]],
@@ -98,7 +111,11 @@ def classify_part(features: Optional[Dict[str, Any]],
     thk_ratio = f.get("thk_max_over_teff")
     i21 = f.get("inertia_ratio_21")
     elong = f.get("elongation")
-    if (i21 is not None and abs(i21 - 1.0) <= FASTENER_I21_TOL
+    d_long = f.get("dim_long")
+    d_mid = f.get("dim_mid")
+    if (d_long is not None and d_long <= FASTENER_MAX_DIM_LONG
+            and d_mid is not None and d_mid <= FASTENER_MAX_DIM_MID
+            and i21 is not None and abs(i21 - 1.0) <= FASTENER_I21_TOL
             and elong is not None and elong <= FASTENER_MAX_ELONGATION
             and thk_ratio is not None and thk_ratio >= SECTION_THK_RATIO):
         return {"class": "BOUGHT_OUT", "confidence": 0.85,
