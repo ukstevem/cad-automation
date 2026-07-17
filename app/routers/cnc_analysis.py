@@ -405,6 +405,9 @@ async def classify_parts(filename: str, body: Dict[str, Any] = Body(...)) -> Dic
 # task lives server-side. Leave one core for uvicorn so the app stays responsive.
 _CLASSIFY_CONCURRENCY = max(1, (os.cpu_count() or 2) - 1)
 _CLASSIFY_CHUNK = 200
+# Per-ref allowance for a classify chunk's timeout.  Measured worst case is ~22s
+# (a 2.6m tube; a bolt is far quicker), so this leaves generous headroom.
+_CLASSIFY_SECS_PER_REF = 45.0
 
 
 async def _classify_chunk(file_path: Path, analysis_json_path: str,
@@ -421,8 +424,14 @@ async def _classify_chunk(file_path: Path, analysis_json_path: str,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
+    # Budget by chunk size, not a flat per-chunk timeout.  Cost per ref varies
+    # hugely — a bolt rasters in a moment, a 2.6m tube takes ~22s — so a full
+    # 200-ref chunk of slow parts needs over an hour and a flat 30 min silently
+    # killed it (bd nyt: a 181-ref hollow sweep classified 0 and still reported
+    # "completed").
+    timeout_s = max(float(_CNC_TIMEOUT), _CLASSIFY_SECS_PER_REF * len(chunk))
     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-        proc.communicate(input=worker_input), timeout=float(_CNC_TIMEOUT))
+        proc.communicate(input=worker_input), timeout=timeout_s)
     if proc.returncode != 0:
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"classify chunk exit {proc.returncode}: {stderr[:200]}")
@@ -473,7 +482,7 @@ async def classify_frontier(filename: str, body: Dict[str, Any] = Body(...)) -> 
     total = len(pending)
     persist_lock = asyncio.Lock()   # serialise sidecar read-modify-write
     sem = asyncio.Semaphore(_CLASSIFY_CONCURRENCY)
-    state = {"done": 0}
+    state = {"done": 0, "failed": 0, "errors": []}
 
     async def run_async(progress_callback):
         progress_callback(0, total, "")
@@ -494,9 +503,25 @@ async def classify_frontier(filename: str, body: Dict[str, Any] = Body(...)) -> 
                 state["done"] += len(chunk)
                 progress_callback(state["done"], total, "")
 
-        # A failing chunk shouldn't abort the others — log and keep going.
-        await asyncio.gather(*[do_chunk(c) for c in chunks], return_exceptions=True)
-        return {"classified": state["done"], "total": total}
+        # A failing chunk shouldn't abort the others — but it must never pass for
+        # success either.  gather(return_exceptions=True) hands back the
+        # exceptions instead of raising, so record them: silently swallowing one
+        # let a sweep classify 0 of 181 and still report "completed" (bd nyt).
+        outcomes = await asyncio.gather(*[do_chunk(c) for c in chunks],
+                                        return_exceptions=True)
+        for chunk, outcome in zip(chunks, outcomes):
+            if isinstance(outcome, BaseException):
+                state["failed"] += len(chunk)
+                state["errors"].append(f"{type(outcome).__name__}: {outcome}"[:200])
+                logger.error("classify_frontier_chunk_failed", filename=filename,
+                             chunk_size=len(chunk), first_ref=chunk[0],
+                             error=str(outcome)[:200])
+        if state["failed"]:
+            logger.error("classify_frontier_incomplete", filename=filename,
+                         classified=state["done"], failed=state["failed"],
+                         total=total)
+        return {"classified": state["done"], "total": total,
+                "failed": state["failed"], "errors": state["errors"][:5]}
 
     task_id = task_manager.submit_async("classify_frontier", filename, run_async)
     return {"task_id": task_id, "status": "pending", "total": total,
