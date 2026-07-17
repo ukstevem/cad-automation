@@ -544,6 +544,36 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
                 logger.info("hollow_xsec_detected", ref_id=ref_id,
                             n_wires=_n_wires, fill=round(_fill_cs, 3))
 
+    # Step 3d: a hollow section matches ONLY the library's hollow half, and on a
+    # different basis (CSA-primary — see _match_hollow_profile), because the OBB
+    # cross-section of a raked tube is inflated while its CSA is sound.
+    #
+    # It also stops here rather than continuing to the NC1 path.  compute_dstv_pose
+    # only special-cases U and L, and classify_and_project_holes_dstv projects onto
+    # web/flange faces — neither means anything for a tube, so an NC1 from here
+    # would be unverified machine code, which is exactly what the EA handrail bug
+    # produced.  Identify it (designation, CSA, mass) and leave cutting to a
+    # later, separately validated tube path.
+    if _hollow_xsec:
+        hollow_match = None
+        try:
+            hollow_match = classify_profile(cs, section_lib, hollow=True)
+        except Exception as e:
+            logger.warning("hollow_classify_failed", ref_id=ref_id, error=str(e))
+        if hollow_match:
+            logger.info("hollow_library_match", ref_id=ref_id,
+                        category=hollow_match.get("Category"),
+                        designation=hollow_match.get("Designation"),
+                        score=round(hollow_match.get("Match_score", 0.0), 2),
+                        **hollow_match.get("Diagnostics", {}))
+            return _process_hollow_match(aligned, obb, hollow_match, ref_id,
+                                         steel_grade)
+        logger.info("hollow_no_library_match", ref_id=ref_id,
+                    H=round(H_cs, 1), W=round(W_cs, 1),
+                    section_area=round(section_area, 1))
+        # Not a catalogue size — Step 6's detector still derives one from the
+        # geometry below.
+
     # Step 4: try to classify as a standard section profile
     # Skip if alignment is suspect — the distorted cross-section can produce
     # false positives (e.g. a channel cross-section cut on a diagonal looks
@@ -851,6 +881,49 @@ def _analyse_single_impl(shape, solid_idx: int, ref_id: str, member_id: str,
     return unknown_result
 
 
+def _process_hollow_match(aligned, obb, match: Dict, ref_id: str,
+                          steel_grade: Optional[str] = None) -> Dict[str, Any]:
+    """Result for a library-matched hollow section — identification only.
+
+    Deliberately no NC1: see the Step 3d note in :func:`_analyse_single_impl`.
+    Reports the *library* H/W rather than the measured ones, since the whole
+    point of the match is that the catalogue size is more trustworthy than the
+    OBB it was recovered from.  ``library_matched`` is what lets the classifier
+    treat this as a confident section rather than the review-grade auto-detect.
+    """
+    density = _density_for_grade(steel_grade)
+    L = obb["aligned_extents"][0]
+    dims_lib = match["JSON"]
+    try:
+        vol_mm3 = get_volume_from_shape(aligned)
+        mass_kg = round(vol_mm3 * density, 3)
+        vol_mm3 = round(vol_mm3, 1)
+    except Exception:
+        vol_mm3 = None
+        mass_kg = None
+    score = match.get("Match_score")
+    return {
+        "type": "section",
+        "category": match.get("Category", ""),
+        "designation": match.get("Designation", ""),
+        "profile_type": match.get("Profile_type", ""),
+        "dims": {"L": round(L, 1),
+                 "H": dims_lib["height"], "W": dims_lib["width"]},
+        "volume_mm3": vol_mm3,
+        "mass_kg": mass_kg,
+        "holes": 0,
+        "end_cuts": False,
+        "nc1_path": None,
+        "nc1_hash": None,
+        "match_score": score,
+        "library_matched": True,
+        "confidence": match_confidence(score),
+        "analysed_at": datetime.now(timezone.utc).isoformat(),
+        "note": f"{match.get('Category', '')} library match — "
+                f"NC1 not generated for hollow sections",
+    }
+
+
 def _process_section(aligned, obb, profile_match: Dict, ref_id: str, member_id: str,
                      solid_idx: int, file_path: str, out_dir: Path,
                      parent_name: Optional[str] = None,
@@ -1102,18 +1175,16 @@ def _light_rule_type(feats: Dict[str, Any], steel_grade: Optional[str]) -> Optio
     h, w, area = feats.get("cs_H"), feats.get("cs_W"), feats.get("section_area")
     if not (h and w and area):
         return None
-    # The library holds only OPEN profiles (UB/UC/UBP/RSJ/RSC/PFC/EA/UEA) — it has
-    # no CHS/SHS/RHS at all — so a hollow cross-section can only ever match one by
-    # coincidence.  classify_profile's angle-biased pass keys off a low fill ratio,
-    # a band a round tube (~0.27) shares with an angle, so a 33.7 CHS handrail
-    # standard matched EA 35x35x4.  That false "section" verdict then promoted the
-    # caller's hollow rule from review (0.45) to auto-CNC (0.90).  Refuse to match.
-    if (feats.get("n_holes") or 0) >= 1:
-        return None
     cs = {"span_web": h, "span_flange": w, "area": area,
           "length": feats.get("obb_length") or 0.0}
+    # n_holes counts ENCLOSED voids in the cross-section, so >=1 means a closed
+    # hollow section — it never means "drilled" (a hole through a web severs the
+    # section at the slice and reaches the border, so it isn't counted).  The two
+    # halves of the library are mutually exclusive: matching a tube against open
+    # profiles is what produced the EA 35x35x4 handrail (bd 5wg).
+    _hollow = (feats.get("n_holes") or 0) >= 1
     try:
-        if classify_profile(cs, str(_library_for_grade(steel_grade))):
+        if classify_profile(cs, str(_library_for_grade(steel_grade)), hollow=_hollow):
             return "section"
     except Exception:
         pass

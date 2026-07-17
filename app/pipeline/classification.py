@@ -108,7 +108,111 @@ def classify_by_name(type_name, json_path):
     }
 
 
-def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):
+# Hollow matching tolerances.  CSA is the trustworthy measurement here (see
+# _match_hollow_profile), so it carries the match; the bounding box only vetoes.
+HOLLOW_TOL_AREA = 0.10      # CSA within 10%
+HOLLOW_DIM_SLACK = 1.5      # mm the library section may exceed the measured box
+HOLLOW_MAX_OVERSIZE = 1.5   # reject a section < measured/1.5 (absurdly small)
+# Composite ceiling (100*area_err + dim_gap_mm).  Real matches score well under
+# this even when the box is inflated — the run-761b26b1 tubes come in at 0.6-7.2
+# — so it only bites on a candidate that is the best available yet still wrong.
+HOLLOW_MAX_SCORE = 30.0
+
+
+def _match_hollow_profile(lib, H_meas, W_meas, A_meas, L_meas):
+    """Match a closed section on CSA, using the bounding box only as a veto.
+
+    Open profiles are matched on height/width with area as a check.  That is the
+    wrong way round for tube, because the two measurements have opposite
+    reliability:
+
+    - **CSA is sound.**  It comes from volume/length, which no rotation changes.
+      Measured against real EN 10210 sizes it lands within ~1-3%.
+    - **The OBB cross-section is not.**  A smooth cylinder has no straight edges
+      for ``align_by_longest_straight_edge`` to grab, so a raked handrail comes
+      out slightly skewed and the box inflates.  Run 761b26b1's measured ODs
+      smear 33.7 -> 41.9 with no clustering on any standard size, while their
+      CSAs put 56 of them on plain 33.7 tube.
+
+    So score on CSA, and use the box only for what it can be trusted to say: a
+    section cannot be *larger* than its own bounding box, so anything that does
+    not fit is out.  That resolves the CSA collisions — 42.4x2.3 and 33.7x3.0
+    are 290 vs 289 mm2, indistinguishable by area, but a 42.4 tube cannot fit
+    inside a 34.9 box.
+
+    The dimension gap still scores, so among candidates that fit and agree on
+    area the closest-fitting wins: at OD 120 / CSA 1650, CHS 114.3x5.0 (4% area
+    off, 6mm gap) beats 88.9x6.3 (0.9% off, 31mm gap) — the right answer, since
+    an 88.9 tube rattling around inside a 120 box is not what was measured.
+    """
+    meas_lo, meas_hi = min(H_meas, W_meas), max(H_meas, W_meas)
+    best, best_score = None, float("inf")
+
+    for cat, ents in lib.items():
+        for name, info in ents.items():
+            if not info.get("hollow"):
+                continue
+            H_lib = float(info["height"])
+            W_lib = float(info["width"])
+            A_lib = float(info["csa"])
+
+            ea = abs(A_meas - A_lib) / max(A_lib, 1e-9)
+            if ea > HOLLOW_TOL_AREA:
+                continue
+
+            lib_lo, lib_hi = min(H_lib, W_lib), max(H_lib, W_lib)
+            # Must fit the measured box (which is an upper bound on the truth).
+            if lib_lo > meas_lo + HOLLOW_DIM_SLACK or lib_hi > meas_hi + HOLLOW_DIM_SLACK:
+                continue
+            # ...but not be absurdly smaller than it either.
+            if lib_hi < meas_hi / HOLLOW_MAX_OVERSIZE:
+                continue
+
+            dim_gap = max(0.0, meas_lo - lib_lo) + max(0.0, meas_hi - lib_hi)
+            score = 100 * ea + dim_gap
+            if score < best_score:
+                best_score = score
+                best = {
+                    "Designation": name,
+                    "Category": cat,
+                    "Profile_type": info["code_profile"],
+                    "Match_score": score,
+                    "Requires_rotation": False,
+                    "JSON": {
+                        "height": H_lib,
+                        "width": W_lib,
+                        "csa": A_lib,
+                        "length": 0,
+                        "Mass": info.get("mass", 0.0) * L_meas / 1000.0,
+                        "web_thickness": info.get("web_thickness", 0.0),
+                        "flange_thickness": info.get("flange_thickness", 0.0),
+                        "root_radius": info.get("root_radius", 0.0),
+                        "toe_radius": info.get("toe_radius", 0.0),
+                    },
+                    "STEP": {
+                        "height": H_meas,
+                        "width": W_meas,
+                        "area": float(A_meas),
+                        "length": L_meas,
+                        "mass": info.get("mass", 0.0) * L_meas / 1000.0,
+                        "web_thickness": info.get("web_thickness", 0.0),
+                        "flange_thickness": info.get("flange_thickness", 0.0),
+                        "root_radius": info.get("root_radius", 0.0),
+                        "toe_radius": info.get("toe_radius", 0.0),
+                    },
+                    "Diagnostics": {
+                        "hollow": True,
+                        "area_err": round(ea, 4),
+                        "dim_gap": round(dim_gap, 2),
+                        "tol_area_used": HOLLOW_TOL_AREA,
+                    },
+                }
+    if best is not None and best_score > HOLLOW_MAX_SCORE:
+        return None
+    return best
+
+
+def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05, hollow=False):
     """
     Attempts to classify a structural profile by matching its dimensions and area.
     Keeps API identical for callers.
@@ -116,6 +220,16 @@ def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):
     Now with:
       - Automatic relaxed retry when strict pass fails
       - Angle-biased pass when fill ratio indicates "not a plate"
+
+    ``hollow`` selects which half of the library is eligible, and the two are
+    mutually exclusive: a closed section must never match an open profile, nor
+    an open one a tube.  Letting them mix is what matched a 33.7 CHS handrail to
+    an EA 35x35x4 and cut a wrong NC1 (bd 5wg) — a round tube's fill ratio sits
+    in the same band as an angle's, so the angle-biased pass below happily
+    claimed it.  Default False keeps every existing caller on open profiles.
+
+    Hollow sections take a different matching strategy entirely — see
+    :func:`_match_hollow_profile`.
     """
     with open(json_path) as f:
         lib = json.load(f)
@@ -124,6 +238,9 @@ def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):
     W_meas = float(cs["span_flange"])
     A_meas = float(cs["area"])
     L_meas = float(cs.get("length", 0.0))
+
+    if hollow:
+        return _match_hollow_profile(lib, H_meas, W_meas, A_meas, L_meas)
 
     # quick "not a plate" heuristic using measured section bounding box
     # plates:   A ≈ H*W  -> fill ~ 1.0
@@ -134,6 +251,8 @@ def classify_profile(cs, json_path, tol_dim=1.0, tol_area=0.05):
         best, best_score = None, float('inf')
         for cat, ents in lib.items():
             for name, info in ents.items():
+                if info.get("hollow"):
+                    continue          # open-profile matching only
                 if restrict_profile and info.get("code_profile") != restrict_profile:
                     continue
 
