@@ -273,6 +273,28 @@ def _detect_hollow_section(shape, obb: Dict,
         return None
 
     actual_csa = volume / L
+
+    # Prefer a catalogue size before deriving one from the geometry.  This is the
+    # robust hollow path — it catches the short / raked tubes whose skewed
+    # alignment makes Step 3d's cross-section slice miss (the 45 that otherwise
+    # kept their inflated OD, e.g. "40.5x2.3" for what is really 33.7 tube).  CSA
+    # = volume/L is sound even here, and the CSA-primary matcher uses the OBB
+    # only as a fit veto, so an inflated OD does not derail it.  A non-standard
+    # size finds nothing and drops through to the geometric estimate below.
+    try:
+        _cs = {"span_web": H, "span_flange": W, "area": actual_csa, "length": L}
+        _lib_match = classify_profile(
+            _cs, str(_library_for_grade(steel_grade)), hollow=True)
+        if _lib_match:
+            logger.info("hollow_library_match_via_detector", ref_id=ref_id,
+                        category=_lib_match.get("Category"),
+                        designation=_lib_match.get("Designation"),
+                        **_lib_match.get("Diagnostics", {}))
+            return _process_hollow_match(shape, obb, _lib_match, ref_id, steel_grade)
+    except Exception as e:
+        logger.debug("hollow_detector_library_lookup_failed",
+                     ref_id=ref_id, error=str(e))
+
     bounding_rect_area = H * W
     roundness = abs(H - W) / max(H, W, 1.0)
 
