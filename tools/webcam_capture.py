@@ -51,7 +51,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS = os.path.join(HERE, "webcam_settings.json")
 CAPTURES = os.path.join(HERE, "captures")
 
-DEFAULT_DEVICES = ["/dev/video0", "/dev/video2"]   # UVC cams often claim two nodes each
+# Device paths are resolved via /dev/v4l/by-id/, NOT /dev/videoN. The numbered nodes are
+# assigned in enumeration order and can swap on reboot or replug; the by-id paths are keyed on
+# the USB serial and are stable per physical camera. That matters more than it sounds: if two
+# cameras swap numbers between the calibration shots and the measurement shots, each photo gets
+# the other camera's intrinsics. The pose is then wrong, with nothing in the data to show it.
+BY_ID_DIR = "/dev/v4l/by-id"
 RESOLUTION = (1920, 1080)
 SETTLE_S = 3.0
 WARMUP_FRAMES = 12          # webcams need frames in flight before the sensor settles
@@ -78,6 +83,75 @@ AUTO_OFF = {                       # value meaning "manual" for each auto contro
 def _require_v4l2() -> None:
     if shutil.which("v4l2-ctl") is None:
         sys.exit("v4l2-ctl not found. Install it:  sudo apt install v4l-utils")
+
+
+def discover_devices():
+    """
+    Stable capture-device paths, newest-sorted, from /dev/v4l/by-id.
+
+    A UVC webcam claims more than one node — typically ``-video-index0`` for capture and a
+    further index for metadata — so we take index0 only. Falls back to /dev/video[0-9] if the
+    by-id directory is absent, with a warning, because that path is not reboot-stable.
+    """
+    if os.path.isdir(BY_ID_DIR):
+        found = sorted(
+            os.path.join(BY_ID_DIR, n) for n in os.listdir(BY_ID_DIR)
+            if n.endswith("-video-index0")
+        )
+        if found:
+            return found
+    numbered = sorted(p for p in ("/dev/video%d" % i for i in range(10)) if os.path.exists(p))
+    if numbered:
+        print("WARNING: no /dev/v4l/by-id entries; falling back to numbered nodes, which are "
+              "NOT stable across reboots. Verify identities before trusting a calibration.")
+    return numbered
+
+
+def device_identity(device: str) -> str:
+    """A human-readable identity for a device: the by-id basename, or the driver's card name."""
+    if BY_ID_DIR in device:
+        return os.path.basename(device)
+    info = _v4l2(device, ["--info"]).stdout
+    for line in info.splitlines():
+        if "Card type" in line:
+            return line.split(":", 1)[1].strip()
+    return device
+
+
+def short_tag(device: str, fallback_index: int) -> str:
+    """
+    A short, stable tag for one physical camera, used in capture filenames.
+
+    It ends up in the photo name, which is what ``fit_multiview.py --cam-profile SUBSTR=PATH``
+    matches on — so each camera's photos automatically pick up that camera's calibration
+    profile. Derived from the USB serial in the by-id name where possible.
+    """
+    ident = device_identity(device)
+    if ident.endswith("-video-index0"):
+        ident = ident[: -len("-video-index0")]
+    token = ident.split("_")[-1].split("-")[-1]
+    token = "".join(ch for ch in token if ch.isalnum())
+    return token if len(token) >= 4 else "cam%d" % fallback_index
+
+
+def unique_tags(devices):
+    """
+    ``device -> tag``, guaranteed distinct.
+
+    Two cameras of the same model that report no USB serial derive the *same* tag. Since a shot
+    writes ``<label>_<tag>_<timestamp>.png`` and both cameras share the timestamp, a collision
+    would have one camera silently overwrite the other's photo. So collisions get an index
+    suffix rather than being left to chance.
+    """
+    tags = {d: short_tag(d, i) for i, d in enumerate(devices)}
+    seen = {}
+    for d in devices:
+        seen.setdefault(tags[d], []).append(d)
+    for tag, owners in seen.items():
+        if len(owners) > 1:
+            for i, d in enumerate(owners):
+                tags[d] = f"{tag}{i}"
+    return tags
 
 
 def _v4l2(device: str, args):
@@ -146,13 +220,15 @@ def warmup(cap, n: int = WARMUP_FRAMES) -> None:
 
 def cmd_list(args) -> int:
     _require_v4l2()
+    tags = unique_tags(args.devices)
     for device in args.devices:
         if not os.path.exists(device):
             print(f"{device}: not present")
             continue
         name = _v4l2(device, ["--info"]).stdout
         card = next((l.split(":", 1)[1].strip() for l in name.splitlines() if "Card type" in l), "?")
-        print(f"\n{device}  ({card})")
+        print(f"\n{device}")
+        print(f"    card {card}   tag '{tags[device]}'  (this tag lands in the filenames)")
         ctrls = supported_controls(device)
         for modern, legacy in CONTROLS:
             key = modern if modern in ctrls else (legacy if legacy in ctrls else None)
@@ -195,7 +271,7 @@ def cmd_lock(args) -> int:
             for n in names:
                 if n == "sharpness":
                     values[n] = args.sharpness
-        settings[device] = values
+        settings[device] = {"_identity": device_identity(device), "controls": values}
         print(f"  locked: {values}")
 
     if not settings:
@@ -234,11 +310,19 @@ def cmd_shot(args) -> int:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     any_drift = False
+    tags = unique_tags(args.devices)
     for idx, device in enumerate(args.devices):
-        values = settings.get(device)
-        if values is None:
+        entry = settings.get(device)
+        if entry is None:
             print(f"{device}: not in settings.json, skipping")
             continue
+        values = entry["controls"] if isinstance(entry, dict) and "controls" in entry else entry
+        want_id = entry.get("_identity") if isinstance(entry, dict) else None
+        got_id = device_identity(device)
+        if want_id and want_id != got_id:
+            any_drift = True
+            print(f"  !! {device} is now '{got_id}' but was locked as '{want_id}' — the cameras "
+                  f"have swapped device nodes. Re-run `lock`.")
         cap = open_camera(device, fourcc)
         drifted = apply_and_verify(device, values)
         if drifted:
@@ -257,7 +341,7 @@ def cmd_shot(args) -> int:
             print(f"  !! {device} returned {w}x{h}, not {settings.get('_resolution')} — "
                   f"the calibration resolution gate will reject these.")
         # PNG, not JPEG: no compression artefacts on the very edges we are about to detect.
-        dest = os.path.join(CAPTURES, f"{args.label}_cam{idx}_{stamp}.png")
+        dest = os.path.join(CAPTURES, f"{args.label}_{tags[device]}_{stamp}.png")
         cv2.imwrite(dest, frame)
         print(f"  {device} -> {dest}  ({w}x{h})")
 
@@ -273,8 +357,8 @@ def cmd_shot(args) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--devices", nargs="+", default=DEFAULT_DEVICES,
-                    help=f"video devices (default {' '.join(DEFAULT_DEVICES)})")
+    ap.add_argument("--devices", nargs="+", default=None,
+                    help="video devices (default: auto-discover stable /dev/v4l/by-id paths)")
     ap.add_argument("--fourcc", default="YUYV", choices=["YUYV", "MJPG"],
                     help="YUYV (default) is uncompressed — slower fps, no artefacts on edges. "
                          "Frame rate is irrelevant for a static part.")
@@ -286,6 +370,12 @@ def main() -> int:
     shot = sub.add_parser("shot", help="capture one labelled frame per camera")
     shot.add_argument("label")
     args = ap.parse_args()
+    if not args.devices:
+        _require_v4l2()
+        args.devices = discover_devices()
+        if not args.devices:
+            sys.exit("No video devices found. Camera plugged in? And are you in the 'video' "
+                     "group?   sudo usermod -aG video $USER   (then log out and back in)")
 
     return {"list": cmd_list, "lock": cmd_lock, "shot": cmd_shot}[args.cmd](args)
 
