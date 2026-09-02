@@ -295,6 +295,55 @@ investigated and deferred — see below).
 - Markerless (single-image edge/chamfer/VP-axis) is **NOT viable on bare sections** (deferred, bd `ase`);
   the viable markerless route is multi-view/depth (future). Full log: vault `AR-weld-ratification-tool.md`.
 
+### Multi-view fit: photo -> pose (board-in-shot)
+
+The second AR path, for the fixed weld cell (ADR 0001). Board-in-shot mode, so **every photo
+self-registers** — no rig calibration, no simultaneous exposure. The part is static, so
+"multi-view" only needs several views with known camera poses: one camera moved around the rig
+works as well as several fixed ones.
+
+```
+photo -> charuco detect -> board pose (world<-camera)   app/services/board_pose.py
+      -> mask board pattern -> Canny -> edge pixels     app/services/image_edges.py
+      -> fit CAD pose across all views                  app/services/multiview.py
+      -> overlay + diagnostics                          app/services/multiview_fit.py
+```
+
+- `app/services/charuco.py` — board construction/detection, **shared with `calibration.py`**.
+  Never re-define a board or dictionary locally: a divergent copy fails *silently* (zero corners).
+- `app/services/image_edges.py` — Canny edge pixels + board masking.
+- `app/services/multiview_fit.py` — profile/model loading, per-view build, overlay, orchestration.
+- `tools/fit_multiview.py` — headless CLI (runs in the container; `tools/` is bind-mounted).
+- `tools/webcam_capture.py` — USB-webcam capture for a non-Pi host (`cell_capture.py` is Pi-only).
+
+```bash
+docker compose run --rm --no-deps api python tools/fit_multiview.py \
+  outputs/ar_captures/run1 \
+  --profile outputs/calibration/Cam.json \
+  --model   outputs/ar_models/mainframe_default_1to5.json \
+  --out     outputs/ar_fits/run1
+```
+
+**Invariants / gotchas:**
+- **Edge pixels come from the RAW (distorted) frame.** `fit_object_pose` projects CAD points
+  *through* `K` and `dist`, so undistorting the image first silently mismatches the two.
+- **Board frame Z points AWAY from the camera.** A camera that decodes an OpenCV ChArUco board
+  solves to a centre at **negative** board Z, so "resting on the board" means the object occupies
+  *negative* Z. `camera_side_of_board()` measures this from the solved poses rather than assuming;
+  `test_board_is_legible_from_negative_z` locks it. Get the sign wrong and the init lands behind
+  the board where no camera sees it.
+- **Mask the markers, not just the lattice.** The ArUco bit patterns *inside* the white squares
+  are the bulk of the board's edges: masking lattice lines alone left ~58% of them, and the fit
+  latches onto whatever is left. `board_grid_mask` also fills marker quads from
+  `board.getObjPoints()` — that takes board-only edges to **zero** while covering ~7% of frame.
+- **The mask also erases object edges wherever the part overlaps board pattern** (~half of them in
+  testing). In the real cell the part should sit on the matte mat, not on the board.
+- **A good RMS at a wrong pose is a wrong pose.** One view scored a *similar* RMS to two views
+  while being 8x worse in translation (17 mm vs 2 mm) — the exact failure that sank the
+  single-image markerless spikes. Always look at the overlay; magenta shows what was matched.
+- Synthetic end-to-end: 11.6 deg cold init -> **1.85 deg / 2.2 mm**. The residual is dominated by
+  the crude wireframe render in the test, not by the solver.
+
 ## Files Stored
 
 - Uploads: `/uploads/<8-hex>_<original_name>.step` (bind-mounted to `./uploads/`)

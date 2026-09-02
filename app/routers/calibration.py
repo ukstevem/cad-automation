@@ -26,6 +26,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
+from app.services import charuco
 
 logger = structlog.get_logger()
 
@@ -45,24 +46,11 @@ except Exception as exc:  # pragma: no cover - import guard
 
 # ── ChArUco board configuration ────────────────────────────────────────────
 
-# Supported ArUco dictionaries (name → cv2 constant resolved lazily).
-_DICT_NAMES = [
-    "DICT_4X4_50",
-    "DICT_4X4_100",
-    "DICT_5X5_100",
-    "DICT_6X6_250",
-    "DICT_APRILTAG_36h11",
-]
-
-# Sensible defaults: a 5x7 board of 30 mm squares / 22 mm markers prints onto A4
-# and gives plenty of corners. Marker length must be < square length.
-DEFAULT_BOARD = {
-    "squares_x": 5,
-    "squares_y": 7,
-    "square_mm": 30.0,
-    "marker_mm": 22.0,
-    "dictionary": "DICT_5X5_100",
-}
+# Board construction/detection lives in app/services/charuco.py so the AR fit path builds
+# the SAME board this calibration was computed against. Do not re-define it here: a divergent
+# copy fails silently (zero corners detected, no error).
+_DICT_NAMES = charuco.DICT_NAMES
+DEFAULT_BOARD = charuco.DEFAULT_BOARD
 
 MIN_CORNERS_PER_VIEW = 6
 MIN_VIEWS = 4
@@ -84,26 +72,17 @@ def _require_cv2():
 
 
 def _resolve_dict(name: str):
-    if name not in _DICT_NAMES:
-        raise HTTPException(status_code=400, detail=f"Unsupported dictionary '{name}'. Allowed: {_DICT_NAMES}")
-    const = getattr(cv2.aruco, name, None)
-    if const is None:
-        raise HTTPException(status_code=400, detail=f"Dictionary '{name}' not present in this OpenCV build")
-    return cv2.aruco.getPredefinedDictionary(const)
+    try:
+        return charuco.resolve_dictionary(name)
+    except charuco.CharucoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _build_board(squares_x: int, squares_y: int, square_mm: float, marker_mm: float, dictionary: str):
-    if squares_x < 3 or squares_y < 3:
-        raise HTTPException(status_code=400, detail="Board must be at least 3x3 squares")
-    if marker_mm >= square_mm:
-        raise HTTPException(status_code=400, detail="marker_mm must be smaller than square_mm")
-    aruco_dict = _resolve_dict(dictionary)
-    # Board scale only affects extrinsics, not the intrinsic matrix; we keep mm so
-    # any future pose use is metric. (squares_x, squares_y) = (cols, rows).
-    board = cv2.aruco.CharucoBoard(
-        (squares_x, squares_y), float(square_mm), float(marker_mm), aruco_dict
-    )
-    return board
+    try:
+        return charuco.build_board(squares_x, squares_y, square_mm, marker_mm, dictionary)
+    except charuco.CharucoError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _decode_image(raw: bytes, field: str):
@@ -116,10 +95,7 @@ def _decode_image(raw: bytes, field: str):
 
 def _detect_charuco(detector, gray):
     """Return (charuco_corners, charuco_ids) or (None, None)."""
-    charuco_corners, charuco_ids, _marker_corners, _marker_ids = detector.detectBoard(gray)
-    if charuco_ids is None or len(charuco_ids) == 0:
-        return None, None
-    return charuco_corners, charuco_ids
+    return charuco.detect_board(detector, gray)
 
 
 # ── Profile persistence ─────────────────────────────────────────────────────

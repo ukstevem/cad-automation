@@ -16,6 +16,9 @@ services:
       # Tests and config
       - ./tests:/app/tests
       - ./pytest.ini:/app/pytest.ini
+      # Headless CLIs (fit_multiview, capture helpers) - not COPYed by the Dockerfile,
+      # so they are mounted to run inside the container where OpenCV lives.
+      - ./tools:/app/tools
       # Frontend
       - ./frontend:/app/frontend
       # Persistent volumes for data

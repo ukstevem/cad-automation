@@ -1,0 +1,217 @@
+"""
+End-to-end verification of the photo -> pose chain (app/services/multiview_fit.py), bead ...-2ni.
+
+Unlike test_multiview.py — which hands the solver perfectly synthetic edge *points* — this builds
+an actual **image**: a real ChArUco board rendered by OpenCV, warped into a virtual camera, with a
+known asymmetric object drawn over it at a known pose. The pipeline then has to do the whole job
+for real: detect the board, solve its pose, mask the board lattice out, Canny the frame, and
+recover the object pose from an offset start.
+
+That exercises every link that a synthetic-points test cannot: dictionary/board agreement, the
+board->world convention, the mask not eating the subject, and Canny actually yielding usable edges.
+"""
+import numpy as np
+import pytest
+
+cv2 = pytest.importorskip("cv2")
+pytest.importorskip("scipy")
+
+from app.services import charuco, multiview_fit as MVF
+
+
+# A board big enough that the part does not cover the tags. That is a real constraint, not a
+# test convenience: at 5x7 the L-section knocked detection from 24 corners to 3.
+BOARD_CFG = {
+    "squares_x": 7, "squares_y": 9, "square_mm": 30.0, "marker_mm": 22.0,
+    "dictionary": "DICT_5X5_100",
+}
+BOARD_W_MM, BOARD_H_MM = 210.0, 270.0          # 7x30 by 9x30
+IMG_W, IMG_H = 1600, 1200
+K = np.array([[1400.0, 0, IMG_W / 2.0], [0, 1400.0, IMG_H / 2.0], [0, 0, 1.0]])
+DIST = np.zeros((5, 1))
+
+
+# ── a small asymmetric L-section, extruded along Y (object frame) ───────────
+
+def _l_section_model():
+    prof = [(0, 0), (60, 0), (60, 15), (20, 15), (20, 50), (0, 50)]   # (x, z)
+    y0, y1 = 0.0, 120.0
+    edges = []
+    for y in (y0, y1):                                               # both end profiles
+        ring = [[x, y, z] for (x, z) in prof]
+        edges.extend([[ring[i], ring[(i + 1) % len(ring)]] for i in range(len(ring))])
+    for (x, z) in prof:                                              # longitudinal edges
+        edges.append([[x, y0, z], [x, y1, z]])
+    return {"name": "L-section test", "scale": 1.0, "edges": edges,
+            "bbox": {"min": [0.0, 0.0, 0.0], "max": [60.0, 120.0, 50.0]}}
+
+
+def _look_at(cam_pos, target, world_up=(0.0, 0.0, 1.0)):
+    """OpenCV-convention world->camera pose (x right, y down, z forward)."""
+    cam_pos = np.asarray(cam_pos, float)
+    z = np.asarray(target, float) - cam_pos
+    z /= np.linalg.norm(z)
+    up = np.asarray(world_up, float)
+    if abs(np.dot(z, up)) > 0.95:
+        up = np.array([0.0, 1.0, 0.0])
+    x = np.cross(up, z); x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    R = np.stack([x, y, z], axis=0)
+    rvec, _ = cv2.Rodrigues(R)
+    return rvec, (-R @ cam_pos).reshape(3, 1)
+
+
+def _render_scene(board, rvec_cam, tvec_cam, model, rvec_obj, tvec_obj, px_per_mm=4.0):
+    """
+    Render a photo-like frame: the board warped onto its plane, object wireframe drawn on top.
+
+    The board image maps to board coords by (u, v) -> (u/px_per_mm, v/px_per_mm, 0), so the
+    plane homography is K [r1 r2 t] S. If that convention were wrong the object would land in
+    the wrong place relative to the detected board and the fit assertions below would fail —
+    the test self-checks the world-frame convention.
+    """
+    bw = int(BOARD_W_MM * px_per_mm)
+    bh = int(BOARD_H_MM * px_per_mm)
+    board_img = board.generateImage((bw, bh))
+
+    R, _ = cv2.Rodrigues(np.asarray(rvec_cam).reshape(3, 1))
+    t = np.asarray(tvec_cam).reshape(3, 1)
+    S = np.array([[1.0 / px_per_mm, 0, 0], [0, 1.0 / px_per_mm, 0], [0, 0, 1.0]])
+    H = K @ np.hstack([R[:, :1], R[:, 1:2], t]) @ S
+
+    frame = cv2.warpPerspective(board_img, H, (IMG_W, IMG_H), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+    R_obj, _ = cv2.Rodrigues(np.asarray(rvec_obj).reshape(3, 1))
+    t_obj = np.asarray(tvec_obj).reshape(3, 1)
+    R_oc = R @ R_obj
+    t_oc = R @ t_obj + t
+    rvec_oc, _ = cv2.Rodrigues(R_oc)
+    for edge in model["edges"]:
+        pts = np.asarray(edge, np.float64).reshape(-1, 1, 3)
+        proj, _ = cv2.projectPoints(pts, rvec_oc, t_oc, K, DIST)
+        cv2.polylines(frame, [np.round(proj.reshape(-1, 2)).astype(np.int32)],
+                      isClosed=False, color=(128, 128, 128), thickness=2)
+    return frame
+
+
+def _pose_err(rv_a, tv_a, rv_b, tv_b):
+    Ra, _ = cv2.Rodrigues(np.asarray(rv_a, float).reshape(3, 1))
+    Rb, _ = cv2.Rodrigues(np.asarray(rv_b, float).reshape(3, 1))
+    ang = np.degrees(np.arccos(np.clip((np.trace(Ra.T @ Rb) - 1) / 2, -1, 1)))
+    trans = np.linalg.norm(np.asarray(tv_a, float).reshape(3) - np.asarray(tv_b, float).reshape(3))
+    return float(ang), float(trans)
+
+
+@pytest.fixture(scope="module")
+def scene():
+    """
+    Board flat at Z=0, object resting on it, two cameras ~40 deg apart at ~600 mm — the rig.
+
+    Cameras sit at **negative** board Z and the object occupies negative Z. That is not an
+    arbitrary choice: an OpenCV ChArUco board generated by ``generateImage`` and mapped
+    ``(u, v) -> (X, Y, 0)`` is only legible from the -Z side, so a camera placed at +Z sees a
+    mirrored pattern and decodes exactly nothing. See ``test_board_is_legible_from_negative_z``.
+    """
+    board = charuco.build_board_from_config(BOARD_CFG)
+    model = _l_section_model()
+    true_rvec = np.array([[0.03], [-0.02], [0.20]])
+    true_tvec = np.array([[75.0], [75.0], [-50.0]])          # object spans z -50..0
+    target = (BOARD_W_MM / 2, BOARD_H_MM / 2, -25.0)
+    cams = []
+    for az in (-20.0, 20.0):
+        a, el, d = np.radians(az), np.radians(-40.0), 600.0
+        pos = (target[0] + d * np.cos(el) * np.sin(a),
+               target[1] - d * np.cos(el) * np.cos(a),
+               target[2] + d * np.sin(el))
+        cams.append(_look_at(pos, target))
+    frames = [_render_scene(board, rc, tc, model, true_rvec, true_tvec) for rc, tc in cams]
+    profile = {"name": "synthetic", "K": K, "dist": DIST,
+               "image_size": (IMG_W, IMG_H), "board": BOARD_CFG}
+    return {"board": board, "model": model, "frames": frames, "profile": profile,
+            "true_rvec": true_rvec, "true_tvec": true_tvec}
+
+
+def test_board_is_legible_from_negative_z(scene):
+    """
+    Lock the board-frame handedness down.
+
+    A camera that decodes the board solves to a centre at negative board Z. Everything that
+    places an object 'on the board' depends on this sign, and getting it wrong is silent: the
+    init lands behind the board where no camera can see it and the fit wanders off. If a future
+    OpenCV changes the convention, this test is the one that should fail first.
+    """
+    detector = charuco.make_detector(scene["board"])
+    views = [MVF.build_view(f, scene["profile"], scene["board"], detector, label=f"v{i}")
+             for i, f in enumerate(scene["frames"])]
+    assert MVF.camera_side_of_board(views) == -1.0
+
+
+def test_build_view_detects_board_and_yields_edges(scene):
+    detector = charuco.make_detector(scene["board"])
+    view = MVF.build_view(scene["frames"][0], scene["profile"], scene["board"], detector,
+                          label="view0")
+    d = view["_diag"]
+    assert d["board_corners"] >= 12, f"only {d['board_corners']} corners on a clean synthetic board"
+    assert d["edge_pixels"] > 500
+    # Camera was placed 600 mm from the board centre; the solved pose must agree.
+    assert 500 < d["camera_distance_mm"] < 750
+
+
+def test_grid_mask_removes_board_edges_without_erasing_the_object(scene):
+    detector = charuco.make_detector(scene["board"])
+    unmasked = MVF.build_view(scene["frames"][0], scene["profile"], scene["board"], detector,
+                              mask_mode="none")["_diag"]["edge_pixels"]
+    masked = MVF.build_view(scene["frames"][0], scene["profile"], scene["board"], detector,
+                            mask_mode="grid")["_diag"]["edge_pixels"]
+    assert masked < unmasked * 0.5, "grid mask barely reduced edges — board still dominating"
+    assert masked > 300, "grid mask ate the object as well as the board"
+
+
+def test_two_view_fit_recovers_object_pose_from_an_offset_start(scene):
+    detector = charuco.make_detector(scene["board"])
+    views = [MVF.build_view(f, scene["profile"], scene["board"], detector, label=f"v{i}")
+             for i, f in enumerate(scene["frames"])]
+
+    init_rvec = scene["true_rvec"] + np.array([[0.02], [0.02], [-0.03]])   # ~2-3 deg off
+    init_tvec = scene["true_tvec"] + np.array([[6.0], [-5.0], [4.0]])      # ~9 mm off
+
+    result = MVF.fit_from_views(views, scene["model"], init_rvec, init_tvec)
+    ang, trans = _pose_err(result["rvec"], result["tvec"],
+                           scene["true_rvec"], scene["true_tvec"])
+    info = result["info"]
+    assert info["rms_after_px"] < info["rms_before_px"], "fit did not improve on the init"
+    assert ang < 2.5, f"rotation error {ang:.2f} deg"
+    assert trans < 6.0, f"translation error {trans:.2f} mm"
+
+
+def test_resolution_gate_blocks_a_mismatched_profile(scene):
+    detector = charuco.make_detector(scene["board"])
+    wrong = dict(scene["profile"], image_size=(640, 480))
+    with pytest.raises(MVF.MultiViewFitError, match="Intrinsics do not transfer"):
+        MVF.build_view(scene["frames"][0], wrong, scene["board"], detector, label="v0")
+
+
+def test_default_init_places_the_object_on_the_camera_side_of_the_board(scene):
+    """Without views the OpenCV convention (-Z) is assumed; with views it is measured."""
+    detector = charuco.make_detector(scene["board"])
+    views = [MVF.build_view(f, scene["profile"], scene["board"], detector, label=f"v{i}")
+             for i, f in enumerate(scene["frames"])]
+
+    for kwargs in ({}, {"views": views}):
+        rvec, tvec = MVF.default_init_pose(scene["model"], scene["board"], **kwargs)
+        assert np.allclose(rvec, 0)
+        t = np.asarray(tvec).reshape(3)
+        assert abs(t[0] - (BOARD_W_MM / 2 - 30.0)) < 1e-6   # object x-centre 30 -> board centre
+        assert abs(t[1] - (BOARD_H_MM / 2 - 60.0)) < 1e-6   # object y-centre 60 -> board centre
+        # Model spans z 0..50, cameras are at -Z, so it must be seated at z = -50..0.
+        assert abs(t[2] - (-50.0)) < 1e-6, "object initialised behind the board, away from the cameras"
+
+
+def test_too_few_corners_reports_the_dictionary(scene):
+    """A blank frame must fail with a message naming the dictionary — the classic silent bug."""
+    detector = charuco.make_detector(scene["board"])
+    blank = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+    with pytest.raises(MVF.MultiViewFitError, match="DICT_5X5_100"):
+        MVF.build_view(blank, scene["profile"], scene["board"], detector, label="blank")
