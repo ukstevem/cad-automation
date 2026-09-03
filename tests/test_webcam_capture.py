@@ -60,6 +60,61 @@ def test_discover_devices_returns_a_list_when_nothing_is_attached(monkeypatch):
     assert WC.discover_devices() == []
 
 
+class _FakeProc:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout, self.stderr, self.returncode = stdout, "", returncode
+
+
+def test_get_ctrl_parses_menu_controls_with_a_trailing_label(monkeypatch):
+    """
+    v4l2-ctl labels menu controls: `auto_exposure: 1 (Manual Mode)`.
+
+    Parsing the whole remainder returns None for exactly the mode controls that decide whether
+    the manual values apply at all — which silently drops them from both the apply ordering and
+    the verification. This was a live bug: auto_exposure was never actually being verified.
+    """
+    monkeypatch.setattr(WC, "_v4l2", lambda d, a: _FakeProc("auto_exposure: 1 (Manual Mode)\n"))
+    assert WC.get_ctrl("/dev/video0", "auto_exposure") == 1
+
+
+def test_get_ctrl_parses_a_plain_integer(monkeypatch):
+    monkeypatch.setattr(WC, "_v4l2", lambda d, a: _FakeProc("exposure_time_absolute: 77\n"))
+    assert WC.get_ctrl("/dev/video0", "exposure_time_absolute") == 77
+
+
+def test_get_ctrl_returns_none_on_failure(monkeypatch):
+    monkeypatch.setattr(WC, "_v4l2", lambda d, a: _FakeProc("", returncode=1))
+    assert WC.get_ctrl("/dev/video0", "nope") is None
+
+
+def test_apply_controls_sets_auto_toggles_before_the_values_they_gate(monkeypatch):
+    """
+    Order is load-bearing. Setting exposure_time_absolute while auto_exposure is still on fails
+    with Permission denied and leaves the auto-chosen value; switching to manual afterwards then
+    freezes it. Measured on the rig: value-then-manual kept 77, manual-then-value gave 8.
+    """
+    calls = []
+    monkeypatch.setattr(WC, "set_ctrl", lambda d, n, v: calls.append(n) or True)
+    monkeypatch.setattr(WC.time, "sleep", lambda s: None)
+    # Deliberately hostile ordering: the value first, the mode toggle last.
+    WC.apply_controls("/dev/video0", {
+        "exposure_time_absolute": 8,
+        "white_balance_temperature": 3696,
+        "auto_exposure": 1,
+        "white_balance_automatic": 0,
+    })
+    assert calls.index("auto_exposure") < calls.index("exposure_time_absolute")
+    assert calls.index("white_balance_automatic") < calls.index("white_balance_temperature")
+
+
+def test_geometry_critical_covers_focus_and_zoom_only():
+    """Only focus and zoom change the camera model; exposure/WB change appearance."""
+    assert "focus_absolute" in WC.GEOMETRY_CRITICAL
+    assert "zoom_absolute" in WC.GEOMETRY_CRITICAL
+    assert "exposure_time_absolute" not in WC.GEOMETRY_CRITICAL
+    assert "white_balance_temperature" not in WC.GEOMETRY_CRITICAL
+
+
 def _png_bytes(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", width, height)
 

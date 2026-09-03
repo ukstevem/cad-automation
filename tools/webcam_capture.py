@@ -196,11 +196,22 @@ def supported_controls(device: str):
 
 
 def get_ctrl(device: str, name: str):
+    """
+    Read one control's integer value.
+
+    Menu-type controls append a human label — ``auto_exposure: 1 (Manual Mode)`` — so take only
+    the leading token. Parsing the whole remainder returns None for exactly the mode controls
+    that decide whether the manual values apply at all, which silently drops them out of both
+    the apply order and the verification.
+    """
     out = _v4l2(device, ["--get-ctrl", name])
     if out.returncode != 0 or ":" not in out.stdout:
         return None
+    raw = out.stdout.split(":", 1)[1].strip()
+    if not raw:
+        return None
     try:
-        return int(out.stdout.split(":", 1)[1].strip())
+        return int(raw.split()[0])
     except ValueError:
         return None
 
@@ -324,6 +335,15 @@ def cmd_lock(args) -> int:
             for n in names:
                 if n == "sharpness":
                     values[n] = args.sharpness
+        if args.exposure is not None:
+            # Auto-metering optimises for the WHOLE frame, and in a test cell a large dark
+            # background (a navy wall, the shadowed area beyond the rig) drags the average down
+            # and blows out the brightly-lit subject. Measured on this rig: auto settled at 77
+            # and clipped the desk to pure white; 8 gave a crisp, high-contrast part. Roughly a
+            # 10x error, and the part is the only thing we care about.
+            for n in names:
+                if n in ("exposure_time_absolute", "exposure_absolute"):
+                    values[n] = args.exposure
         # Apply, then stream once and re-read. A C920 nudges exposure when the stream opens
         # (observed ~7%, and it is a genuine stream-open adjustment, not quantisation). Recording
         # the pre-stream value would mean every later shot reported a drift it could do nothing
@@ -355,7 +375,16 @@ def cmd_lock(args) -> int:
 
 
 def apply_controls(device: str, values: dict) -> None:
-    for name, value in values.items():
+    """
+    Apply controls with the auto/mode toggles FIRST.
+
+    Order is load-bearing, not cosmetic. Setting ``exposure_time_absolute`` while
+    ``auto_exposure`` is still on fails with ``Permission denied`` and leaves the auto-chosen
+    value in place; switching to manual afterwards then freezes that value. Measured on this
+    rig: value-then-manual kept 77, manual-then-value gave the requested 8.
+    """
+    ordered = sorted(values.items(), key=lambda kv: 0 if kv[0] in AUTO_OFF else 1)
+    for name, value in ordered:
         set_ctrl(device, name, value)
     time.sleep(0.3)
 
@@ -448,6 +477,12 @@ def main() -> int:
     lock = sub.add_parser("lock", help="settle then pin focus/exposure/white balance")
     lock.add_argument("--sharpness", type=int, default=0,
                       help="force sharpness (default 0 — in-camera sharpening fabricates edges)")
+    lock.add_argument("--exposure", type=int, default=None,
+                      help="override exposure_time_absolute (units of 100us) instead of trusting "
+                           "auto-metering. Needed when a large dark background drags the average "
+                           "down and blows out the subject — on this rig auto chose 77 and clipped "
+                           "the desk to white, while 8 gave a crisp part. The camera may pull the "
+                           "value down further on stream open; whatever survives is recorded.")
     shot = sub.add_parser("shot", help="capture one labelled frame per camera")
     shot.add_argument("label")
     args = ap.parse_args()
