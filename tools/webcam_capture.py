@@ -68,6 +68,7 @@ WARMUP_FRAMES = 12          # webcams need frames in flight before the sensor se
 CONTROLS = [
     ("focus_automatic_continuous", "focus_auto"),
     ("focus_absolute", "focus_absolute"),
+    ("zoom_absolute", "zoom_absolute"),
     ("auto_exposure", "exposure_auto"),
     ("exposure_time_absolute", "exposure_absolute"),
     ("white_balance_automatic", "white_balance_temperature_auto"),
@@ -75,6 +76,21 @@ CONTROLS = [
     ("sharpness", "sharpness"),
     ("backlight_compensation", "backlight_compensation"),
 ]
+
+# Which controls actually invalidate a calibration if they move.
+#
+# Only the ones that change the camera's GEOMETRY. Focus shifts the lens elements and with them
+# the focal length; zoom scales it outright. Move either between the calibration shots and the
+# measurement shots and the intrinsics are silently wrong.
+#
+# Exposure, white balance, sharpness and backlight change how the image LOOKS, not where things
+# project to. Observed on a real C920: exposure_time_absolute shifts by ~7% when the stream opens
+# (verified as a genuine stream-open adjustment, not value quantisation — step is 1 and a set
+# without streaming reads straight back). Failing the run over that would cry wolf, and a check
+# that cries wolf gets ignored — which is exactly how a real focus drift would later slip past.
+GEOMETRY_CRITICAL = {
+    "focus_absolute", "focus_automatic_continuous", "focus_auto", "zoom_absolute",
+}
 AUTO_OFF = {                       # value meaning "manual" for each auto control
     "focus_automatic_continuous": 0, "focus_auto": 0,
     "auto_exposure": 1, "exposure_auto": 1,             # 1 = manual, 3 = aperture priority
@@ -308,6 +324,21 @@ def cmd_lock(args) -> int:
             for n in names:
                 if n == "sharpness":
                     values[n] = args.sharpness
+        # Apply, then stream once and re-read. A C920 nudges exposure when the stream opens
+        # (observed ~7%, and it is a genuine stream-open adjustment, not quantisation). Recording
+        # the pre-stream value would mean every later shot reported a drift it could do nothing
+        # about. So settle it here: record what the camera actually produces once streaming.
+        apply_controls(device, values)
+        stream_briefly(device, 1.0, args.fourcc)
+        settled = verify_controls(device, values)
+        for name, wanted, got in settled:
+            if name in GEOMETRY_CRITICAL:
+                print(f"  !! {name} will not hold ({wanted} -> {got} on stream open). This camera "
+                      f"cannot keep stable intrinsics — calibration from it is not trustworthy.")
+            else:
+                values[name] = got          # accept the settled appearance value
+                print(f"     {name} settles to {got} once streaming (was {wanted}) — recorded")
+
         settings[device] = {"_identity": device_identity(device), "controls": values}
         print(f"  locked: {values}")
 
@@ -375,11 +406,17 @@ def cmd_shot(args) -> int:
         # would read back the values we just set and report all-clear on a photo that was
         # actually taken with different ones.
         drifted = verify_controls(device, values)
-        if drifted:
+        critical = [d for d in drifted if d[0] in GEOMETRY_CRITICAL]
+        advisory = [d for d in drifted if d[0] not in GEOMETRY_CRITICAL]
+        if critical:
             any_drift = True
-            print(f"  !! {device} CONTROLS DID NOT STICK — reset when the stream opened:")
-            for name, want, got in drifted:
+            print(f"  !! {device} GEOMETRY CONTROLS DID NOT STICK — this invalidates the "
+                  f"calibration:")
+            for name, want, got in critical:
                 print(f"       {name}: wanted {want}, got {got}")
+        for name, want, got in advisory:
+            print(f"     note: {name} settled to {got}, not {want} (appearance only, "
+                  f"not intrinsics)")
 
         size = png_size(dest)
         if size and list(size) != list(settings.get("_resolution", RESOLUTION)):
@@ -390,9 +427,9 @@ def cmd_shot(args) -> int:
         print(f"  {device} -> {dest}  ({size[0]}x{size[1]})" if size else f"  {device} -> {dest}")
 
     if any_drift:
-        print("\nWARNING: at least one camera did not hold its locked controls. Those photos "
-              "were taken with different intrinsics than the calibration — do not trust a pose "
-              "from them. Re-run `lock`, or keep the device open for the whole session.")
+        print("\nWARNING: a camera did not hold its FOCUS or ZOOM, or its identity changed. "
+              "Those photos have different intrinsics from the calibration — do not trust a "
+              "pose from them. Re-run `lock`, or keep the device open for the whole session.")
         return 1
     print("\nDone. Move the part/board only BETWEEN shots, never the cameras.")
     return 0
