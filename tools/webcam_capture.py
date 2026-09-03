@@ -29,7 +29,13 @@ camera, a silent reset between the calibration shot and the measurement shot wou
 with correct-looking photos taken at the wrong focus — undetectable afterwards. So every shot
 re-applies the locked values and **reads them back to verify**, shouting if they did not stick.
 
-Requirements: ``v4l2-ctl`` (apt install v4l-utils) and ``opencv-python``.
+Requirements: ``v4l2-ctl`` and ``ffmpeg`` — nothing else.
+
+Frames are grabbed with ffmpeg rather than OpenCV deliberately. A capture host should carry as
+little as possible, and on Arch ``python-opencv`` drags in vtk, qt6-base, openmpi and hdf5 to do
+a job ffmpeg already does. ffmpeg's CLI is also far more stable across major versions than
+OpenCV's Python API, and it gives explicit control of the pixel format, which is the one thing
+that actually matters here (uncompressed YUYV, not MJPEG).
 """
 from __future__ import annotations
 
@@ -37,15 +43,11 @@ import argparse
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import time
 from datetime import datetime
-
-try:
-    import cv2
-except ImportError:  # pragma: no cover - runs on the capture host, not in CI
-    sys.exit("Needs OpenCV: pip install opencv-python")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS = os.path.join(HERE, "webcam_settings.json")
@@ -203,19 +205,58 @@ def resolve_names(device: str):
     return resolved
 
 
-def open_camera(device: str, fourcc: str = "YUYV"):
-    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        sys.exit(f"Could not open {device}")
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUTION[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUTION[1])
-    return cap
+PIXFMT = {"YUYV": "yuyv422", "MJPG": "mjpeg"}
 
 
-def warmup(cap, n: int = WARMUP_FRAMES) -> None:
-    for _ in range(n):
-        cap.read()
+def _require_ffmpeg() -> None:
+    if shutil.which("ffmpeg") is None:
+        sys.exit("ffmpeg not found. Install it:  sudo pacman -S ffmpeg   (or apt install ffmpeg)")
+
+
+def stream_briefly(device: str, seconds: float, fourcc: str = "YUYV") -> None:
+    """Hold the camera streaming for *seconds* and discard it — lets the auto controls converge."""
+    _require_ffmpeg()
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-f", "v4l2", "-input_format", PIXFMT.get(fourcc, "yuyv422"),
+         "-video_size", f"{RESOLUTION[0]}x{RESOLUTION[1]}",
+         "-i", device, "-t", str(seconds), "-f", "null", "-"],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def capture_frame(device: str, dest: str, fourcc: str = "YUYV",
+                  warmup: int = WARMUP_FRAMES) -> str:
+    """
+    Grab one frame to *dest* as PNG. Returns "" on success, else the ffmpeg error.
+
+    The ``select`` filter discards the first *warmup* frames rather than saving them: a webcam's
+    opening frames are dark or half-converged even with the controls pinned, and that would be
+    baked into a calibration. PNG, not JPEG — no compression artefacts on the very edges the
+    fit is about to detect.
+    """
+    _require_ffmpeg()
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-f", "v4l2", "-input_format", PIXFMT.get(fourcc, "yuyv422"),
+         "-video_size", f"{RESOLUTION[0]}x{RESOLUTION[1]}",
+         "-i", device,
+         "-vf", f"select=gte(n\\,{int(warmup)})", "-frames:v", "1",
+         "-y", dest],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0 or not os.path.exists(dest):
+        return (proc.stderr or "ffmpeg failed").strip().splitlines()[-1:][0] if proc.stderr else "ffmpeg failed"
+    return ""
+
+
+def png_size(path: str):
+    """(width, height) from a PNG header — avoids pulling in an image library just to check."""
+    with open(path, "rb") as fh:
+        head = fh.read(24)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", head[16:24])
 
 
 def cmd_list(args) -> int:
@@ -253,11 +294,7 @@ def cmd_lock(args) -> int:
         for n in names:
             if n in AUTO_OFF:
                 set_ctrl(device, n, 3 if "exposure" in n else 1)
-        cap = open_camera(device, args.fourcc)
-        t0 = time.time()
-        while time.time() - t0 < SETTLE_S:
-            cap.read()
-        cap.release()
+        stream_briefly(device, SETTLE_S, args.fourcc)
 
         values = {}
         for n in names:
@@ -286,11 +323,14 @@ def cmd_lock(args) -> int:
     return 0
 
 
-def apply_and_verify(device: str, values: dict) -> list:
-    """Apply the locked controls, then read them back. Returns a list of controls that drifted."""
+def apply_controls(device: str, values: dict) -> None:
     for name, value in values.items():
         set_ctrl(device, name, value)
     time.sleep(0.3)
+
+
+def verify_controls(device: str, values: dict) -> list:
+    """Read the controls back. Returns ``[(name, wanted, got), ...]`` for any that differ."""
     drifted = []
     for name, value in values.items():
         got = get_ctrl(device, name)
@@ -323,27 +363,31 @@ def cmd_shot(args) -> int:
             any_drift = True
             print(f"  !! {device} is now '{got_id}' but was locked as '{want_id}' — the cameras "
                   f"have swapped device nodes. Re-run `lock`.")
-        cap = open_camera(device, fourcc)
-        drifted = apply_and_verify(device, values)
+        dest = os.path.join(CAPTURES, f"{args.label}_{tags[device]}_{stamp}.png")
+        apply_controls(device, values)
+        err = capture_frame(device, dest, fourcc)
+        if err:
+            print(f"  {device}: capture FAILED — {err}")
+            continue
+
+        # Verify AFTER the capture, not before. If the driver resets controls when the device is
+        # opened for streaming — the exact trap this tool exists to catch — a pre-flight check
+        # would read back the values we just set and report all-clear on a photo that was
+        # actually taken with different ones.
+        drifted = verify_controls(device, values)
         if drifted:
             any_drift = True
-            print(f"  !! {device} CONTROLS DID NOT STICK — the camera reset them on reopen:")
+            print(f"  !! {device} CONTROLS DID NOT STICK — reset when the stream opened:")
             for name, want, got in drifted:
                 print(f"       {name}: wanted {want}, got {got}")
-        warmup(cap)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok:
-            print(f"  {device}: capture FAILED")
-            continue
-        h, w = frame.shape[:2]
-        if (w, h) != tuple(settings.get("_resolution", RESOLUTION)):
-            print(f"  !! {device} returned {w}x{h}, not {settings.get('_resolution')} — "
-                  f"the calibration resolution gate will reject these.")
-        # PNG, not JPEG: no compression artefacts on the very edges we are about to detect.
-        dest = os.path.join(CAPTURES, f"{args.label}_{tags[device]}_{stamp}.png")
-        cv2.imwrite(dest, frame)
-        print(f"  {device} -> {dest}  ({w}x{h})")
+
+        size = png_size(dest)
+        if size and list(size) != list(settings.get("_resolution", RESOLUTION)):
+            any_drift = True
+            print(f"  !! {device} returned {size[0]}x{size[1]}, not "
+                  f"{settings.get('_resolution')} — the calibration resolution gate will "
+                  f"reject these.")
+        print(f"  {device} -> {dest}  ({size[0]}x{size[1]})" if size else f"  {device} -> {dest}")
 
     if any_drift:
         print("\nWARNING: at least one camera did not hold its locked controls. Those photos "

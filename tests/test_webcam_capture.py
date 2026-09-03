@@ -6,11 +6,10 @@ camera. That mapping is load-bearing — ``fit_multiview.py --cam-profile SUBSTR
 the filename, so a wrong or colliding tag silently pairs a photo with the wrong intrinsics.
 """
 import os
+import struct
 import sys
 
 import pytest
-
-pytest.importorskip("cv2")
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 
@@ -59,6 +58,29 @@ def test_discover_devices_returns_a_list_when_nothing_is_attached(monkeypatch):
     monkeypatch.setattr(WC.os.path, "isdir", lambda p: False)
     monkeypatch.setattr(WC.os.path, "exists", lambda p: False)
     assert WC.discover_devices() == []
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    return b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", width, height)
+
+
+def test_png_size_reads_the_header(tmp_path):
+    """The resolution check must not need an image library on the capture host."""
+    p = tmp_path / "f.png"
+    p.write_bytes(_png_bytes(1920, 1080))
+    assert WC.png_size(str(p)) == (1920, 1080)
+
+
+def test_png_size_rejects_a_non_png(tmp_path):
+    p = tmp_path / "f.png"
+    p.write_bytes(b"not a png at all, definitely not" + b"\x00" * 32)
+    assert WC.png_size(str(p)) is None
+
+
+def test_pixel_format_map_prefers_uncompressed():
+    """YUYV is the default because MJPEG artefacts land on the very edges the fit detects."""
+    assert WC.PIXFMT["YUYV"] == "yuyv422"
+    assert WC.PIXFMT["MJPG"] == "mjpeg"
 
 
 def test_discover_devices_prefers_by_id_and_takes_only_index0(monkeypatch):
