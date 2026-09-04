@@ -80,6 +80,18 @@ def main() -> int:
     ap.add_argument("fit_a")
     ap.add_argument("fit_b")
     ap.add_argument("--model", default="outputs/ar_models/mainframe_default_1to5.json")
+    ap.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
+    ap.add_argument("--captures-a", default=None,
+                    help="capture dir for fit_a. Supplying both capture dirs switches the "
+                         "comparison into the CAMERA frame, which is required whenever the BOARD "
+                         "was moved between the two shots: the board is the world frame, so a "
+                         "board-frame answer reports (part turn - board turn), not the part's "
+                         "turn. The cameras are fixed, so the camera frame measures what the part "
+                         "actually did in the room.")
+    ap.add_argument("--captures-b", default=None)
+    ap.add_argument("--cam", default="B68DE55F", help="which camera to reference")
+    ap.add_argument("--expect-plan", type=float, default=None,
+                    help="assert the part swung this many degrees in plan (e.g. 90)")
     ap.add_argument("--expect-endforend", action="store_true",
                     help="assert the part was physically turned end-for-end between the two")
     args = ap.parse_args()
@@ -87,11 +99,44 @@ def main() -> int:
     a, b = load(args.fit_a), load(args.fit_b)
     Ra, Rb = rot(a["rvec"]), rot(b["rvec"])
     e = long_axis(args.model)
+    normal = np.array([0.0, 0.0, 1.0])          # board normal, in the board frame
+    frame = "board"
+
+    if args.captures_a and args.captures_b:
+        import glob
+        from app.services import charuco, image_edges, multiview_fit as MVF
+        from app.services.board_pose import charuco_board_pose
+        prof = MVF.load_profile(args.profile)
+        boardobj = charuco.build_board_from_config(prof["board"])
+        det = charuco.make_detector(boardobj)
+
+        def board_to_cam(capdir):
+            hits = [f for f in glob.glob(os.path.join(capdir, "*"))
+                    if args.cam in os.path.basename(f) and "overlay" not in f]
+            if not hits:
+                raise SystemExit("no capture for camera %s in %s" % (args.cam, capdir))
+            img = cv2.imread(hits[0], cv2.IMREAD_COLOR)
+            cor, ids, _m, _i = charuco.detect_board_detailed(det, image_edges.to_gray(img))
+            rc, tc, _n = charuco_board_pose(cor, ids, boardobj, prof["K"], prof["dist"])
+            R, _ = cv2.Rodrigues(np.asarray(rc, np.float64).reshape(3, 1))
+            return R
+
+        Ca, Cb = board_to_cam(args.captures_a), board_to_cam(args.captures_b)
+        # Board moved? Quantify it, because it is the thing that would otherwise corrupt the answer.
+        Rboard = Cb @ Ca.T
+        rvb, _ = cv2.Rodrigues(Rboard)
+        print("  (board itself moved %.1f deg between the two shots - hence the camera frame)"
+              % float(np.degrees(np.linalg.norm(rvb))))
+        Ra, Rb = Ca @ Ra, Cb @ Rb          # part pose expressed in the fixed camera
+        normal = Ca @ np.array([0.0, 0.0, 1.0])
+        frame = "camera (board motion removed)"
+    print("  frame: %s" % frame)
 
     da, db = Ra @ e, Rb @ e                       # the part's length direction, in world, each time
     # End-for-end is a question about direction IN PLAN, so compare the board-plane projections.
-    pa, pb = da.copy(), db.copy()
-    pa[2] = pb[2] = 0.0
+    n = normal / max(np.linalg.norm(normal), 1e-9)
+    pa = da - n * float(np.dot(da, n))
+    pb = db - n * float(np.dot(db, n))
     pa /= max(np.linalg.norm(pa), 1e-9)
     pb /= max(np.linalg.norm(pb), 1e-9)
     plan = float(np.degrees(np.arccos(np.clip(np.dot(pa, pb), -1, 1))))
@@ -106,7 +151,7 @@ def main() -> int:
         # Sign it against the part's own axis so "rolled the other way" is not reported as 0.
         if float(np.dot(rv.ravel() / np.linalg.norm(rv), db)) < 0:
             roll = -roll
-    tilt = float(np.degrees(np.arccos(np.clip(abs(float(db[2])), 0, 1))))
+    tilt = float(np.degrees(np.arccos(np.clip(abs(float(np.dot(db, n))), 0, 1))))
 
     print("\n=== HOW THE POSE CHANGED ===")
     print("  %s  ->  %s" % (os.path.basename(os.path.dirname(args.fit_a)),
@@ -123,6 +168,16 @@ def main() -> int:
               % (os.path.basename(os.path.dirname(name)), oc.get("margin_px", float("nan")),
                  ", ".join("%s %.2f" % (k.replace(" 180 deg end-for-end", ""), v)
                            for k, v in sc.items())))
+
+    if args.expect_plan is not None:
+        print("")
+        print("=== VERDICT ===")
+        want = float(args.expect_plan)
+        if abs(plan - want) <= 20.0:
+            print("  PLAN TURN: PASS - expected ~%.0f deg, measured %.1f deg." % (want, plan))
+        else:
+            print("  PLAN TURN: FAIL - expected ~%.0f deg, measured %.1f deg." % (want, plan))
+        print("  ROLL:      %.1f deg (separate axis, separately unreliable)" % roll)
 
     if args.expect_endforend:
         print("\n=== VERDICT ===")
