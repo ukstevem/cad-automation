@@ -39,9 +39,14 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 
 def _safe_filename_part(raw: str, max_len: int = 64) -> str:
-    """Strip characters that are illegal / awkward in filenames."""
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(raw))
-    s = s.strip().strip(".")
+    """Collapse anything outside ``[A-Za-z0-9._-]`` to ``_``.
+
+    Tighter than just stripping reserved-on-Windows chars — also removes
+    spaces and non-ASCII so the resulting filenames travel cleanly as
+    URL path segments without server-side or client-side encoding hops.
+    """
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", str(raw))
+    s = re.sub(r"_+", "_", s).strip("._")
     return (s or "unnamed")[:max_len]
 
 

@@ -186,7 +186,12 @@ def fit_object_pose_planar(
         "per_view_rms_px": [round(x, 3) for x in per_view],
         "n_points": int(len(obj_pts)),
         "n_views": len(vs),
-        "yaw_deg": round(float(np.degrees(sol.x[2])), 2),
+        # TOTAL yaw, not the increment this solve applied. sol.x[2] is measured relative to
+        # init_rvec, so when the init came from the coarse scan it reads as a couple of degrees
+        # while the object is actually rotated 90 - which is exactly the number a UI must not
+        # show. Both rotations are about the board normal, so the composed rvec's Z is the total.
+        "yaw_deg": round(float(np.degrees(np.asarray(rvec_obj).reshape(3)[2])), 2),
+        "yaw_increment_deg": round(float(np.degrees(sol.x[2])), 2),
         "success": bool(sol.success),
     }
     return rvec_obj, tvec_obj, info

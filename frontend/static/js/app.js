@@ -8,6 +8,7 @@ import { ConnectionsPage } from './connections.js';
 import { ProjectsPage } from './projects.js';
 import { CalibratePage } from './calibrate.js';
 import { CapturePage } from './capture.js';
+import { ArFitPage } from './arfit.js';
 
 const api = new ApiClient();
 
@@ -18,6 +19,7 @@ const pages = {
     projects: new ProjectsPage(api),
     calibrate: new CalibratePage(api),
     capture: new CapturePage(api),
+    arfit: new ArFitPage(api),
 };
 
 class App {

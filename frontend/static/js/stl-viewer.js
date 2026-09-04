@@ -178,7 +178,9 @@ export class STLViewer {
      * @param {Array<{url: string, color?: number, opacity?: number, label?: string, placement?: number[]}>} items
      *   placement is an optional 4x4 column-major matrix (16 floats) for positioning
      *   the mesh in the parent assembly's coordinate frame.
-     * @returns {Promise<void>} resolves when all meshes are loaded
+     * @returns {Promise<{total: number, loaded: number, failures: Array<{url: string, reason: string}>}>}
+     *   summary of the load. Use this to surface partial-load warnings; the
+     *   scene is centred + camera-fit even when some meshes fail.
      */
     async loadScene(items) {
         const gen = ++this._loadGen;
@@ -260,10 +262,41 @@ export class STLViewer {
             );
         });
 
-        // Load all in parallel
-        await Promise.all(items.map((item, i) => loadOne(item, i)));
+        // Concurrency-limited pool. Firing 4000+ fetches at once trips
+        // Chrome's per-origin connection limit (net::ERR_INSUFFICIENT_RESOURCES).
+        // 12 in-flight is well under HTTP/1.1's 6-per-host * a small fudge for
+        // the loader's internal queue, and finishes a 5k-mesh scene in seconds.
+        const CONCURRENCY = 12;
+        const results = new Array(items.length);
+        let cursor = 0;
+        const worker = async () => {
+            while (true) {
+                const i = cursor++;
+                if (i >= items.length) return;
+                if (this._disposed || this._loadGen !== gen) return;
+                try {
+                    await loadOne(items[i], i);
+                    results[i] = { status: 'fulfilled' };
+                } catch (err) {
+                    results[i] = { status: 'rejected', reason: err };
+                }
+            }
+        };
+        await Promise.all(
+            Array.from({ length: Math.min(CONCURRENCY, items.length) }, worker),
+        );
 
         if (this._disposed || this._loadGen !== gen) return;
+
+        const failures = results
+            .map((r, i) => ({ r, url: items[i]?.url }))
+            .filter(({ r }) => r && r.status === 'rejected');
+        if (failures.length > 0) {
+            console.warn(
+                `STLViewer.loadScene: ${failures.length}/${items.length} mesh(es) failed to load`,
+                failures.map(({ r, url }) => ({ url, reason: r.reason?.message || String(r.reason) })),
+            );
+        }
 
         // Center all meshes
         const center = new THREE.Vector3();
@@ -278,6 +311,15 @@ export class STLViewer {
 
         // Fit camera
         this._fitCameraToBox(combinedBox, center);
+
+        return {
+            total: items.length,
+            loaded: items.length - failures.length,
+            failures: failures.map(({ r, url }) => ({
+                url,
+                reason: r.reason?.message || String(r.reason),
+            })),
+        };
     }
 
     /**
