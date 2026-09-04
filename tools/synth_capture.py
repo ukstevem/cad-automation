@@ -202,23 +202,43 @@ def main() -> int:
     ap.add_argument("--rig", required=True, help="a real capture dir, to borrow camera poses")
     ap.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
     ap.add_argument("--mesh", required=True)
-    ap.add_argument("--pose", required=True, help="x,y,yaw[,roll] in board mm and degrees")
+    ap.add_argument("--pose", default=None, help="x,y,yaw[,roll] in board mm and degrees")
+    ap.add_argument("--from-fit", default=None,
+                    help="render at the pose in this fit.json instead of --pose. This is how the "
+                         "harness is ANCHORED: render at a pose verified on the real rig, then "
+                         "check the pipeline recovers it. Use the pose known to be CORRECT - for "
+                         "turn45 that is turn45_alt, not the chosen fit.")
     ap.add_argument("--out", required=True)
     ap.add_argument("--noise", type=float, default=2.0)
     ap.add_argument("--blur", type=int, default=3)
     args = ap.parse_args()
 
-    vals = [float(v) for v in args.pose.split(",")]
-    if len(vals) == 3:
-        vals.append(0.0)
-    x, y, yaw, roll = vals
+    if not args.pose and not args.from_fit:
+        print("need --pose or --from-fit", file=sys.stderr)
+        return 2
+    x = y = yaw = roll = 0.0
+    if args.pose:
+        vals = [float(v) for v in args.pose.split(",")]
+        if len(vals) == 3:
+            vals.append(0.0)
+        x, y, yaw, roll = vals
 
     profile = MVF.load_profile(args.profile)
     board = charuco.build_board_from_config(profile["board"])
     det = charuco.make_detector(board)
     views = rig_from_captures(args.rig, profile, board, det)
     tris = load_stl(args.mesh)
-    rvec, tvec = seat_on_board(tris, x, y, yaw, roll)
+    if args.from_fit:
+        src = args.from_fit
+        if os.path.isdir(src):
+            src = os.path.join(src, "fit.json")
+        with open(src, "r", encoding="utf-8") as fh:
+            f = json.load(fh)
+        rvec = np.asarray(f["rvec"], np.float64).reshape(3, 1)
+        tvec = np.asarray(f["tvec"], np.float64).reshape(3, 1)
+        print("  rendering at the pose from %s" % src)
+    else:
+        rvec, tvec = seat_on_board(tris, x, y, yaw, roll)
 
     os.makedirs(args.out, exist_ok=True)
     name = os.path.basename(os.path.normpath(args.out))
@@ -233,7 +253,8 @@ def main() -> int:
     truth = {
         "rvec": np.asarray(rvec).reshape(3).tolist(),
         "tvec": np.asarray(tvec).reshape(3).tolist(),
-        "pose_request": {"x": x, "y": y, "yaw_deg": yaw, "roll_deg": roll},
+        "pose_request": ({"from_fit": args.from_fit} if args.from_fit
+                         else {"x": x, "y": y, "yaw_deg": yaw, "roll_deg": roll}),
         "mesh": os.path.basename(args.mesh),
         "rig": os.path.abspath(args.rig),
         "images": [os.path.basename(p) for p in written],
