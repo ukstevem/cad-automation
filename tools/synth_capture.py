@@ -113,7 +113,9 @@ def seat_on_board(tris: np.ndarray, x: float, y: float, yaw_deg: float, roll_deg
 
 def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dict,
            light=(0.3, -0.4, -0.86), noise: float = 2.0, blur: int = 3,
-           sun=(0.28, 0.34, 0.90), shadow: float = 0.42, soft: int = 25) -> np.ndarray:
+           sun=(0.28, 0.34, 0.90), shadow: float = 0.42, soft: int = 25,
+           paper: int = 196, ink: int = 55, ambient: float = 40.0,
+           diffuse: float = 95.0) -> np.ndarray:
     """One synthetic photograph: white paper, the ChArUco board, and the shaded part."""
     w, h = int(view["width"]), int(view["height"])
     K = np.asarray(profile["K"], np.float64).reshape(3, 3)
@@ -121,7 +123,18 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
     rc = np.asarray(view["rvec_cam"], np.float64).reshape(3, 1)
     tc = np.asarray(view["tvec_cam"], np.float64).reshape(3, 1)
 
-    img = np.full((h, w, 3), 238, np.uint8)                      # paper
+    # Tone matched to the REAL rig, measured off turn90: paper reads p90=196 and the dark end
+    # p10=57, against 239/28 for an untuned render. Matching matters because the pipeline's
+    # thresholds are absolute - Otsu picks a split on the actual histogram, and the Canny levels
+    # are fixed numbers (bead vh4). A render that is brighter and higher-contrast than the rig
+    # hands the pipeline an easier image than it will ever see.
+    #
+    # NOTE these are the CURRENT rig's numbers, not a target. Paper at 196 leaves headroom to 255,
+    # so raising the rig's exposure ~20% would brighten the real images toward this render rather
+    # than the other way about - and a brighter, better-separated image is easier to segment.
+    # Exposure does not affect intrinsics, so the calibration survives that change PROVIDED focus
+    # stays locked; the Canny levels would want re-checking though.
+    img = np.full((h, w, 3), int(paper), np.uint8)
 
     # ── board ────────────────────────────────────────────────────────────────
     # Drawn from the same definition the detector uses. Squares as projected polygons; each
@@ -139,7 +152,7 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
                                  [x0 + pitch, y0 + pitch, 0], [x0, y0 + pitch, 0]], np.float64)
                 uv, _ = cv2.projectPoints(quad.reshape(-1, 1, 3), rc, tc, K, dist)
                 cv2.fillConvexPoly(img, np.round(uv.reshape(-1, 2)).astype(np.int32),
-                                   (28, 28, 28), lineType=cv2.LINE_AA)
+                                   (int(ink),) * 3, lineType=cv2.LINE_AA)
     try:
         obj = board.getObjPoints()
         dic = board.getDictionary()
@@ -209,7 +222,7 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
         l = np.asarray(light, np.float64)
         l = l / np.linalg.norm(l)
         # Grey paint, like the print: ambient plus a soft diffuse term, no specular.
-        shade = 70.0 + 105.0 * np.abs(n @ l)
+        shade = ambient + diffuse * np.abs(n @ l)
         uv, _ = cv2.projectPoints(wtri.reshape(-1, 1, 3), rc, tc, K, dist)
         uv = uv.reshape(-1, 3, 2)
         for i in np.argsort(-z.mean(axis=1)):                     # far first
@@ -250,6 +263,12 @@ def main() -> int:
                          "segmentation hard in reality - without it the render is unrealistically "
                          "easy to segment.")
     ap.add_argument("--soft", type=int, default=25, help="penumbra blur in px")
+    ap.add_argument("--paper", type=int, default=196,
+                    help="paper grey level. Default matches the CURRENT rig (measured p90=196). "
+                         "Raise it if the rig's exposure is raised.")
+    ap.add_argument("--ink", type=int, default=55, help="board black level (rig measures ~57)")
+    ap.add_argument("--ambient", type=float, default=40.0)
+    ap.add_argument("--diffuse", type=float, default=95.0)
     args = ap.parse_args()
 
     if not args.pose and not args.from_fit:
@@ -285,7 +304,8 @@ def main() -> int:
     for v in views:
         img = render(tris, rvec, tvec, v, board, profile, noise=args.noise, blur=args.blur,
                      sun=tuple(float(t) for t in args.sun.split(",")),
-                     shadow=args.shadow, soft=args.soft)
+                     shadow=args.shadow, soft=args.soft, paper=args.paper, ink=args.ink,
+                     ambient=args.ambient, diffuse=args.diffuse)
         p = os.path.join(args.out, "%s_%s_synth.png" % (name, v["tag"]))
         cv2.imwrite(p, img)
         written.append(p)
