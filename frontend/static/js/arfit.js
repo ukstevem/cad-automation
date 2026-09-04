@@ -65,9 +65,12 @@ export class ArFitPage {
         <form id="arfit-run">
           <div class="grid">
             <label>Capture set
-              <select name="captures">
-                ${opts(s.captures, c => c.name, c => `${c.name} (${c.images} images)`)}
+              <select name="captures" id="arfit-captures">
+                ${opts(s.captures, c => c.name,
+                       c => `${c.name} (${c.images} image${c.images === 1 ? '' : 's'})` +
+                            (c.looks_like_calibration ? ' - calibration set, not for fitting' : ''))}
               </select>
+              <small id="arfit-capture-note"></small>
             </label>
             <label>Model
               <select name="model">${opts(s.models, m => m.file, m => m.file)}</select>
@@ -106,8 +109,31 @@ export class ArFitPage {
           <button type="submit">Run fit</button>
         </form>`;
 
+        // A fit wants a capture pair. Selecting a 36-image calibration set starts a scan that
+        // takes many minutes and cannot produce a useful answer, so say so before it is run.
+        const sel = document.getElementById('arfit-captures');
+        const note = document.getElementById('arfit-capture-note');
+        const updateNote = () => {
+            const c = s.captures.find(x => x.name === sel.value);
+            if (c && c.looks_like_calibration) {
+                note.innerHTML = `<mark>${c.images} images - this looks like a calibration set.
+                    A fit needs the 2-4 photos of one arrangement; scanning this many is slow
+                    and will not give a better pose.</mark>`;
+            } else {
+                note.textContent = '';
+            }
+        };
+        sel.addEventListener('change', updateNote);
+        updateNote();
+
         document.getElementById('arfit-run').addEventListener('submit', e => {
             e.preventDefault();
+            const c = s.captures.find(x => x.name === sel.value);
+            if (c && c.looks_like_calibration &&
+                !confirm(`"${c.name}" has ${c.images} images and looks like a calibration set. `
+                       + `A fit normally uses 2-4. This will take several minutes. Run anyway?`)) {
+                return;
+            }
             this._run(new FormData(e.target));
         });
     }

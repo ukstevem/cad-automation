@@ -62,8 +62,15 @@ async def sources():
                 continue
             imgs = [n for n in os.listdir(d) if n.lower().endswith(IMAGE_EXTS)]
             if imgs:
-                captures.append({"name": name, "images": len(imgs),
-                                 "examples": sorted(imgs)[:4]})
+                captures.append({
+                    "name": name,
+                    "images": len(imgs),
+                    "examples": sorted(imgs)[:4],
+                    # A fit wants a capture pair (or a few); a large set is almost certainly a
+                    # calibration run, and scanning it is slow and pointless. Flag it so the UI
+                    # can warn instead of letting the user start an eight-minute mistake.
+                    "looks_like_calibration": len(imgs) > 8,
+                })
 
     profiles = []
     pdir = _sub("calibration")
@@ -98,6 +105,9 @@ async def sources():
             if os.path.exists(os.path.join(fdir, name, "fit.json")):
                 fits.append(name)
 
+    # Smallest first, so a capture pair is the default selection rather than whatever
+    # sorts first alphabetically (which was cal_*, the calibration set).
+    captures.sort(key=lambda c: (c["looks_like_calibration"], c["images"], c["name"]))
     return {"captures": captures, "profiles": profiles, "models": models, "fits": fits}
 
 

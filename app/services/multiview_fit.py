@@ -435,6 +435,7 @@ def coarse_search(
     yaw_step_deg: float = 20.0,
     sample_mm: float = 40.0,
     base_rvec=None,
+    max_views: int = 4,
 ):
     """
     Grid-search the object's (x, y, yaw) for a starting pose, and return the best.
@@ -450,6 +451,15 @@ def coarse_search(
     makes a few thousand candidates affordable, and the winner is then refined properly.
     """
     _require_cv2()
+
+    # The scan cost is linear in the number of views, and the coarse stage only needs enough of
+    # them to disambiguate — a handful. Pointing this at a 36-image calibration set instead of a
+    # capture pair is an easy mistake, and it turns a two-minute scan into an eight-minute one
+    # with no benefit. The refinement afterwards still uses every view.
+    all_views = list(views)
+    if max_views and len(all_views) > max_views:
+        stride = len(all_views) / float(max_views)
+        views = [all_views[int(i * stride)] for i in range(max_views)]
 
     obj_pts = sample_polylines(model["edges"], max_step=sample_mm)
     lo, hi = model_bbox(model)
