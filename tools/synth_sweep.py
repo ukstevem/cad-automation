@@ -85,7 +85,14 @@ def main() -> int:
     ap.add_argument("--rig", default="outputs/ar_captures/turn90")
     ap.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
     ap.add_argument("--yaw", default="0:165:15", help="lo:hi:step or comma list, degrees")
-    ap.add_argument("--xy", default="180,110", help="where to seat the part, board mm")
+    ap.add_argument("--xy", default="180,-70", help="where to seat the part, board mm")
+    ap.add_argument("--base-fit", default=None,
+                    help="STRONGLY PREFERRED. Take a pose verified on the real rig and rotate it "
+                         "about the board normal by each swept angle, keeping the part where it "
+                         "actually sat. Inventing an (x, y) instead varies placement and viewing "
+                         "angle together: the first attempt at this sweep seated the part ON the "
+                         "board, obscuring the pattern and running off-frame, and produced 9 of 12 "
+                         "'failures' that were measuring the placement, not the pipeline.")
     ap.add_argument("--roll", type=float, default=0.0)
     ap.add_argument("--work", default="outputs/ar_synth", help="scratch dir for renders and fits")
     ap.add_argument("--csv", default=None)
@@ -104,6 +111,16 @@ def main() -> int:
     tris = load_stl(args.mesh)
     axis_obj = long_axis_of(tris)
     x, y = (float(v) for v in args.xy.split(","))
+    base, base_centroid = None, None
+    if args.base_fit:
+        src = args.base_fit
+        if os.path.isdir(src):
+            src = os.path.join(src, "fit.json")
+        with open(src, "r", encoding="utf-8") as fh:
+            base = json.load(fh)
+        pts = np.vstack([tris.reshape(-1, 3), tris.mean(axis=1)])
+        base_centroid = pts.mean(axis=0)
+        print("sweeping yaw about the verified pose in %s" % src)
 
     os.makedirs(args.work, exist_ok=True)
     rows = []
@@ -112,7 +129,17 @@ def main() -> int:
         capdir = os.path.join(args.work, "cap_" + tag)
         fitdir = os.path.join(args.work, "fit_" + tag)
         os.makedirs(capdir, exist_ok=True)
-        rvec_t, tvec_t = SC.seat_on_board(tris, x, y, yaw, args.roll)
+        if base is not None:
+            # Rotate the verified pose about the board normal, through the part's OWN centre so it
+            # turns on the spot rather than swinging away across the bench.
+            Rz, _ = cv2.Rodrigues(np.array([[0.0], [0.0], [np.radians(yaw)]]))
+            R0, _ = cv2.Rodrigues(np.asarray(base["rvec"], np.float64).reshape(3, 1))
+            t0 = np.asarray(base["tvec"], np.float64).reshape(3, 1)
+            centre = (R0 @ base_centroid.reshape(3, 1)) + t0
+            rvec_t, _ = cv2.Rodrigues(Rz @ R0)
+            tvec_t = Rz @ (t0 - centre) + centre
+        else:
+            rvec_t, tvec_t = SC.seat_on_board(tris, x, y, yaw, args.roll)
         for v in views:
             img = SC.render(tris, rvec_t, tvec_t, v, board, profile)
             cv2.imwrite(os.path.join(capdir, "cap_%s_%s_synth.png" % (tag, v["tag"])), img)

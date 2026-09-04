@@ -112,7 +112,8 @@ def seat_on_board(tris: np.ndarray, x: float, y: float, yaw_deg: float, roll_deg
 
 
 def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dict,
-           light=(0.3, -0.4, -0.86), noise: float = 2.0, blur: int = 3) -> np.ndarray:
+           light=(0.3, -0.4, -0.86), noise: float = 2.0, blur: int = 3,
+           sun=(0.28, 0.34, 0.90), shadow: float = 0.42, soft: int = 25) -> np.ndarray:
     """One synthetic photograph: white paper, the ChArUco board, and the shaded part."""
     w, h = int(view["width"]), int(view["height"])
     K = np.asarray(profile["K"], np.float64).reshape(3, 3)
@@ -160,11 +161,42 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
     except Exception as exc:                                      # pragma: no cover
         print("  warning: markers not drawn (%s)" % exc, file=sys.stderr)
 
-    # ── part: painter's algorithm, so only visible surfaces are drawn ────────
     R_obj, _ = cv2.Rodrigues(np.asarray(rvec_obj, np.float64).reshape(3, 1))
     t_obj = np.asarray(tvec_obj, np.float64).reshape(3, 1)
     R_cam, _ = cv2.Rodrigues(rc)
     world = (R_obj @ tris.reshape(-1, 3).T + t_obj)
+
+    # ── cast shadow ─────────────────────────────────────────────────────────
+    # Not cosmetic. The shadow is DARK, like the part, so it is the main reason segmenting the
+    # subject is hard on real photographs - Otsu splits dark from light and the shadow lands on
+    # the wrong side of that split. A render without one hands the pipeline a tonal separation it
+    # will never get in the cell, which is most of why synthetic seating came out ~3x better than
+    # the rig's on the first anchor run.
+    #
+    # Cast by projecting each triangle onto the board plane along the light of travel, filling
+    # the union, and blurring for a penumbra. Cheap, and it is the silhouette that matters here,
+    # not the radiometry.
+    if shadow > 0:
+        d = np.asarray(sun, np.float64)
+        d = d / np.linalg.norm(d)
+        if d[2] > 1e-3:                       # must travel toward the board (part is at -z)
+            wt = world.T.reshape(-1, 3, 3)
+            step = -wt[:, :, 2] / d[2]
+            ground = wt + step[:, :, None] * d[None, None, :]
+            uvs, _ = cv2.projectPoints(ground.reshape(-1, 1, 3), rc, tc, K, dist)
+            uvs = np.round(uvs.reshape(-1, 3, 2)).astype(np.int32)
+            m = np.zeros((h, w), np.uint8)
+            for poly in uvs:
+                if (poly[:, 0].max() < 0 or poly[:, 1].max() < 0
+                        or poly[:, 0].min() >= w or poly[:, 1].min() >= h):
+                    continue
+                cv2.fillConvexPoly(m, poly, 255)
+            if soft > 1:
+                m = cv2.GaussianBlur(m, (soft | 1, soft | 1), 0)
+            img = np.clip(img.astype(np.float32)
+                          * (1.0 - shadow * (m[..., None] / 255.0)), 0, 255).astype(np.uint8)
+
+    # ── part: painter's algorithm, so only visible surfaces are drawn ────────
     cam = (R_cam @ world + tc).T.reshape(-1, 3, 3)
     z = cam[:, :, 2]
     keep = np.all(z > 1e-6, axis=1)
@@ -211,6 +243,13 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--noise", type=float, default=2.0)
     ap.add_argument("--blur", type=int, default=3)
+    ap.add_argument("--sun", default="0.28,0.34,0.90",
+                    help="direction the light TRAVELS, board frame; z must be positive")
+    ap.add_argument("--shadow", type=float, default=0.42,
+                    help="shadow darkness 0-1 (0 disables). The shadow is what makes subject "
+                         "segmentation hard in reality - without it the render is unrealistically "
+                         "easy to segment.")
+    ap.add_argument("--soft", type=int, default=25, help="penumbra blur in px")
     args = ap.parse_args()
 
     if not args.pose and not args.from_fit:
@@ -244,7 +283,9 @@ def main() -> int:
     name = os.path.basename(os.path.normpath(args.out))
     written = []
     for v in views:
-        img = render(tris, rvec, tvec, v, board, profile, noise=args.noise, blur=args.blur)
+        img = render(tris, rvec, tvec, v, board, profile, noise=args.noise, blur=args.blur,
+                     sun=tuple(float(t) for t in args.sun.split(",")),
+                     shadow=args.shadow, soft=args.soft)
         p = os.path.join(args.out, "%s_%s_synth.png" % (name, v["tag"]))
         cv2.imwrite(p, img)
         written.append(p)
