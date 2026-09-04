@@ -149,12 +149,14 @@ def _work(args) -> None:
             views, model, mesh, init_rvec, init_tvec, rounds=args.visibility_rounds,
             max_step=args.max_step, huber_delta=args.huber, max_nfev=args.max_nfev,
             tvec_bounds=bounds, planar=not args.full_6dof,
+            silhouette_weight=args.silhouette_weight,
         )
     else:
         result = MVF.fit_from_views(
             views, model, init_rvec, init_tvec,
             max_step=args.max_step, huber_delta=args.huber, max_nfev=args.max_nfev,
             tvec_bounds=bounds, planar=not args.full_6dof,
+            silhouette_weight=args.silhouette_weight,
         )
     # The 180-degree end-for-end flip. On a repetitive part the edge cost separates these two
     # poses by a couple of pixels on a ~23px baseline - it cannot decide, and pretending it can
@@ -165,10 +167,12 @@ def _work(args) -> None:
             return MVF.fit_with_visibility(
                 views, model, mesh, r0, t0, rounds=args.visibility_rounds,
                 max_step=args.max_step, huber_delta=args.huber, max_nfev=args.max_nfev,
-                tvec_bounds=bounds, planar=not args.full_6dof)
+                tvec_bounds=bounds, planar=not args.full_6dof,
+                silhouette_weight=args.silhouette_weight)
         return MVF.fit_from_views(
             views, model, r0, t0, max_step=args.max_step, huber_delta=args.huber,
-            max_nfev=args.max_nfev, tvec_bounds=bounds, planar=not args.full_6dof)
+            max_nfev=args.max_nfev, tvec_bounds=bounds, planar=not args.full_6dof,
+            silhouette_weight=args.silhouette_weight)
 
     alternatives = []
     if not args.no_flip:
@@ -319,6 +323,15 @@ def main() -> int:
     ap.add_argument("--coarse-yaw", type=float, default=10.0)
     ap.add_argument("--full-6dof", action="store_true")
     ap.add_argument("--visibility-rounds", type=int, default=3)
+    ap.add_argument("--silhouette-weight", type=float, default=0.0,
+                    help="weight on the silhouette-containment term. DEFAULT OFF, on measurement: "
+                         "swept 0/3/10/30/100 against tools/measure_hull.py, it moved the seating "
+                         "error from 14.2mm to 15.4mm and the axis from 3.08 to 2.69 deg - i.e. "
+                         "nothing, and it SATURATES at weight>=10 (identical poses for 10, 30 and "
+                         "100). That saturation is the useful part: with the term fully in charge "
+                         "containment still plateaus at ~72%, so no (x, y, yaw) makes this CAD fit "
+                         "that silhouette, and the misfit must be in the out-of-plane seating the "
+                         "planar solve holds FIXED. Kept because the diagnosis is worth repeating.")
     ap.add_argument("--from-fit", default=None,
                     help="re-solve starting from a previous fit directory instead of searching")
     ap.add_argument("--rotate", default=None,

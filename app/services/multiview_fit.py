@@ -218,12 +218,18 @@ def build_view(
     # Confine the search to the volume the part can occupy. Without this the rig's own rails
     # out-compete the part: they are longer, straighter and brighter than anything on it.
     keep = None
+    geom_unknown = None
     if working_margin_mm is not None:
         keep = image_edges.working_area_mask(
             board, rvec_cam, tvec_cam, profile["K"], profile["dist"], (h, w),
             margin_mm=working_margin_mm,
         )
         exclude = keep_to_exclude(keep, exclude)
+    # Snapshot the purely GEOMETRIC exclusions - board lattice, marker quads, everything outside
+    # the working volume - before subject isolation replaces `exclude` with its own mask. This is
+    # where the silhouette is unknowable rather than empty, and the fit's silhouette term must not
+    # penalise the model for occupying it.
+    geom_unknown = exclude if exclude is None else exclude.copy()
 
     # Segment the part and look for edges ONLY inside it. Detecting edges everywhere and then
     # masking the mess geometrically is backwards: it still admits paper folds, sheet
@@ -273,6 +279,14 @@ def build_view(
         "edge_pixels": pix,
         "width": w,
         "height": h,
+        # The subject boundary, for the fit's silhouette term. Re-segmented WITHOUT the dilation
+        # used for edge masking: there the mask is grown so Canny can see the gradient either
+        # side of the boundary, but here the boundary IS the constraint and must not be inflated.
+        "silhouette": (
+            image_edges.segment_subject(image, exclude_mask=geom_unknown, grow_px=0)
+            if subject is not None else None
+        ),
+        "silhouette_unknown": geom_unknown,
         "_diag": {
             "label": label,
             "profile": profile["name"],
@@ -660,9 +674,11 @@ def fit_from_views(
     planar: bool = False,
     obj_points=None,
     visibility=None,
+    silhouette_weight: float = 0.0,
 ) -> dict:
     """Run the solver over prepared views and return pose + diagnostics."""
-    extra = {"obj_points": obj_points, "visibility": visibility}
+    extra = {"obj_points": obj_points, "visibility": visibility,
+             "silhouette_weight": silhouette_weight}
     if planar:
         xy_bounds = None
         if tvec_bounds is not None:

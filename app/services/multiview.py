@@ -82,7 +82,8 @@ class _View:
 
     def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels, width=None, height=None,
                  reverse_weight=0.0, reverse_max=3000, reverse_cap=40.0, seed=0,
-                 point_mask=None):
+                 point_mask=None, silhouette=None, silhouette_unknown=None,
+                 silhouette_weight=0.0, silhouette_cap=40.0):
         from scipy.spatial import cKDTree
 
         self.K = np.asarray(K, np.float64).reshape(3, 3)
@@ -116,6 +117,26 @@ class _View:
             inb = ((pts[:, 0] >= 0) & (pts[:, 0] < int(self.width)) &
                    (pts[:, 1] >= 0) & (pts[:, 1] < int(self.height)))
             self.rev_pixels = pts[inb]
+
+        # Silhouette penalty. The segmented subject is an OUTER bound on the object: every point
+        # of the real part projects inside it. So a CAD point outside is wrong by an amount that
+        # can be measured directly, and one distance transform - computed once, here - turns that
+        # into a per-point cost with no per-evaluation work beyond a lookup.
+        self.silhouette_weight = float(silhouette_weight)
+        self.silhouette_cap = float(silhouette_cap)
+        self.sil_dt = None
+        if silhouette is not None and silhouette_weight > 0:
+            inside = (np.asarray(silhouette) > 0).astype(np.uint8)
+            # distanceTransform measures each non-zero pixel's distance to the nearest zero, so
+            # inverting gives what is wanted: zero inside the subject, rising outside it.
+            dt = cv2.distanceTransform(1 - inside, cv2.DIST_L2, 5).astype(np.float32)
+            if silhouette_unknown is not None:
+                # Where the board mask cut a hole in the silhouette the truth is UNKNOWABLE, not
+                # false. Penalising there would push the pose away from a region the part may
+                # legitimately occupy - on this rig the part overlaps the board in one camera, so
+                # this is the difference between a constraint and an actively misleading one.
+                dt[np.asarray(silhouette_unknown) > 0] = 0.0
+            self.sil_dt = dt
 
     def points(self, obj_pts):
         if self.point_mask is None or len(self.point_mask) != len(obj_pts):
@@ -156,8 +177,32 @@ class _View:
         """
         proj = self.project(rvec_obj, tvec_obj, obj_pts)
         forward, _ = self.tree.query(proj)
+        parts = [forward]
+
+        # SILHOUETTE: one-sided, and that is the point. Being inside the subject is free, so the
+        # term says nothing while the pose is plausible and speaks only when the model hangs off
+        # the real part. It answers the question the forward term cannot - "is the model where
+        # the object ISN'T?" - which is exactly the failure measured on this rig: the fit slid
+        # ~18 mm along the part's own axis, a direction the edge cost barely penalises because a
+        # lattice slid along itself still finds a neighbour everywhere.
+        # MEASURED, and it did not deliver: swept 0..100 on real captures it changed the seating
+        # error by ~1mm and saturated at weight>=10. The saturation is the finding - with the term
+        # dominating, containment still plateaus at ~72%, which says the residual misfit is NOT in
+        # (x, y, yaw) at all. Default off in the worker; retained because it is the cheapest way to
+        # re-run that diagnosis on a new part.
+        if self.sil_dt is not None:
+            h, w = self.sil_dt.shape
+            p = np.round(proj).astype(np.int64)
+            ok = (p[:, 0] >= 0) & (p[:, 0] < w) & (p[:, 1] >= 0) & (p[:, 1] < h)
+            # Off-frame counts as fully outside: a model projecting out of shot is not explained
+            # by the photograph, and letting it score zero would reward running away.
+            sil = np.full(len(proj), self.silhouette_cap)
+            if np.any(ok):
+                sil[ok] = np.minimum(self.sil_dt[p[ok, 1], p[ok, 0]], self.silhouette_cap)
+            parts.append(sil * self.silhouette_weight)
+
         if self.reverse_weight <= 0 or self.rev_pixels is None:
-            return forward
+            return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
         h, w = int(self.height), int(self.width)
         canvas = np.zeros((h, w), np.uint8)
@@ -172,7 +217,7 @@ class _View:
             xi = self.rev_pixels[:, 0].astype(np.int32)
             yi = self.rev_pixels[:, 1].astype(np.int32)
             reverse = np.minimum(dt[yi, xi], self.reverse_cap)
-        return np.concatenate([forward, reverse * self.reverse_weight])
+        return np.concatenate(parts + [reverse * self.reverse_weight])
 
 
 def _visible_fraction(views, obj_pts, rvec_obj, tvec_obj) -> float:
@@ -201,6 +246,7 @@ def fit_object_pose_planar(
     max_nfev: int = 200,
     xy_bounds: Optional[Tuple[Sequence, Sequence]] = None,
     reverse_weight: float = 0.0,
+    silhouette_weight: float = 0.0,
     obj_points: Optional[np.ndarray] = None,
     visibility: Optional[List[Optional[np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
@@ -224,7 +270,10 @@ def fit_object_pose_planar(
     obj_pts = sample_polylines(cad_edges, max_step=max_step) if obj_points is None else obj_points
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
                 v.get("width"), v.get("height"), reverse_weight=reverse_weight,
-                point_mask=(visibility[i] if visibility else None))
+                point_mask=(visibility[i] if visibility else None),
+                silhouette=v.get("silhouette"),
+                silhouette_unknown=v.get("silhouette_unknown"),
+                silhouette_weight=silhouette_weight)
           for i, v in enumerate(views)]
 
     R_base, _ = cv2.Rodrigues(np.asarray(init_rvec, np.float64).reshape(3, 1))
@@ -283,6 +332,7 @@ def fit_object_pose(
     max_nfev: int = 400,
     tvec_bounds: Optional[Tuple[Sequence, Sequence]] = None,
     reverse_weight: float = 0.0,
+    silhouette_weight: float = 0.0,
     obj_points: Optional[np.ndarray] = None,
     visibility: Optional[List[Optional[np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
@@ -305,7 +355,10 @@ def fit_object_pose(
     obj_pts = sample_polylines(cad_edges, max_step=max_step) if obj_points is None else obj_points
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
                 v.get("width"), v.get("height"), reverse_weight=reverse_weight,
-                point_mask=(visibility[i] if visibility else None))
+                point_mask=(visibility[i] if visibility else None),
+                silhouette=v.get("silhouette"),
+                silhouette_unknown=v.get("silhouette_unknown"),
+                silhouette_weight=silhouette_weight)
           for i, v in enumerate(views)]
 
     def residuals(p):

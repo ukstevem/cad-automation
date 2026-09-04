@@ -99,6 +99,14 @@ def main() -> int:
     ap.add_argument("--margin", type=float, default=150.0, help="xy margin beyond the board (mm)")
     ap.add_argument("--min-corners", type=int, default=6)
     ap.add_argument("--out", default=None, help="write JSON here")
+    ap.add_argument("--no-self-test", dest="self_test", action="store_false",
+                    help="measure THIS TOOL's own bias. Renders the CAD's silhouettes at the "
+                         "fitted pose, builds a hull from those, and reports how far that hull's "
+                         "centroid falls from the CAD's known centre. Two views bound a shape "
+                         "loosely and the phantom volume need not be symmetric, so the hull "
+                         "centroid carries a bias of its own - and a seating error smaller than "
+                         "that bias is not a measurement, it is noise. On by default.")
+    ap.set_defaults(self_test=True)
     args = ap.parse_args()
 
     overrides = [(s.split("=", 1)[0], MVF.load_profile(s.split("=", 1)[1])) for s in args.cam_profile]
@@ -320,6 +328,70 @@ def main() -> int:
             print("  %-42s %5.1f%% inside (%d judged), stray median %s px, max %s px"
                   % (c["view"], 100 * c["inside_fraction"], c["points_judged"],
                      c["median_stray_px"], c["max_stray_px"]))
+
+    if args.self_test and args.fit and vis_mask is not None:
+        from app.services import visibility as _vis
+        synth = []
+        for view in views:
+            depth, _sc = _vis.depth_buffer(tris, fit["rvec"], fit["tvec"], view, downscale=1)
+            synth.append(depth < _vis.FAR / 2)
+            print("  synthetic silhouette %s: %d px" % (view["label"], int(synth[-1].sum())))
+        occ = np.ones(len(vox), bool)
+        for view, sil in zip(views, synth):
+            h, w = view["shape"]
+            uv, _ = cv2.projectPoints(vox[occ].reshape(-1, 1, 3), view["rvec_cam"],
+                                      view["tvec_cam"], view["K"], view["dist"])
+            uv = uv.reshape(-1, 2)
+            xi2 = np.round(uv[:, 0]).astype(np.int64)
+            yi2 = np.round(uv[:, 1]).astype(np.int64)
+            ins = (xi2 >= 0) & (xi2 < w) & (yi2 >= 0) & (yi2 < h)
+            hit2 = np.zeros(len(uv), bool)
+            hit2[ins] = sil[yi2[ins], xi2[ins]]
+            j = np.flatnonzero(occ)
+            occ[j[~hit2]] = False
+        if occ.any():
+            sh = footprint_stats(vox[occ][:, :2])
+            bx = sh["centre_mm"][0] - cad["centre_mm"][0]
+            by = sh["centre_mm"][1] - cad["centre_mm"][1]
+            bias = float(np.hypot(bx, by))
+            result["self_test"] = {
+                "synthetic_hull": sh, "bias_mm": round(bias, 1),
+                "bias_dx_mm": round(bx, 1), "bias_dy_mm": round(by, 1),
+                "bias_axis_deg": round((sh["axis_deg"] - cad["axis_deg"] + 90) % 180 - 90, 2),
+                "length_inflation_mm": round(sh["length_mm"] - cad["length_mm"], 1),
+            }
+            print("=== SELF-TEST: this tool's own bias ===")
+            print("  A hull built from the CAD's OWN silhouettes, versus the CAD's known centre.")
+            print("  centre bias     %.1f mm (dx %.1f, dy %.1f)" % (bias, bx, by))
+            print("  axis bias       %s deg" % result["self_test"]["bias_axis_deg"])
+            print("  length inflated %s mm (the phantom volume, quantified)"
+                  % result["self_test"]["length_inflation_mm"])
+            print("  => a measured seating error must exceed %.1f mm to mean anything." % bias)
+
+            # The bias is systematic, not noise: it is where a hull of THIS shape seen by THESE
+            # cameras puts its centroid. So subtract it. A perfectly placed CAD would read as
+            # offset by exactly the bias, not by zero - which is why the raw figure above is not
+            # the answer, and on this capture is not even the right SIGN.
+            # Signs matter here and are easy to get backwards. dx is (CAD - real hull); bx is
+            # (synthetic hull - CAD). A perfectly placed CAD would make the real hull sit where
+            # the synthetic one does, so it would READ as dx = -bx, not dx = 0. The error is
+            # therefore how far dx departs from -bx, i.e. dx + bx.
+            cdx, cdy = dx + bx, dy + by
+            cax = (dyaw + result["self_test"]["bias_axis_deg"] + 90.0) % 180.0 - 90.0
+            corr = {
+                "centre_dx_mm": round(cdx, 1), "centre_dy_mm": round(cdy, 1),
+                "centre_offset_mm": round(float(np.hypot(cdx, cdy)), 1),
+                "axis_delta_deg": round(cax, 2),
+                "worst_end_offset_mm": round(
+                    float(np.hypot(cdx, cdy)) + half * abs(np.sin(np.radians(cax))), 1),
+            }
+            result["delta_corrected"] = corr
+            print("")
+            print("=== SEATING ERROR, BIAS-CORRECTED (use this one) ===")
+            print("  centre off by   %s mm (dx %s, dy %s)"
+                  % (corr["centre_offset_mm"], corr["centre_dx_mm"], corr["centre_dy_mm"]))
+            print("  axis off by     %s deg" % corr["axis_delta_deg"])
+            print("  worst end off   %s mm" % corr["worst_end_offset_mm"])
 
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
