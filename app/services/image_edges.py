@@ -273,7 +273,19 @@ def detect_edge_pixels(
     if low is not None and high is not None:
         lo, hi = int(low), int(high)
     else:
-        lo, hi = auto_canny_thresholds(gray, sigma)
+        # Threshold from the region we actually keep, not the whole frame. Once the bench was
+        # covered with a single white sheet the frame median jumped to near-white, which drove
+        # the thresholds up and cut camera B from 3122 edge pixels to 529 — the cleaner
+        # background silently starved the detector. Sampling inside the mask keeps the statistic
+        # tied to the subject.
+        sample = gray
+        if exclude_mask is not None:
+            em = np.asarray(exclude_mask)
+            if em.shape[:2] == gray.shape[:2]:
+                inside = gray[em == 0]
+                if inside.size >= 1000:
+                    sample = inside
+        lo, hi = auto_canny_thresholds(sample, sigma)
     edges = cv2.Canny(gray, lo, hi, L2gradient=True)
 
     if exclude_mask is not None:

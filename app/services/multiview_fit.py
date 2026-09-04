@@ -35,7 +35,8 @@ except Exception as exc:  # pragma: no cover - import guard
 
 from app.services import charuco, image_edges
 from app.services.board_pose import charuco_board_pose
-from app.services.multiview import fit_object_pose, sample_polylines
+from app.services.multiview import (fit_object_pose, fit_object_pose_planar,
+                                    sample_polylines)
 
 
 class MultiViewFitError(Exception):
@@ -372,6 +373,59 @@ def working_volume_bounds(model: dict, board, views: Optional[Sequence[dict]] = 
     )
 
 
+def estimate_position_from_edges(
+    views: List[dict],
+    model: dict,
+    board,
+    *,
+    percentile: float = 50.0,
+):
+    """
+    Estimate the object's in-plane position from the detected edges themselves.
+
+    Once the board pattern and everything outside the working volume are masked, most of what
+    survives *is* the part — so the robust centre of the remaining edge pixels, back-projected
+    onto the plane the part rests on, locates it directly. That beats scanning a grid, which can
+    only find the part if the grid happens to cover it: the first attempt ran x over -216..576 mm
+    while the part sat outside that range, so no amount of refinement could recover.
+
+    Uses the median rather than the mean, so a residual streak of rig structure shifts the
+    estimate rather than dragging it away entirely.
+    """
+    _require_cv2()
+    lo, hi = model_bbox(model)
+    z_sign = camera_side_of_board(views)
+    tz = -lo[2] if z_sign > 0 else -hi[2]
+    plane_z = tz + float((lo[2] + hi[2]) / 2.0)        # mid-height of the part
+
+    hits = []
+    for v in views:
+        pix = np.asarray(v["edge_pixels"], np.float64).reshape(-1, 2)
+        if len(pix) < 10:
+            continue
+        centre = np.percentile(pix, percentile, axis=0).reshape(1, 1, 2)
+        # Undistort to a normalised ray, then rotate into board coordinates.
+        norm = cv2.undistortPoints(centre, v["K"], v["dist"]).reshape(2)
+        ray_cam = np.array([norm[0], norm[1], 1.0])
+        R_cam, _ = cv2.Rodrigues(np.asarray(v["rvec_cam"], np.float64).reshape(3, 1))
+        t_cam = np.asarray(v["tvec_cam"], np.float64).reshape(3)
+        origin = -R_cam.T @ t_cam                      # camera centre, board frame
+        direction = R_cam.T @ ray_cam
+        if abs(direction[2]) < 1e-9:
+            continue
+        s = (plane_z - origin[2]) / direction[2]
+        if s <= 0:
+            continue
+        hits.append(origin + s * direction)
+
+    if not hits:
+        return None
+    p = np.mean(np.asarray(hits), axis=0)
+    centre_obj = (lo + hi) / 2.0
+    # Place the model so its centroid lands on the estimated point.
+    return np.array([[p[0] - centre_obj[0]], [p[1] - centre_obj[1]], [tz]], np.float64)
+
+
 def coarse_search(
     views: List[dict],
     model: dict,
@@ -424,8 +478,18 @@ def coarse_search(
     base = np.zeros(3) if base_rvec is None else np.asarray(base_rvec, np.float64).reshape(3)
     R_base, _ = cv2.Rodrigues(base.reshape(3, 1))
 
-    xs = np.arange(-slack * 0.5, bw + slack * 0.5 + step_mm, step_mm)
-    ys = np.arange(-slack * 0.5, bh + slack * 0.5 + step_mm, step_mm)
+    # Centre the grid on the edge-derived position when one is available, so the scan looks
+    # where the part actually is rather than over an arbitrary box around the board.
+    seed = estimate_position_from_edges(views, model, board)
+    if seed is not None:
+        cx = float(seed[0]) + float(centre[0])
+        cy = float(seed[1]) + float(centre[1])
+        half = slack * 0.75
+        xs = np.arange(cx - half, cx + half + step_mm, step_mm)
+        ys = np.arange(cy - half, cy + half + step_mm, step_mm)
+    else:
+        xs = np.arange(-slack * 0.5, bw + slack * 0.5 + step_mm, step_mm)
+        ys = np.arange(-slack * 0.5, bh + slack * 0.5 + step_mm, step_mm)
     yaws = np.radians(np.arange(0.0, 360.0, yaw_step_deg))
 
     best = (np.inf, base, np.array([0.0, 0.0, tz]))
@@ -475,13 +539,24 @@ def fit_from_views(
     huber_delta: float = 10.0,
     max_nfev: int = 400,
     tvec_bounds=None,
+    planar: bool = False,
 ) -> dict:
     """Run the solver over prepared views and return pose + diagnostics."""
-    rvec, tvec, info = fit_object_pose(
-        views, model["edges"], init_rvec, init_tvec,
-        max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
-        tvec_bounds=tvec_bounds,
-    )
+    if planar:
+        xy_bounds = None
+        if tvec_bounds is not None:
+            xy_bounds = (tvec_bounds[0][:2], tvec_bounds[1][:2])
+        rvec, tvec, info = fit_object_pose_planar(
+            views, model["edges"], init_rvec, init_tvec,
+            max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
+            xy_bounds=xy_bounds,
+        )
+    else:
+        rvec, tvec, info = fit_object_pose(
+            views, model["edges"], init_rvec, init_tvec,
+            max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
+            tvec_bounds=tvec_bounds,
+        )
     return {
         "rvec": np.asarray(rvec).reshape(3).tolist(),
         "tvec": np.asarray(tvec).reshape(3).tolist(),

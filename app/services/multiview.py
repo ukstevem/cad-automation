@@ -120,6 +120,78 @@ def _visible_fraction(views, obj_pts, rvec_obj, tvec_obj) -> float:
     return float(inside) / float(total) if total else 0.0
 
 
+def fit_object_pose_planar(
+    views: List[dict],
+    cad_edges: List[Sequence],
+    init_rvec,
+    init_tvec,
+    *,
+    max_step: float = 2.0,
+    huber_delta: float = 10.0,
+    max_nfev: int = 200,
+    xy_bounds: Optional[Tuple[Sequence, Sequence]] = None,
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Fit only ``(x, y, yaw)``, holding the object on the board plane at the initial height.
+
+    The part rests on the same surface as the board, so its out-of-plane rotation and its height
+    are *known*, not unknown. Solving all six degrees of freedom lets the optimiser trade a real
+    misfit for an unphysical tilt, and on this rig it did exactly that every time: with six DOF
+    the height ran to its upper bound on every single run, putting the part through the table,
+    while the rotation reached ~1.4 rad. Constraining to the plane removes the escape routes and
+    shrinks the search to the three parameters that are genuinely free.
+
+    Yaw is taken about the board normal, applied on top of *init_rvec*.
+    """
+    _require_cv2()
+    from scipy.optimize import least_squares
+
+    if not views:
+        raise MultiViewError("need at least one view")
+    obj_pts = sample_polylines(cad_edges, max_step=max_step)
+    vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
+                v.get("width"), v.get("height")) for v in views]
+
+    R_base, _ = cv2.Rodrigues(np.asarray(init_rvec, np.float64).reshape(3, 1))
+    t_init = np.asarray(init_tvec, np.float64).reshape(3)
+    z_fixed = float(t_init[2])
+
+    def pose_from(p):
+        Rz, _ = cv2.Rodrigues(np.array([[0.0], [0.0], [float(p[2])]]))
+        R_obj = Rz @ R_base
+        rvec, _ = cv2.Rodrigues(R_obj)
+        return rvec, np.array([[p[0]], [p[1]], [z_fixed]])
+
+    def residuals(p):
+        rvec, tvec = pose_from(p)
+        return np.concatenate([v.residuals(rvec, tvec, obj_pts) for v in vs])
+
+    p0 = np.array([t_init[0], t_init[1], 0.0])
+    rms_before = float(np.sqrt(np.mean(residuals(p0) ** 2)))
+    kwargs = {}
+    if xy_bounds is not None:
+        lo = np.array([xy_bounds[0][0], xy_bounds[0][1], -np.pi])
+        hi = np.array([xy_bounds[1][0], xy_bounds[1][1], np.pi])
+        p0 = np.clip(p0, lo, hi)
+        kwargs["bounds"] = (lo, hi)
+    sol = least_squares(residuals, p0, loss="huber", f_scale=huber_delta, max_nfev=max_nfev,
+                        **kwargs)
+    rvec_obj, tvec_obj = pose_from(sol.x)
+    per_view = [float(np.sqrt(np.mean(v.residuals(rvec_obj, tvec_obj, obj_pts) ** 2))) for v in vs]
+    info = {
+        "mode": "planar",
+        "visible_fraction": round(_visible_fraction(vs, obj_pts, rvec_obj, tvec_obj), 4),
+        "rms_before_px": round(rms_before, 3),
+        "rms_after_px": round(float(np.sqrt(np.mean(sol.fun ** 2))), 3),
+        "per_view_rms_px": [round(x, 3) for x in per_view],
+        "n_points": int(len(obj_pts)),
+        "n_views": len(vs),
+        "yaw_deg": round(float(np.degrees(sol.x[2])), 2),
+        "success": bool(sol.success),
+    }
+    return rvec_obj, tvec_obj, info
+
+
 def fit_object_pose(
     views: List[dict],
     cad_edges: List[Sequence],

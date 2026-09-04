@@ -102,6 +102,12 @@ def main() -> int:
                          "unconstrained search aligns the model to a rail instead.")
     ap.add_argument("--no-working-area", action="store_true",
                     help="disable the working-area mask (diagnostic only)")
+    ap.add_argument("--full-6dof", action="store_true",
+                    help="solve all six degrees of freedom. Default is PLANAR (x, y, yaw "
+                         "only): the part rests on the same surface as the board, so its "
+                         "height and tilt are known, not unknown. With six DOF free the "
+                         "height ran to its bound on every run, putting the part through "
+                         "the table to buy a lower residual.")
     ap.add_argument("--no-bounds", action="store_true",
                     help="disable the working-volume constraint on translation. Without it the "
                          "cost has a degenerate minimum at 'far away and tiny' which scores a "
@@ -194,11 +200,18 @@ def main() -> int:
               f"t={np.asarray(init_tvec).reshape(3).round(1).tolist()}  "
               f"yaw-ish rvec={np.asarray(init_rvec).reshape(3).round(3).tolist()}")
     else:
-        init_rvec, init_tvec = MVF.default_init_pose(model, board, views)
-        side = MVF.camera_side_of_board(views)
-        print(f"init    : default (object centred on board, resting on the camera side, "
-              f"board Z {'+' if side > 0 else '-'}ve) "
-              f"t={np.asarray(init_tvec).reshape(3).round(1).tolist()}")
+        seeded = MVF.estimate_position_from_edges(views, model, board)
+        if seeded is not None:
+            init_rvec = np.zeros((3, 1))
+            init_tvec = seeded
+            print(f"init    : from edge centroid back-projected to the plane  "
+                  f"t={np.asarray(seeded).reshape(3).round(1).tolist()}")
+        else:
+            init_rvec, init_tvec = MVF.default_init_pose(model, board, views)
+            side = MVF.camera_side_of_board(views)
+            print(f"init    : default (object centred on board, camera side, "
+                  f"board Z {'+' if side > 0 else '-'}ve) "
+                  f"t={np.asarray(init_tvec).reshape(3).round(1).tolist()}")
 
     bounds = None if args.no_bounds else MVF.working_volume_bounds(model, board, views)
     if bounds is not None:
@@ -209,6 +222,7 @@ def main() -> int:
         views, model, init_rvec, init_tvec,
         max_step=args.max_step, huber_delta=args.huber, max_nfev=args.max_nfev,
         tvec_bounds=bounds,
+        planar=not args.full_6dof,
     )
     result["failures"] = failures
     info = result["info"]
