@@ -70,7 +70,9 @@ def main() -> int:
     args = ap.parse_args()
 
     with open(args.picks, "r", encoding="utf-8") as fh:
-        picks = json.load(fh)
+        # Normalise separators: a picks file written on Windows carries backslashes, which are
+        # ordinary filename characters on Linux, so the container silently skips every entry.
+        picks = [p.replace("\\", "/") for p in json.load(fh)]
     os.makedirs(args.work, exist_ok=True)
     os.makedirs("outputs/ar_models/_survey", exist_ok=True)
 
