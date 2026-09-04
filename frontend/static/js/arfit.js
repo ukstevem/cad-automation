@@ -229,14 +229,40 @@ export class ArFitPage {
                 inside the images - part of the model is off-frame, so the residual is computed
                 on less than the whole part.`);
         }
+        // A repetitive structure - a truss, a ladder frame - is genuinely ambiguous to an edge
+        // cost: flipped end-for-end or slid along by a bay it looks nearly the same. Measured on
+        // this rig, two poses 180 deg apart differed by ~3px on a ~23px baseline. Say so, rather
+        // than letting a plausible-looking RMS imply more certainty than exists.
+        if (res.ambiguity_px !== undefined && res.ambiguity_px < 8) {
+            warnings.push(`<strong>The two orientations are ${res.ambiguity_px} px apart.</strong> `
+                + 'That is not enough to choose between them. Compare the overlays below against '
+                + 'a feature that is only at one end - an end plate, a bracket - and take the one '
+                + 'that matches.');
+        }
+        warnings.push('<strong>Pose ambiguity on repetitive parts.</strong> An edge cost cannot '
+            + 'reliably localise a regular truss along its own axis, or tell it end-for-end: '
+            + 'those poses score almost identically. Check the overlay against a known feature '
+            + '(an end plate, a bracket) rather than trusting the RMS.');
         const warnHtml = warnings.length
             ? `<article class="error">${warnings.join('<br><br>')}</article>` : '';
 
-        const overlays = (res.overlays || []).map(p => `
-            <figure>
+        const grid = list => (list || []).map(p => `
+            <figure style="margin:0">
               <img src="/outputs/${p}" alt="overlay" style="width:100%">
               <figcaption><small>${p.split('/').pop()}</small></figcaption>
             </figure>`).join('');
+        const overlays = grid(res.overlays);
+
+        // On a repetitive part the two orientations score within a couple of pixels, so the
+        // solver has no basis to choose. Show both at equal weight and let the eye settle it -
+        // an end plate or bracket makes it obvious in a second.
+        const alts = (res.alternatives || []).map(a => `
+          <article>
+            <header><strong>Alternative: ${a.label}</strong> &mdash; RMS
+              <strong>${a.rms_after_px} px</strong> (per view ${a.per_view_rms_px.join(', ')})
+              ${a.yaw_deg !== undefined ? `, yaw ${a.yaw_deg}&deg;` : ''}</header>
+            ${grid(a.overlays)}
+          </article>`).join('');
 
         el.innerHTML = `
           ${warnHtml}
@@ -246,6 +272,7 @@ export class ArFitPage {
               against. A low RMS at a visibly wrong pose is a wrong pose.</header>
             ${overlays || '<p>No overlay images.</p>'}
           </article>
+          ${alts}
           <article>
             <table>
               <tbody>
@@ -258,6 +285,15 @@ export class ArFitPage {
                 <tr><th>rvec</th><td><code>${r3(res.rvec)}</code></td></tr>
                 <tr><th>tvec</th><td><code>${r1(res.tvec)} mm</code> (board frame)</td></tr>
                 <tr><th>Init</th><td>${res.init_source || '?'}</td></tr>
+                <tr><th>Hidden lines</th><td>${res.hidden_line_removal
+                    ? `removed via <code>${res.mesh}</code>`
+                    : '<mark>NOT removed - no .stl beside the model. The fit is matching '
+                      + 'far-side edges no camera can see.</mark>'}</td></tr>
+                ${(res.visibility_rounds || []).length ? `<tr><th>Visibility</th><td>` +
+                    res.visibility_rounds.map((h, i) =>
+                        `round ${i + 1}: ${h.visible_per_view.join(' / ')} pts visible ` +
+                        `(${(h.visible_fraction * 100).toFixed(0)}%), RMS ${h.rms_after_px}`
+                    ).join('<br>') + `</td></tr>` : ''}
               </tbody>
             </table>
             ${(res.failures || []).length
