@@ -217,6 +217,71 @@ def working_area_mask(
     return mask
 
 
+def segment_subject(
+    image: np.ndarray,
+    *,
+    exclude_mask: Optional[np.ndarray] = None,
+    centre: Optional[Tuple[float, float]] = None,
+    min_area_frac: float = 0.005,
+    close_px: int = 9,
+    grow_px: int = 6,
+) -> Optional[np.ndarray]:
+    """
+    Find the part itself and return a KEEP mask of just that region.
+
+    Detecting edges across the whole frame and masking the mess afterwards is backwards. The
+    part is markedly darker than the paper it stands on, so it can simply be segmented — and
+    then edges are only ever sought where the part actually is. Structure, paper folds, sheet
+    boundaries and background never enter the cost at all.
+
+    Otsu separates dark subject from bright ground; the component nearest *centre* (the frame
+    centre by default) is taken as the part, on the assumption that it is roughly centred in
+    the working area. Anything already excluded — the board pattern especially — is removed
+    first so it cannot win the "nearest large dark component" contest.
+
+    Returns ``None`` when nothing plausible is found, so the caller can fall back rather than
+    silently fitting to an empty mask.
+    """
+    _require_cv2()
+    gray = to_gray(image)
+    h, w = gray.shape[:2]
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
+
+    # Dark-subject-on-light-ground. Otsu picks the split without a hand-tuned level, which
+    # matters because the exposure is set for the part rather than the paper.
+    _t, dark = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    if exclude_mask is not None and exclude_mask.shape[:2] == dark.shape[:2]:
+        dark[exclude_mask > 0] = 0
+
+    if close_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_px, close_px))
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, k)
+
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(dark, connectivity=8)
+    if n <= 1:
+        return None
+    cx, cy = centre if centre is not None else (w / 2.0, h / 2.0)
+    min_area = min_area_frac * w * h
+
+    best, best_d = None, None
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < min_area:
+            continue
+        d = float(np.hypot(centroids[i][0] - cx, centroids[i][1] - cy))
+        if best_d is None or d < best_d:
+            best, best_d = i, d
+    if best is None:
+        return None
+
+    mask = np.where(labels == best, 255, 0).astype(np.uint8)
+    if grow_px > 0:
+        # Grow slightly: Canny needs the gradient either side of the silhouette, and a mask cut
+        # exactly on the boundary would clip the very edge we most want.
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow_px * 2 + 1, grow_px * 2 + 1))
+        mask = cv2.dilate(mask, k)
+    return mask
+
+
 def marker_hull_mask(
     marker_corners: Sequence,
     shape: Tuple[int, int],

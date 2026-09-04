@@ -80,7 +80,8 @@ def _compose_object_to_cam(rvec_obj, tvec_obj, R_cam, t_cam):
 class _View:
     """A calibrated view + a KD-tree over its detected edge pixels for NN distance."""
 
-    def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels, width=None, height=None):
+    def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels, width=None, height=None,
+                 reverse_weight=0.0, reverse_max=3000, reverse_cap=40.0, seed=0):
         from scipy.spatial import cKDTree
 
         self.K = np.asarray(K, np.float64).reshape(3, 3)
@@ -96,13 +97,70 @@ class _View:
         self.width = float(width) if width else float(ep[:, 0].max() + 1)
         self.height = float(height) if height else float(ep[:, 1].max() + 1)
 
-    def residuals(self, rvec_obj, tvec_obj, obj_pts):
-        """NN pixel distance for each projected CAD sample point in this view."""
+        # Subsample the observed edges for the reverse term. Every one of them carries the same
+        # message ("explain me"), so a few thousand is plenty and keeps the residual vector -
+        # and therefore the Jacobian - a sensible size.
+        self.reverse_weight = float(reverse_weight)
+        self.reverse_cap = float(reverse_cap)
+        self.rev_pixels = None
+        if reverse_weight > 0 and len(ep):
+            idx = np.arange(len(ep))
+            if len(ep) > reverse_max:
+                idx = np.random.default_rng(seed).choice(len(ep), reverse_max, replace=False)
+            pts = np.round(ep[np.sort(idx)]).astype(np.int64)
+            inb = ((pts[:, 0] >= 0) & (pts[:, 0] < int(self.width)) &
+                   (pts[:, 1] >= 0) & (pts[:, 1] < int(self.height)))
+            self.rev_pixels = pts[inb]
+
+    def project(self, rvec_obj, tvec_obj, obj_pts):
         rvec_oc, t_oc = _compose_object_to_cam(rvec_obj, tvec_obj, self.R_cam, self.t_cam)
         proj, _ = cv2.projectPoints(obj_pts.reshape(-1, 1, 3), rvec_oc, t_oc, self.K, self.dist)
-        proj = proj.reshape(-1, 2)
-        d, _ = self.tree.query(proj)
-        return d
+        return proj.reshape(-1, 2)
+
+    def residuals(self, rvec_obj, tvec_obj, obj_pts):
+        """
+        Symmetric edge distance for this view.
+
+        FORWARD: for each projected CAD point, the distance to the nearest detected edge.
+        REVERSE: for each detected edge pixel, the distance to the nearest projected CAD point.
+
+        The forward term alone is not enough, and on a latticed object it is barely a constraint
+        at all. It only asks "is each CAD point near an edge?", and a wireframe lattice laid over
+        a real lattice finds *a* neighbour almost anywhere — measured on this rig, the cost moved
+        only ~2.5 px across a 2x change in model scale. Nothing penalised a pose that covered the
+        part while leaving the actual edges unexplained.
+
+        The reverse term supplies exactly that missing question. It is computed by rasterising
+        the projected model and distance-transforming it, so it costs one transform per
+        evaluation rather than a KD-tree rebuild over ~50k points.
+
+        DEFAULT OFF, on the evidence. It did not help: on real captures it moved the cost's
+        sensitivity to model scale from 5.8 px to 5.0 px across a 2x range - i.e. nothing - and
+        it made the four-view synthetic case *worse* (translation error 6.6 mm against a 5 mm
+        bar it used to clear). The reason is that the reverse question is just as easy to
+        satisfy as the forward one while the projection still contains every edge on the far
+        side of the object. Revisit once visible-edge extraction lands and the projected model
+        is only what a camera could actually see; the formulation is right, its input is not.
+        """
+        proj = self.project(rvec_obj, tvec_obj, obj_pts)
+        forward, _ = self.tree.query(proj)
+        if self.reverse_weight <= 0 or self.rev_pixels is None:
+            return forward
+
+        h, w = int(self.height), int(self.width)
+        canvas = np.zeros((h, w), np.uint8)
+        p = np.round(proj).astype(np.int64)
+        ok = (p[:, 0] >= 0) & (p[:, 0] < w) & (p[:, 1] >= 0) & (p[:, 1] < h)
+        if not np.any(ok):
+            # Model entirely off-frame: every observed edge is unexplained.
+            reverse = np.full(len(self.rev_pixels), float(self.reverse_cap))
+        else:
+            canvas[p[ok, 1], p[ok, 0]] = 255
+            dt = cv2.distanceTransform(255 - canvas, cv2.DIST_L2, 3)
+            xi = self.rev_pixels[:, 0].astype(np.int32)
+            yi = self.rev_pixels[:, 1].astype(np.int32)
+            reverse = np.minimum(dt[yi, xi], self.reverse_cap)
+        return np.concatenate([forward, reverse * self.reverse_weight])
 
 
 def _visible_fraction(views, obj_pts, rvec_obj, tvec_obj) -> float:
@@ -130,6 +188,7 @@ def fit_object_pose_planar(
     huber_delta: float = 10.0,
     max_nfev: int = 200,
     xy_bounds: Optional[Tuple[Sequence, Sequence]] = None,
+    reverse_weight: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Fit only ``(x, y, yaw)``, holding the object on the board plane at the initial height.
@@ -150,7 +209,8 @@ def fit_object_pose_planar(
         raise MultiViewError("need at least one view")
     obj_pts = sample_polylines(cad_edges, max_step=max_step)
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
-                v.get("width"), v.get("height")) for v in views]
+                v.get("width"), v.get("height"), reverse_weight=reverse_weight)
+          for v in views]
 
     R_base, _ = cv2.Rodrigues(np.asarray(init_rvec, np.float64).reshape(3, 1))
     t_init = np.asarray(init_tvec, np.float64).reshape(3)
@@ -207,6 +267,7 @@ def fit_object_pose(
     huber_delta: float = 10.0,
     max_nfev: int = 400,
     tvec_bounds: Optional[Tuple[Sequence, Sequence]] = None,
+    reverse_weight: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Fit a known CAD object's 6DoF pose across several calibrated views by minimising the
@@ -226,7 +287,8 @@ def fit_object_pose(
         raise MultiViewError("need at least one view")
     obj_pts = sample_polylines(cad_edges, max_step=max_step)
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
-                v.get("width"), v.get("height")) for v in views]
+                v.get("width"), v.get("height"), reverse_weight=reverse_weight)
+          for v in views]
 
     def residuals(p):
         rvec_obj, tvec_obj = p[:3], p[3:]

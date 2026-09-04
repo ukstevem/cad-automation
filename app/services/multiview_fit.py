@@ -169,6 +169,8 @@ def build_view(
     min_corners: int = 6,
     enforce_resolution: bool = True,
     working_margin_mm: Optional[float] = 150.0,
+    isolate_subject: bool = True,
+    min_subject_edges: int = 200,
 ) -> dict:
     """
     Turn one photo into a view dict for ``fit_object_pose``, plus diagnostics.
@@ -201,12 +203,15 @@ def build_view(
     )
 
     exclude = None
+    grid_mask = None
     if mask_mode == "grid":
         exclude = image_edges.board_grid_mask(
             board, rvec_cam, tvec_cam, profile["K"], profile["dist"], (h, w), band_px=band_px
         )
+        grid_mask = exclude
     elif mask_mode == "hull":
         exclude = image_edges.marker_hull_mask(marker_corners, (h, w))
+        grid_mask = exclude
     elif mask_mode != "none":
         raise MultiViewFitError(f"unknown mask_mode '{mask_mode}' (expected grid|hull|none)")
 
@@ -220,14 +225,43 @@ def build_view(
         )
         exclude = keep_to_exclude(keep, exclude)
 
-    pix = image_edges.detect_edge_pixels(
-        image,
-        blur_ksize=blur_ksize,
-        low=canny_low,
-        high=canny_high,
-        exclude_mask=exclude,
-        max_points=max_points,
-    )
+    # Segment the part and look for edges ONLY inside it. Detecting edges everywhere and then
+    # masking the mess geometrically is backwards: it still admits paper folds, sheet
+    # boundaries and rig structure that happen to fall in the working volume. The part is
+    # markedly darker than the paper, so it segments cleanly - on this rig that takes the
+    # search region from ~74% of frame to ~9%, and every surviving edge belongs to the part.
+    def _edges(mask):
+        try:
+            return image_edges.detect_edge_pixels(
+                image, blur_ksize=blur_ksize, low=canny_low, high=canny_high,
+                exclude_mask=mask, max_points=max_points,
+            )
+        except image_edges.EdgeError:
+            return None
+
+    pix = None
+    subject = None
+    if isolate_subject:
+        candidate = image_edges.segment_subject(image, exclude_mask=exclude)
+        if candidate is not None:
+            trial_exclude = keep_to_exclude(candidate, None)
+            if grid_mask is not None:
+                trial_exclude = np.maximum(trial_exclude, grid_mask)
+            trial = _edges(trial_exclude)
+            # Only accept the segmentation if it actually leaves something to fit. A scene
+            # where the part is not tonally separable from its ground segments to nonsense,
+            # and quietly handing the solver an empty edge set is precisely the class of
+            # silent failure this pipeline keeps producing. Fall back instead.
+            if trial is not None and len(trial) >= min_subject_edges:
+                subject, keep, exclude, pix = candidate, candidate, trial_exclude, trial
+
+    if pix is None:
+        pix = _edges(exclude)
+    if pix is None:
+        raise MultiViewFitError(
+            f"{label or 'photo'}: no edge pixels survived masking. Check exposure and the Canny "
+            f"thresholds, and whether the masks are covering the part."
+        )
 
     masked_frac = float(np.count_nonzero(exclude) / (h * w)) if exclude is not None else 0.0
     kept_frac = float(np.count_nonzero(keep) / (h * w)) if keep is not None else 1.0
@@ -248,6 +282,7 @@ def build_view(
             "mask_mode": mask_mode,
             "masked_fraction": round(masked_frac, 4),
             "working_area_fraction": round(kept_frac, 4),
+            "subject_isolated": subject is not None,
             "camera_distance_mm": round(float(np.linalg.norm(tvec_cam)), 1),
         },
     }
@@ -303,9 +338,10 @@ def render_overlay(
     view: dict,
     poses: Sequence[Tuple[str, object, object, Tuple[int, int, int]]],
     *,
-    thickness: int = 2,
+    thickness: int = 1,
     show_edge_pixels: bool = True,
     edge_pixel_colour: Tuple[int, int, int] = (170, 60, 170),
+    opacity: float = 0.55,
 ) -> np.ndarray:
     """
     Draw one or more posed wireframes over a photo.
@@ -327,11 +363,19 @@ def render_overlay(
         ok = (pix[:, 0] >= 0) & (pix[:, 0] < w) & (pix[:, 1] >= 0) & (pix[:, 1] < h)
         canvas[pix[ok, 1], pix[ok, 0]] = edge_pixel_colour
 
-    for i, (label, rvec, tvec, colour) in enumerate(poses):
+    # Draw the wireframe onto its own layer and blend it back at partial opacity. A 1442-edge
+    # model at full strength paints over the very part you are trying to compare it against -
+    # which made several fits today impossible to judge by eye, the only check that actually
+    # works. Thin, translucent lines let the subject show through.
+    layer = canvas.copy()
+    for label, rvec, tvec, colour in poses:
         for poly in project_model_edges(model, rvec, tvec, view):
             pts = np.round(poly).astype(np.int32)
-            cv2.polylines(canvas, [pts], isClosed=False, color=colour, thickness=thickness,
+            cv2.polylines(layer, [pts], isClosed=False, color=colour, thickness=thickness,
                           lineType=cv2.LINE_AA)
+    canvas = cv2.addWeighted(layer, opacity, canvas, 1.0 - opacity, 0.0)
+
+    for i, (label, rvec, tvec, colour) in enumerate(poses):
         y = 40 + i * 38
         cv2.putText(canvas, label, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 5, cv2.LINE_AA)
         cv2.putText(canvas, label, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 1.1, colour, 2, cv2.LINE_AA)
