@@ -63,7 +63,12 @@ def main() -> int:
                     help="scale each part to this longest dimension (the test article's size)")
     ap.add_argument("--yaw", default="0:150:30")
     ap.add_argument("--rig", default="outputs/ar_captures/turn90")
-    ap.add_argument("--base-fit", default="outputs/ar_fits/turn90")
+    ap.add_argument("--xy", default="186,-96",
+                    help="where to seat each part's CENTROID, board mm. Default is where the "
+                         "Main Frame's centroid actually sat in the verified turn90 fit. Do NOT "
+                         "use --base-fit across different parts: it transplants a pose that "
+                         "positions the object ORIGIN, and every part's geometry sits somewhere "
+                         "different relative to its own origin, so they land anywhere.")
     ap.add_argument("--work", default="outputs/ar_survey")
     ap.add_argument("--csv", default="outputs/ar_fits/survey.csv")
     ap.add_argument("--angle", type=float, default=25.0)
@@ -113,7 +118,14 @@ def main() -> int:
             scale = args.target_mm / longest
             stl_path = os.path.join("outputs/ar_models/_survey", base + ".stl")
             json_path = os.path.join("outputs/ar_models/_survey", base + ".json")
-            write_stl(tris * scale, stl_path)
+            # RE-CENTRE FIRST. Part meshes are exported in ASSEMBLY coordinates - one of these
+            # sits at (-38182, 11483, 484054), half a kilometre from its own origin. The fit
+            # derives its initial pose and its search bounds from the model's coordinates, so an
+            # off-origin model sends both somewhere meaningless and every fit fails with "no edge
+            # pixels survived masking". The Main Frame model happens to sit near the origin, which
+            # is the only reason this went unnoticed on a single-part test.
+            centred = (tris - pts.mean(axis=0)) * scale
+            write_stl(centred, stl_path)
             model = M2M.build(stl_path, angle_deg=args.angle, name=base)
             with open(json_path, "w", encoding="utf-8") as fh:
                 json.dump(model, fh)
@@ -126,8 +138,9 @@ def main() -> int:
         print("=== %s  %s  (x%.4f, %d edges) ==="
               % (base, os.path.basename(src)[:46], scale, model["summary"]["edges"]), flush=True)
         cmd = [sys.executable, "tools/synth_sweep.py", "--mesh", stl_path,
-               "--model", json_path, "--rig", args.rig, "--base-fit", args.base_fit,
-               "--yaw", args.yaw, "--work", os.path.join(args.work, base), "--csv", out_csv]
+               "--model", json_path, "--rig", args.rig,
+               "--yaw", args.yaw, "--xy", args.xy,
+               "--work", os.path.join(args.work, base), "--csv", out_csv]
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=args.timeout)
         except subprocess.TimeoutExpired:
