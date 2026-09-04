@@ -96,7 +96,7 @@ def main() -> int:
                          "a narrow basin, so a wrong init converges confidently to nonsense.")
     ap.add_argument("--coarse-step", type=float, default=100.0, help="grid pitch in mm")
     ap.add_argument("--coarse-yaw", type=float, default=20.0, help="yaw step in degrees")
-    ap.add_argument("--working-margin", type=float, default=400.0,
+    ap.add_argument("--working-margin", type=float, default=150.0,
                     help="keep only edges inside the board extent grown by this margin (mm). "
                          "The rig's own rails are longer and straighter than the part, so an "
                          "unconstrained search aligns the model to a rail instead.")
@@ -170,7 +170,8 @@ def main() -> int:
             continue
         d = view["_diag"]
         print(f"  OK   {d['label']}: {d['board_corners']} corners, {d['edge_pixels']} edge px, "
-              f"cam {d['camera_distance_mm']}mm, masked {d['masked_fraction'] * 100:.1f}%")
+              f"cam {d['camera_distance_mm']}mm, masked {d['masked_fraction'] * 100:.1f}%, "
+              f"working {d.get('working_area_fraction', 1) * 100:.0f}%")
         views.append(view)
         images.append((path, img))
 

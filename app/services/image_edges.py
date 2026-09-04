@@ -159,8 +159,8 @@ def working_area_mask(
     dist,
     shape: Tuple[int, int],
     *,
-    margin_mm: float = 400.0,
-    lift_mm: float = 250.0,
+    margin_mm: float = 150.0,
+    lift_mm: float = 150.0,
 ) -> np.ndarray:
     """
     Mask (255 = *keep*) of the region where the part can physically be.
@@ -176,6 +176,11 @@ def working_area_mask(
     or outside the working volume falls away.
 
     Note this is a *keep* mask, the opposite sense to the board and hull masks.
+
+    Keep the margin tight. The first attempt used 400 mm, which around a 360x240 board gives a
+    1160x1040 mm region - larger than the ~840-1100 mm the frame actually covers at this
+    standoff, so the mask was the whole image and changed nothing at all. Check
+    ``working_area_fraction`` in the diagnostics: if it is near 1.0, the mask is doing nothing.
     """
     _require_cv2()
     h, w = int(shape[0]), int(shape[1])
@@ -196,7 +201,17 @@ def working_area_mask(
                                 np.asarray(tvec, np.float64).reshape(3, 1),
                                 np.asarray(K, np.float64).reshape(3, 3),
                                 np.asarray(dist, np.float64).reshape(-1, 1))
-    pts = np.round(proj.reshape(-1, 2)).astype(np.int32)
+    raw = proj.reshape(-1, 2)
+    # Corners behind or level with the camera project to infinity, and casting NaN/inf to int32
+    # is undefined — it silently produced a garbage hull (one camera "kept" 39% of frame at a
+    # margin that should have kept everything). Drop them, and clamp the rest to a sane range
+    # so a near-parallel corner cannot explode the hull.
+    finite = np.isfinite(raw).all(axis=1)
+    pts = raw[finite]
+    if len(pts) < 3:
+        return np.full((h, w), 255, np.uint8)          # cannot bound it: keep everything
+    limit = 10 * max(w, h)
+    pts = np.round(np.clip(pts, -limit, limit)).astype(np.int32)
     mask = np.zeros((h, w), np.uint8)
     cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
     return mask

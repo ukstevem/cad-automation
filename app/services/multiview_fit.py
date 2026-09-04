@@ -167,7 +167,7 @@ def build_view(
     max_points: Optional[int] = None,
     min_corners: int = 6,
     enforce_resolution: bool = True,
-    working_margin_mm: Optional[float] = 400.0,
+    working_margin_mm: Optional[float] = 150.0,
 ) -> dict:
     """
     Turn one photo into a view dict for ``fit_object_pose``, plus diagnostics.
