@@ -162,7 +162,12 @@ def main() -> int:
         # Same way round, or flipped? The sign of the dot product is the whole test.
         flipped = float(at @ af) < 0.0
         ang = float(np.degrees(np.arccos(np.clip(abs(float(at @ af)), 0, 1))))
-        seat = float(np.linalg.norm(np.asarray(fit["tvec"])[:2] - np.asarray(tvec_t).ravel()[:2]))
+        # Centroid, not tvec: tvec moves the object ORIGIN, so an end-for-end flip in place
+        # swings it by a part length and would be reported as ~430mm of seating error.
+        cen = np.vstack([tris.reshape(-1, 3), tris.mean(axis=1)]).mean(axis=0).reshape(3, 1)
+        ct = (Rt @ cen).ravel() + np.asarray(tvec_t).ravel()
+        cf = (Rf @ cen).ravel() + np.asarray(fit["tvec"], np.float64).ravel()
+        seat = float(np.linalg.norm(cf[:2] - ct[:2]))
         eo = end_on_angles(rvec_t, tvec_t, axis_obj, views)
         oc = fit.get("orientation_choice") or {}
         rows.append({

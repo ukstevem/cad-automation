@@ -48,13 +48,19 @@ def score(capdir: str, fitdir: str, mesh_dir: str = "outputs/ar_models") -> dict
     Rf, _ = cv2.Rodrigues(np.asarray(fit["rvec"], np.float64).reshape(3, 1))
     at, af = Rt @ e, Rf @ e
     dot = float(at @ af)
+    # Seating must be judged on where the PART is, not on tvec. tvec translates the object
+    # ORIGIN, and flipping a part end-for-end in place swings that origin by up to a full part
+    # length - reporting ~430mm of "seating error" for a part that has not moved.
+    pts = np.vstack([tris.reshape(-1, 3), tris.mean(axis=1)])
+    cen = pts.mean(axis=0).reshape(3, 1)
+    ct = (Rt @ cen).ravel() + np.asarray(truth["tvec"], np.float64).ravel()
+    cf = (Rf @ cen).ravel() + np.asarray(fit["tvec"], np.float64).ravel()
     oc = fit.get("orientation_choice") or {}
     return {
         "case": os.path.basename(os.path.normpath(capdir)),
         "orientation": "FLIPPED" if dot < 0 else "ok",
         "axis_err_deg": round(float(np.degrees(np.arccos(np.clip(abs(dot), 0, 1)))), 2),
-        "seating_err_mm": round(float(np.linalg.norm(
-            np.asarray(fit["tvec"])[:2] - np.asarray(truth["tvec"]).ravel()[:2])), 1),
+        "seating_err_mm": round(float(np.linalg.norm(cf[:2] - ct[:2])), 1),
         "margin_px": oc.get("margin_px"),
         "rms_px": fit.get("info", {}).get("rms_after_px"),
     }
