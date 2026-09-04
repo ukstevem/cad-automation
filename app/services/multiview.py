@@ -81,7 +81,8 @@ class _View:
     """A calibrated view + a KD-tree over its detected edge pixels for NN distance."""
 
     def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels, width=None, height=None,
-                 reverse_weight=0.0, reverse_max=3000, reverse_cap=40.0, seed=0):
+                 reverse_weight=0.0, reverse_max=3000, reverse_cap=40.0, seed=0,
+                 point_mask=None):
         from scipy.spatial import cKDTree
 
         self.K = np.asarray(K, np.float64).reshape(3, 3)
@@ -100,6 +101,10 @@ class _View:
         # Subsample the observed edges for the reverse term. Every one of them carries the same
         # message ("explain me"), so a few thousand is plenty and keeps the residual vector -
         # and therefore the Jacobian - a sensible size.
+        # Which of the shared CAD samples this view can actually see. Visibility is per-view
+        # and pose-dependent, so it is supplied by the caller's outer loop rather than
+        # recomputed inside the optimiser.
+        self.point_mask = None if point_mask is None else np.asarray(point_mask, bool)
         self.reverse_weight = float(reverse_weight)
         self.reverse_cap = float(reverse_cap)
         self.rev_pixels = None
@@ -112,9 +117,16 @@ class _View:
                    (pts[:, 1] >= 0) & (pts[:, 1] < int(self.height)))
             self.rev_pixels = pts[inb]
 
+    def points(self, obj_pts):
+        if self.point_mask is None or len(self.point_mask) != len(obj_pts):
+            return obj_pts
+        sub = obj_pts[self.point_mask]
+        return sub if len(sub) else obj_pts
+
     def project(self, rvec_obj, tvec_obj, obj_pts):
         rvec_oc, t_oc = _compose_object_to_cam(rvec_obj, tvec_obj, self.R_cam, self.t_cam)
-        proj, _ = cv2.projectPoints(obj_pts.reshape(-1, 1, 3), rvec_oc, t_oc, self.K, self.dist)
+        pts = self.points(obj_pts)
+        proj, _ = cv2.projectPoints(pts.reshape(-1, 1, 3), rvec_oc, t_oc, self.K, self.dist)
         return proj.reshape(-1, 2)
 
     def residuals(self, rvec_obj, tvec_obj, obj_pts):
@@ -189,6 +201,8 @@ def fit_object_pose_planar(
     max_nfev: int = 200,
     xy_bounds: Optional[Tuple[Sequence, Sequence]] = None,
     reverse_weight: float = 0.0,
+    obj_points: Optional[np.ndarray] = None,
+    visibility: Optional[List[Optional[np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Fit only ``(x, y, yaw)``, holding the object on the board plane at the initial height.
@@ -207,10 +221,11 @@ def fit_object_pose_planar(
 
     if not views:
         raise MultiViewError("need at least one view")
-    obj_pts = sample_polylines(cad_edges, max_step=max_step)
+    obj_pts = sample_polylines(cad_edges, max_step=max_step) if obj_points is None else obj_points
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
-                v.get("width"), v.get("height"), reverse_weight=reverse_weight)
-          for v in views]
+                v.get("width"), v.get("height"), reverse_weight=reverse_weight,
+                point_mask=(visibility[i] if visibility else None))
+          for i, v in enumerate(views)]
 
     R_base, _ = cv2.Rodrigues(np.asarray(init_rvec, np.float64).reshape(3, 1))
     t_init = np.asarray(init_tvec, np.float64).reshape(3)
@@ -268,6 +283,8 @@ def fit_object_pose(
     max_nfev: int = 400,
     tvec_bounds: Optional[Tuple[Sequence, Sequence]] = None,
     reverse_weight: float = 0.0,
+    obj_points: Optional[np.ndarray] = None,
+    visibility: Optional[List[Optional[np.ndarray]]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Fit a known CAD object's 6DoF pose across several calibrated views by minimising the
@@ -285,10 +302,11 @@ def fit_object_pose(
 
     if not views:
         raise MultiViewError("need at least one view")
-    obj_pts = sample_polylines(cad_edges, max_step=max_step)
+    obj_pts = sample_polylines(cad_edges, max_step=max_step) if obj_points is None else obj_points
     vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
-                v.get("width"), v.get("height"), reverse_weight=reverse_weight)
-          for v in views]
+                v.get("width"), v.get("height"), reverse_weight=reverse_weight,
+                point_mask=(visibility[i] if visibility else None))
+          for i, v in enumerate(views)]
 
     def residuals(p):
         rvec_obj, tvec_obj = p[:3], p[3:]

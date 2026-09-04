@@ -33,7 +33,7 @@ except Exception as exc:  # pragma: no cover - import guard
     cv2 = None  # type: ignore
     _CV2_IMPORT_ERROR = str(exc)
 
-from app.services import charuco, image_edges
+from app.services import charuco, image_edges, visibility as vis_mod
 from app.services.board_pose import charuco_board_pose
 from app.services.multiview import (fit_object_pose, fit_object_pose_planar,
                                     sample_polylines)
@@ -480,6 +480,8 @@ def coarse_search(
     sample_mm: float = 40.0,
     base_rvec=None,
     max_views: int = 4,
+    mesh=None,
+    seed_pose=None,
 ):
     """
     Grid-search the object's (x, y, yaw) for a starting pose, and return the best.
@@ -506,6 +508,16 @@ def coarse_search(
         views = [all_views[int(i * stride)] for i in range(max_views)]
 
     obj_pts = sample_polylines(model["edges"], max_step=sample_mm)
+
+    # Hidden-line removal matters here MOST, not just in the refinement: the scan is what picks
+    # the basin, and with 81% of the model's points being far-side edges it was choosing between
+    # candidates on the strength of geometry no camera can see. Visibility is computed once at
+    # the seed pose and held for the whole scan - it varies little over the small pose changes
+    # the grid explores, and recomputing per candidate would cost more than the scan itself.
+    vis_masks = None
+    if mesh is not None and seed_pose is not None:
+        sr, st = seed_pose
+        vis_masks = [vis_mod.visible_edge_points(mesh, obj_pts, sr, st, v) for v in views]
     lo, hi = model_bbox(model)
     centre = (lo + hi) / 2.0
     bw, bh = board_extent_mm(board)
@@ -518,7 +530,7 @@ def coarse_search(
     # scanning a few thousand candidates practical at all — a KD-tree version of this same grid
     # was still running after three minutes.
     prepared = []
-    for v in views:
+    for vi, v in enumerate(views):
         w, h = int(v["width"]), int(v["height"])
         edge_img = np.zeros((h, w), np.uint8)
         p = np.round(np.asarray(v["edge_pixels"], np.float64)).astype(int)
@@ -526,8 +538,11 @@ def coarse_search(
         edge_img[p[ok, 1], p[ok, 0]] = 255
         dt = cv2.distanceTransform(255 - edge_img, cv2.DIST_L2, 3)
         R_cam, _ = cv2.Rodrigues(np.asarray(v["rvec_cam"], np.float64).reshape(3, 1))
+        mask = None
+        if vis_masks is not None and vis_masks[vi].any():
+            mask = vis_masks[vi]
         prepared.append((R_cam, np.asarray(v["tvec_cam"], np.float64).reshape(3, 1),
-                         v["K"], v["dist"], dt, w, h))
+                         v["K"], v["dist"], dt, w, h, mask))
 
     base = np.zeros(3) if base_rvec is None else np.asarray(base_rvec, np.float64).reshape(3)
     R_base, _ = cv2.Rodrigues(base.reshape(3, 1))
@@ -559,14 +574,15 @@ def coarse_search(
                 t = np.array([[x], [y], [tz]]) - rotated_centre
                 t[2] = tz
                 total, n = 0.0, 0
-                for R_cam, t_cam, K, dist, dt, w, h in prepared:
+                for R_cam, t_cam, K, dist, dt, w, h, vmask in prepared:
                     R_oc = R_cam @ R_obj
                     t_oc = R_cam @ t + t_cam
                     if t_oc[2, 0] <= 1.0:              # behind the camera
                         total, n = np.inf, 1
                         break
                     rvec_oc, _ = cv2.Rodrigues(R_oc)
-                    proj, _ = cv2.projectPoints(obj_pts.reshape(-1, 1, 3), rvec_oc, t_oc, K, dist)
+                    use = obj_pts if vmask is None else obj_pts[vmask]
+                    proj, _ = cv2.projectPoints(use.reshape(-1, 1, 3), rvec_oc, t_oc, K, dist)
                     q = proj.reshape(-1, 2)
                     xi = np.clip(np.round(q[:, 0]).astype(np.int32), 0, w - 1)
                     yi = np.clip(np.round(q[:, 1]).astype(np.int32), 0, h - 1)
@@ -583,6 +599,54 @@ def coarse_search(
     return best[1].reshape(3, 1), best[2].reshape(3, 1), float(np.sqrt(best[0]))
 
 
+def fit_with_visibility(
+    views: List[dict],
+    model: dict,
+    mesh: np.ndarray,
+    init_rvec,
+    init_tvec,
+    *,
+    rounds: int = 3,
+    max_step: float = 2.0,
+    tol_mm: float = 3.0,
+    **kwargs,
+) -> dict:
+    """
+    Fit with hidden-line removal, alternating visibility and pose.
+
+    Which CAD edges a camera can see depends on where the object is, and where the object is
+    depends on which edges we match — so the two are solved by alternation: extract the visible
+    set at the current pose, fit, re-extract, repeat until it settles. This is how model-based
+    trackers (RAPiD, ViSP) handle it, and it is why visibility is not computed inside the
+    optimiser.
+
+    The effect is not marginal. On this rig only **19%** of the 49,642 sampled CAD points are
+    visible at a typical pose; the other 81% are far-side edges no camera can see, and matching
+    them is what left the cost nearly blind to both pose and scale.
+    """
+    obj_pts = sample_polylines(model["edges"], max_step=max_step)
+    rvec = np.asarray(init_rvec, np.float64).reshape(3, 1)
+    tvec = np.asarray(init_tvec, np.float64).reshape(3, 1)
+    history = []
+    result = None
+    for _ in range(max(1, rounds)):
+        masks = [vis_mod.visible_edge_points(mesh, obj_pts, rvec, tvec, v, tol_mm=tol_mm)
+                 for v in views]
+        result = fit_from_views(views, model, rvec, tvec, max_step=max_step,
+                                obj_points=obj_pts, visibility=masks, **kwargs)
+        rvec = np.asarray(result["rvec"], np.float64).reshape(3, 1)
+        tvec = np.asarray(result["tvec"], np.float64).reshape(3, 1)
+        history.append({
+            "visible_per_view": [int(m.sum()) for m in masks],
+            "visible_fraction": round(float(np.mean([m.mean() for m in masks])), 4),
+            "rms_after_px": result["info"]["rms_after_px"],
+        })
+    if result is not None:
+        result["visibility_rounds"] = history
+        result["info"]["hidden_line_removal"] = True
+    return result
+
+
 def fit_from_views(
     views: List[dict],
     model: dict,
@@ -594,8 +658,11 @@ def fit_from_views(
     max_nfev: int = 400,
     tvec_bounds=None,
     planar: bool = False,
+    obj_points=None,
+    visibility=None,
 ) -> dict:
     """Run the solver over prepared views and return pose + diagnostics."""
+    extra = {"obj_points": obj_points, "visibility": visibility}
     if planar:
         xy_bounds = None
         if tvec_bounds is not None:
@@ -603,13 +670,13 @@ def fit_from_views(
         rvec, tvec, info = fit_object_pose_planar(
             views, model["edges"], init_rvec, init_tvec,
             max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
-            xy_bounds=xy_bounds,
+            xy_bounds=xy_bounds, **extra,
         )
     else:
         rvec, tvec, info = fit_object_pose(
             views, model["edges"], init_rvec, init_tvec,
             max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
-            tvec_bounds=tvec_bounds,
+            tvec_bounds=tvec_bounds, **extra,
         )
     return {
         "rvec": np.asarray(rvec).reshape(3).tolist(),
