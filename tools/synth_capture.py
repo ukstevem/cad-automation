@@ -115,7 +115,7 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
            light=(0.3, -0.4, -0.86), noise: float = 2.0, blur: int = 3,
            sun=(0.28, 0.34, 0.90), shadow: float = 0.42, soft: int = 25,
            paper: int = 196, ink: int = 55, ambient: float = 40.0,
-           diffuse: float = 95.0) -> np.ndarray:
+           diffuse: float = 95.0, seed: int = 0) -> np.ndarray:
     """One synthetic photograph: white paper, the ChArUco board, and the shaded part."""
     w, h = int(view["width"]), int(view["height"])
     K = np.asarray(profile["K"], np.float64).reshape(3, 3)
@@ -237,7 +237,7 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
         img = cv2.GaussianBlur(img, (blur | 1, blur | 1), 0)
     if noise > 0:
         img = np.clip(img.astype(np.float32)
-                      + np.random.default_rng(0).normal(0, noise, img.shape), 0, 255).astype(np.uint8)
+                      + np.random.default_rng(seed).normal(0, noise, img.shape), 0, 255).astype(np.uint8)
     return img
 
 
@@ -255,6 +255,13 @@ def main() -> int:
                          "turn45 that is turn45_alt, not the chosen fit.")
     ap.add_argument("--out", required=True)
     ap.add_argument("--noise", type=float, default=2.0)
+    ap.add_argument("--code-version", default=None,
+                    help="record which build produced these samples. The container does not "
+                         "bind-mount .git, so it cannot read this itself - pass it from the host "
+                         "when generating a dataset meant to outlive the session.")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="noise seed. Recorded in truth.json so a sample can be regenerated "
+                         "byte-for-byte rather than stored.")
     ap.add_argument("--blur", type=int, default=3)
     ap.add_argument("--sun", default="0.28,0.34,0.90",
                     help="direction the light TRAVELS, board frame; z must be positive")
@@ -305,15 +312,41 @@ def main() -> int:
         img = render(tris, rvec, tvec, v, board, profile, noise=args.noise, blur=args.blur,
                      sun=tuple(float(t) for t in args.sun.split(",")),
                      shadow=args.shadow, soft=args.soft, paper=args.paper, ink=args.ink,
-                     ambient=args.ambient, diffuse=args.diffuse)
+                     ambient=args.ambient, diffuse=args.diffuse, seed=args.seed)
         p = os.path.join(args.out, "%s_%s_synth.png" % (name, v["tag"]))
         cv2.imwrite(p, img)
         written.append(p)
         print("  wrote %s" % p)
 
+    # PROVENANCE. Renders are a deterministic function of these fields, so a dataset is stored as
+    # manifests and regenerated rather than kept as gigabytes of PNG. It also pins the thing that
+    # would otherwise silently poison a training set later: WHICH renderer produced a sample. The
+    # pre-shadow, pre-tone renderer modelled a different world - seating 2.5mm against the rig's
+    # 8.6mm - and mixing its output with today's would be mixing two domains under one label.
+    # Read .git directly rather than shelling out: there is no git binary in the container, and a
+    # provenance field that is silently null is worse than none at all.
+    commit = None
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        head = open(os.path.join(root, ".git", "HEAD"), encoding="utf-8").read().strip()
+        if head.startswith("ref: "):
+            ref = os.path.join(root, ".git", head[5:])
+            commit = open(ref, encoding="utf-8").read().strip()[:12] if os.path.exists(ref) else None
+        else:
+            commit = head[:12]
+    except Exception:
+        commit = None
     truth = {
         "rvec": np.asarray(rvec).reshape(3).tolist(),
         "tvec": np.asarray(tvec).reshape(3).tolist(),
+        "renderer": {
+            "sun": [float(t) for t in args.sun.split(",")], "shadow": args.shadow,
+            "soft": args.soft, "paper": args.paper, "ink": args.ink,
+            "ambient": args.ambient, "diffuse": args.diffuse,
+            "noise": args.noise, "blur": args.blur, "seed": args.seed,
+        },
+        "profile": os.path.abspath(args.profile),
+        "code_commit": args.code_version or commit,
         "pose_request": ({"from_fit": args.from_fit} if args.from_fit
                          else {"x": x, "y": y, "yaw_deg": yaw, "roll_deg": roll}),
         "mesh": os.path.basename(args.mesh),
