@@ -90,6 +90,22 @@ def main() -> int:
     ap.add_argument("--max-nfev", type=int, default=400)
     ap.add_argument("--min-corners", type=int, default=6)
     ap.add_argument("--no-overlay", action="store_true")
+    ap.add_argument("--coarse", action="store_true",
+                    help="grid-search (x, y, yaw) for the starting pose instead of assuming the "
+                         "part is centred on the board. The edge cost is a local optimiser with "
+                         "a narrow basin, so a wrong init converges confidently to nonsense.")
+    ap.add_argument("--coarse-step", type=float, default=100.0, help="grid pitch in mm")
+    ap.add_argument("--coarse-yaw", type=float, default=20.0, help="yaw step in degrees")
+    ap.add_argument("--working-margin", type=float, default=400.0,
+                    help="keep only edges inside the board extent grown by this margin (mm). "
+                         "The rig's own rails are longer and straighter than the part, so an "
+                         "unconstrained search aligns the model to a rail instead.")
+    ap.add_argument("--no-working-area", action="store_true",
+                    help="disable the working-area mask (diagnostic only)")
+    ap.add_argument("--no-bounds", action="store_true",
+                    help="disable the working-volume constraint on translation. Without it the "
+                         "cost has a degenerate minimum at 'far away and tiny' which scores a "
+                         "beautiful RMS. Only for diagnosing that behaviour.")
     ap.add_argument("--allow-resolution-mismatch", action="store_true",
                     help="DANGEROUS: use a profile whose calibration resolution differs from the "
                          "photos. Intrinsics do not transfer across resolutions.")
@@ -146,6 +162,7 @@ def main() -> int:
                 canny_low=args.canny_low, canny_high=args.canny_high,
                 max_points=args.max_points, min_corners=args.min_corners,
                 enforce_resolution=not args.allow_resolution_mismatch,
+                working_margin_mm=(None if args.no_working_area else args.working_margin),
             )
         except Exception as exc:
             failures.append({"photo": path, "error": str(exc)})
@@ -168,6 +185,13 @@ def main() -> int:
 
     if args.init is not None:
         init_rvec, init_tvec = args.init
+    elif args.coarse:
+        print("coarse  : scanning (x, y, yaw) for a starting pose...")
+        init_rvec, init_tvec, score = MVF.coarse_search(
+            views, model, board, step_mm=args.coarse_step, yaw_step_deg=args.coarse_yaw)
+        print(f"          best grid score {score:.1f} px  "
+              f"t={np.asarray(init_tvec).reshape(3).round(1).tolist()}  "
+              f"yaw-ish rvec={np.asarray(init_rvec).reshape(3).round(3).tolist()}")
     else:
         init_rvec, init_tvec = MVF.default_init_pose(model, board, views)
         side = MVF.camera_side_of_board(views)
@@ -175,15 +199,24 @@ def main() -> int:
               f"board Z {'+' if side > 0 else '-'}ve) "
               f"t={np.asarray(init_tvec).reshape(3).round(1).tolist()}")
 
+    bounds = None if args.no_bounds else MVF.working_volume_bounds(model, board, views)
+    if bounds is not None:
+        print(f"bounds  : x {bounds[0][0]:.0f}..{bounds[1][0]:.0f}  "
+              f"y {bounds[0][1]:.0f}..{bounds[1][1]:.0f}  "
+              f"z {bounds[0][2]:.0f}..{bounds[1][2]:.0f} mm (board frame)")
     result = MVF.fit_from_views(
         views, model, init_rvec, init_tvec,
         max_step=args.max_step, huber_delta=args.huber, max_nfev=args.max_nfev,
+        tvec_bounds=bounds,
     )
     result["failures"] = failures
     info = result["info"]
     print(f"\nfit     : RMS {info['rms_before_px']} -> {info['rms_after_px']} px "
           f"over {info['n_views']} views / {info['n_points']} CAD points (success={info['success']})")
     print(f"per-view: {info['per_view_rms_px']}")
+    print(f"visible : {info.get('visible_fraction', 0) * 100:.1f}% of CAD points project in frame")
+    if info.get("degenerate"):
+        print(f"  !! DEGENERATE: {info['degenerate']}")
     print(f"rvec    : {[round(x, 5) for x in result['rvec']]}")
     print(f"tvec mm : {[round(x, 2) for x in result['tvec']]}")
 

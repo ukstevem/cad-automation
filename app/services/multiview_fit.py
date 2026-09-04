@@ -35,7 +35,7 @@ except Exception as exc:  # pragma: no cover - import guard
 
 from app.services import charuco, image_edges
 from app.services.board_pose import charuco_board_pose
-from app.services.multiview import fit_object_pose
+from app.services.multiview import fit_object_pose, sample_polylines
 
 
 class MultiViewFitError(Exception):
@@ -146,6 +146,12 @@ def default_init_pose(
 
 # ── per-photo view construction ─────────────────────────────────────────────
 
+def keep_to_exclude(keep: np.ndarray, exclude: Optional[np.ndarray]) -> np.ndarray:
+    """Combine a KEEP mask with an existing EXCLUDE mask into a single exclude mask."""
+    inverted = np.where(keep > 0, 0, 255).astype(np.uint8)
+    return inverted if exclude is None else np.maximum(inverted, exclude)
+
+
 def build_view(
     image: np.ndarray,
     profile: dict,
@@ -161,6 +167,7 @@ def build_view(
     max_points: Optional[int] = None,
     min_corners: int = 6,
     enforce_resolution: bool = True,
+    working_margin_mm: Optional[float] = 400.0,
 ) -> dict:
     """
     Turn one photo into a view dict for ``fit_object_pose``, plus diagnostics.
@@ -202,6 +209,16 @@ def build_view(
     elif mask_mode != "none":
         raise MultiViewFitError(f"unknown mask_mode '{mask_mode}' (expected grid|hull|none)")
 
+    # Confine the search to the volume the part can occupy. Without this the rig's own rails
+    # out-compete the part: they are longer, straighter and brighter than anything on it.
+    keep = None
+    if working_margin_mm is not None:
+        keep = image_edges.working_area_mask(
+            board, rvec_cam, tvec_cam, profile["K"], profile["dist"], (h, w),
+            margin_mm=working_margin_mm,
+        )
+        exclude = keep_to_exclude(keep, exclude)
+
     pix = image_edges.detect_edge_pixels(
         image,
         blur_ksize=blur_ksize,
@@ -212,12 +229,15 @@ def build_view(
     )
 
     masked_frac = float(np.count_nonzero(exclude) / (h * w)) if exclude is not None else 0.0
+    kept_frac = float(np.count_nonzero(keep) / (h * w)) if keep is not None else 1.0
     return {
         "K": profile["K"],
         "dist": profile["dist"],
         "rvec_cam": rvec_cam,
         "tvec_cam": tvec_cam,
         "edge_pixels": pix,
+        "width": w,
+        "height": h,
         "_diag": {
             "label": label,
             "profile": profile["name"],
@@ -226,6 +246,7 @@ def build_view(
             "edge_pixels": int(len(pix)),
             "mask_mode": mask_mode,
             "masked_fraction": round(masked_frac, 4),
+            "working_area_fraction": round(kept_frac, 4),
             "camera_distance_mm": round(float(np.linalg.norm(tvec_cam)), 1),
         },
     }
@@ -318,8 +339,130 @@ def render_overlay(
 
 # ── the whole job ───────────────────────────────────────────────────────────
 
+CAP_PX = 60.0        # coarse-search distance cap: beyond this, a point is simply 'wrong'
 INIT_COLOUR = (0, 165, 255)      # amber (BGR)
 FIT_COLOUR = (255, 255, 0)       # cyan  (BGR)
+
+
+def working_volume_bounds(model: dict, board, views: Optional[Sequence[dict]] = None):
+    """
+    Bounds on the object translation: the physical volume the part can plausibly occupy.
+
+    Without these the edge cost has a degenerate global minimum — push the object far enough
+    away and it projects into a handful of pixels, each landing near SOME detected edge, so the
+    residual collapses. On the first real capture the solver "improved" 318 -> 5.2 px by moving
+    a 433 mm part to 4.4 metres and shrinking it to a dot.
+
+    The box spans the board plus one model-length of slack in each direction (the part may sit
+    beside the board, not on it), and one model-height either side of the board plane, on the
+    camera side.
+    """
+    lo, hi = model_bbox(model)
+    bw, bh = board_extent_mm(board)
+    slack = float(np.max(hi - lo))
+    z_sign = camera_side_of_board(views) if views else -1.0
+    depth = slack
+    if z_sign > 0:
+        z_lo, z_hi = -depth * 0.25, depth
+    else:
+        z_lo, z_hi = -depth, depth * 0.25
+    return (
+        np.array([-slack, -slack, z_lo], np.float64),
+        np.array([bw + slack, bh + slack, z_hi], np.float64),
+    )
+
+
+def coarse_search(
+    views: List[dict],
+    model: dict,
+    board,
+    *,
+    step_mm: float = 100.0,
+    yaw_step_deg: float = 20.0,
+    sample_mm: float = 40.0,
+    base_rvec=None,
+):
+    """
+    Grid-search the object's (x, y, yaw) for a starting pose, and return the best.
+
+    The edge cost is a *local* optimiser with a narrow basin, so the init decides everything —
+    on the first real capture a default init 300 mm from the truth converged to nonsense. But
+    the part lies flat on a plane, so the genuinely unknown parameters are only its position in
+    that plane and its rotation about the plane normal. Three dimensions is small enough to
+    simply scan.
+
+    This *evaluates* the cost on the grid rather than optimising at each node — one residual
+    evaluation per candidate instead of a few hundred — using a coarsely sampled model. That
+    makes a few thousand candidates affordable, and the winner is then refined properly.
+    """
+    _require_cv2()
+
+    obj_pts = sample_polylines(model["edges"], max_step=sample_mm)
+    lo, hi = model_bbox(model)
+    centre = (lo + hi) / 2.0
+    bw, bh = board_extent_mm(board)
+    slack = float(np.max(hi - lo))
+    z_sign = camera_side_of_board(views)
+    tz = -lo[2] if z_sign > 0 else -hi[2]
+
+    # Score against a distance transform rather than a KD-tree. Each candidate then costs one
+    # array lookup per sample point instead of a nearest-neighbour query, which is what makes
+    # scanning a few thousand candidates practical at all — a KD-tree version of this same grid
+    # was still running after three minutes.
+    prepared = []
+    for v in views:
+        w, h = int(v["width"]), int(v["height"])
+        edge_img = np.zeros((h, w), np.uint8)
+        p = np.round(np.asarray(v["edge_pixels"], np.float64)).astype(int)
+        ok = (p[:, 0] >= 0) & (p[:, 0] < w) & (p[:, 1] >= 0) & (p[:, 1] < h)
+        edge_img[p[ok, 1], p[ok, 0]] = 255
+        dt = cv2.distanceTransform(255 - edge_img, cv2.DIST_L2, 3)
+        R_cam, _ = cv2.Rodrigues(np.asarray(v["rvec_cam"], np.float64).reshape(3, 1))
+        prepared.append((R_cam, np.asarray(v["tvec_cam"], np.float64).reshape(3, 1),
+                         v["K"], v["dist"], dt, w, h))
+
+    base = np.zeros(3) if base_rvec is None else np.asarray(base_rvec, np.float64).reshape(3)
+    R_base, _ = cv2.Rodrigues(base.reshape(3, 1))
+
+    xs = np.arange(-slack * 0.5, bw + slack * 0.5 + step_mm, step_mm)
+    ys = np.arange(-slack * 0.5, bh + slack * 0.5 + step_mm, step_mm)
+    yaws = np.radians(np.arange(0.0, 360.0, yaw_step_deg))
+
+    best = (np.inf, base, np.array([0.0, 0.0, tz]))
+    for yaw in yaws:
+        Rz, _ = cv2.Rodrigues(np.array([[0.0], [0.0], [yaw]]))
+        R_obj = Rz @ R_base
+        rvec_obj, _ = cv2.Rodrigues(R_obj)
+        rotated_centre = R_obj @ centre.reshape(3, 1)
+        for x in xs:
+            for y in ys:
+                # Place the object's centroid at (x, y) so the grid means the same thing at
+                # every yaw, rather than sweeping the model's arbitrary origin around.
+                t = np.array([[x], [y], [tz]]) - rotated_centre
+                t[2] = tz
+                total, n = 0.0, 0
+                for R_cam, t_cam, K, dist, dt, w, h in prepared:
+                    R_oc = R_cam @ R_obj
+                    t_oc = R_cam @ t + t_cam
+                    if t_oc[2, 0] <= 1.0:              # behind the camera
+                        total, n = np.inf, 1
+                        break
+                    rvec_oc, _ = cv2.Rodrigues(R_oc)
+                    proj, _ = cv2.projectPoints(obj_pts.reshape(-1, 1, 3), rvec_oc, t_oc, K, dist)
+                    q = proj.reshape(-1, 2)
+                    xi = np.clip(np.round(q[:, 0]).astype(np.int32), 0, w - 1)
+                    yi = np.clip(np.round(q[:, 1]).astype(np.int32), 0, h - 1)
+                    d = dt[yi, xi]
+                    # Points projecting outside the frame get the cap, so a candidate cannot
+                    # win by hiding most of the model off-image.
+                    off = (q[:, 0] < 0) | (q[:, 0] >= w) | (q[:, 1] < 0) | (q[:, 1] >= h)
+                    d = np.where(off, CAP_PX, np.minimum(d, CAP_PX))
+                    total += float(np.sum(d ** 2))
+                    n += len(d)
+                score = total / max(n, 1)
+                if score < best[0]:
+                    best = (score, rvec_obj.reshape(3), t.reshape(3))
+    return best[1].reshape(3, 1), best[2].reshape(3, 1), float(np.sqrt(best[0]))
 
 
 def fit_from_views(
@@ -331,11 +474,13 @@ def fit_from_views(
     max_step: float = 2.0,
     huber_delta: float = 10.0,
     max_nfev: int = 400,
+    tvec_bounds=None,
 ) -> dict:
     """Run the solver over prepared views and return pose + diagnostics."""
     rvec, tvec, info = fit_object_pose(
         views, model["edges"], init_rvec, init_tvec,
         max_step=max_step, huber_delta=huber_delta, max_nfev=max_nfev,
+        tvec_bounds=tvec_bounds,
     )
     return {
         "rvec": np.asarray(rvec).reshape(3).tolist(),

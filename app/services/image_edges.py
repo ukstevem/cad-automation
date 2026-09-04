@@ -151,6 +151,57 @@ def board_grid_mask(
     return mask
 
 
+def working_area_mask(
+    board,
+    rvec,
+    tvec,
+    K,
+    dist,
+    shape: Tuple[int, int],
+    *,
+    margin_mm: float = 400.0,
+    lift_mm: float = 250.0,
+) -> np.ndarray:
+    """
+    Mask (255 = *keep*) of the region where the part can physically be.
+
+    The rig's own 2020 extrusion is long, straight, bright and permanently in frame — and the
+    model is a long box, so an edge cost will happily align the part's long axis to a rail. On
+    the first real capture both the coarse search and the refinement did exactly that. The rails
+    are not noise to be averaged out; they are a better match than the truth.
+
+    Since the board pose is solved, the working plane is known. This projects a box standing on
+    that plane — the board extent grown by *margin_mm*, and *lift_mm* tall so the part's upper
+    edges are included — and keeps only what falls inside its silhouette. Structure well above
+    or outside the working volume falls away.
+
+    Note this is a *keep* mask, the opposite sense to the board and hull masks.
+    """
+    _require_cv2()
+    h, w = int(shape[0]), int(shape[1])
+    corners = np.asarray(board.getChessboardCorners(), np.float64).reshape(-1, 3)
+    xs, ys = np.unique(np.round(corners[:, 0], 6)), np.unique(np.round(corners[:, 1], 6))
+    pitch = float(min(np.min(np.diff(xs)), np.min(np.diff(ys))))
+    x0, x1 = xs[0] - pitch - margin_mm, xs[-1] + pitch + margin_mm
+    y0, y1 = ys[0] - pitch - margin_mm, ys[-1] + pitch + margin_mm
+
+    # Both faces of the volume: the plane itself and a lifted copy. Which sign is "up" depends
+    # on which side the camera is, so include both and take the hull — cheap, and avoids
+    # baking in a convention here.
+    box = []
+    for z in (0.0, -lift_mm, lift_mm):
+        box.extend([[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]])
+    proj, _ = cv2.projectPoints(np.asarray(box, np.float64).reshape(-1, 1, 3),
+                                np.asarray(rvec, np.float64).reshape(3, 1),
+                                np.asarray(tvec, np.float64).reshape(3, 1),
+                                np.asarray(K, np.float64).reshape(3, 3),
+                                np.asarray(dist, np.float64).reshape(-1, 1))
+    pts = np.round(proj.reshape(-1, 2)).astype(np.int32)
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
+    return mask
+
+
 def marker_hull_mask(
     marker_corners: Sequence,
     shape: Tuple[int, int],

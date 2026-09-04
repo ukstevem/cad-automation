@@ -80,7 +80,7 @@ def _compose_object_to_cam(rvec_obj, tvec_obj, R_cam, t_cam):
 class _View:
     """A calibrated view + a KD-tree over its detected edge pixels for NN distance."""
 
-    def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels):
+    def __init__(self, K, dist, rvec_cam, tvec_cam, edge_pixels, width=None, height=None):
         from scipy.spatial import cKDTree
 
         self.K = np.asarray(K, np.float64).reshape(3, 3)
@@ -91,6 +91,10 @@ class _View:
         if len(ep) == 0:
             raise MultiViewError("a view has no detected edge pixels")
         self.tree = cKDTree(ep)
+        # Fall back to the observed edge extent when the frame size is not supplied; only used
+        # for the visibility diagnostic, never for the cost itself.
+        self.width = float(width) if width else float(ep[:, 0].max() + 1)
+        self.height = float(height) if height else float(ep[:, 1].max() + 1)
 
     def residuals(self, rvec_obj, tvec_obj, obj_pts):
         """NN pixel distance for each projected CAD sample point in this view."""
@@ -99,6 +103,21 @@ class _View:
         proj = proj.reshape(-1, 2)
         d, _ = self.tree.query(proj)
         return d
+
+
+def _visible_fraction(views, obj_pts, rvec_obj, tvec_obj) -> float:
+    """Fraction of projected CAD points that land inside any view's image bounds."""
+    inside = 0
+    total = 0
+    for v in views:
+        rvec_oc, t_oc = _compose_object_to_cam(rvec_obj, tvec_obj, v.R_cam, v.t_cam)
+        proj, _ = cv2.projectPoints(obj_pts.reshape(-1, 1, 3), rvec_oc, t_oc, v.K, v.dist)
+        p = proj.reshape(-1, 2)
+        w, h = v.width, v.height
+        inside += int(np.count_nonzero((p[:, 0] >= 0) & (p[:, 0] < w) &
+                                       (p[:, 1] >= 0) & (p[:, 1] < h)))
+        total += len(p)
+    return float(inside) / float(total) if total else 0.0
 
 
 def fit_object_pose(
@@ -110,6 +129,7 @@ def fit_object_pose(
     max_step: float = 2.0,
     huber_delta: float = 10.0,
     max_nfev: int = 400,
+    tvec_bounds: Optional[Tuple[Sequence, Sequence]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
     Fit a known CAD object's 6DoF pose across several calibrated views by minimising the
@@ -128,7 +148,8 @@ def fit_object_pose(
     if not views:
         raise MultiViewError("need at least one view")
     obj_pts = sample_polylines(cad_edges, max_step=max_step)
-    vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"]) for v in views]
+    vs = [_View(v["K"], v["dist"], v["rvec_cam"], v["tvec_cam"], v["edge_pixels"],
+                v.get("width"), v.get("height")) for v in views]
 
     def residuals(p):
         rvec_obj, tvec_obj = p[:3], p[3:]
@@ -139,12 +160,27 @@ def fit_object_pose(
         np.asarray(init_tvec, np.float64).reshape(3),
     ])
     rms_before = float(np.sqrt(np.mean(residuals(p0) ** 2)))
-    sol = least_squares(residuals, p0, loss="huber", f_scale=huber_delta, max_nfev=max_nfev)
+
+    # Bound the translation, or the cost has a degenerate global minimum: push the object far
+    # enough away and it projects into a handful of pixels, every one of which lands near SOME
+    # detected edge, so the mean NN distance collapses. Observed on the first real capture —
+    # the solver "improved" 318 -> 5.2 px by moving a 433 mm part to 4.4 metres and shrinking
+    # it to a dot. The residual is genuinely low; the pose is nonsense.
+    kwargs = {}
+    if tvec_bounds is not None:
+        lo = np.concatenate([np.full(3, -np.inf), np.asarray(tvec_bounds[0], np.float64)])
+        hi = np.concatenate([np.full(3, np.inf), np.asarray(tvec_bounds[1], np.float64)])
+        p0 = np.clip(p0, lo, hi)                       # least_squares requires p0 within bounds
+        kwargs["bounds"] = (lo, hi)
+    sol = least_squares(residuals, p0, loss="huber", f_scale=huber_delta, max_nfev=max_nfev,
+                        **kwargs)
     rvec_obj = sol.x[:3].reshape(3, 1)
     tvec_obj = sol.x[3:].reshape(3, 1)
 
     per_view = [float(np.sqrt(np.mean(v.residuals(rvec_obj, tvec_obj, obj_pts) ** 2))) for v in vs]
+    visible = _visible_fraction(vs, obj_pts, rvec_obj, tvec_obj)
     info = {
+        "visible_fraction": round(visible, 4),
         "rms_before_px": round(rms_before, 3),
         "rms_after_px": round(float(np.sqrt(np.mean(sol.fun ** 2))), 3),
         "per_view_rms_px": [round(x, 3) for x in per_view],
@@ -152,4 +188,12 @@ def fit_object_pose(
         "n_views": len(vs),
         "success": bool(sol.success),
     }
+    # A collapsed pose scores a beautiful RMS while projecting almost nothing into frame, so
+    # report it rather than leaving a low residual to speak for itself.
+    if visible < 0.2:
+        info["degenerate"] = (
+            f"only {visible * 100:.1f}% of CAD points project inside the images - the fit has "
+            f"collapsed away from the cameras. The low RMS is meaningless; constrain "
+            f"tvec_bounds or improve the initial pose."
+        )
     return rvec_obj, tvec_obj, info
