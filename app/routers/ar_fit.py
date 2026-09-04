@@ -183,6 +183,71 @@ async def run(req: FitRequest):
     return {"task_id": task_id, "out": out_name, "status": "pending"}
 
 
+class AdjustRequest(BaseModel):
+    name: str                      # an existing fit directory under outputs/ar_fits
+    captures: str
+    profile: str
+    cam_profiles: Optional[List[str]] = None
+    model: str
+    axis: str = "y"                # x, y or z in the OBJECT frame
+    degrees: float = 90.0
+    canny_low: Optional[int] = None
+    canny_high: Optional[int] = None
+    working_margin: float = 150.0
+
+
+@router.post("/adjust")
+async def adjust(req: AdjustRequest):
+    """
+    Re-solve an existing fit with a seating rotation applied.
+
+    Roll about a part's long axis is not reliably recoverable from two views — on the test part
+    only 3.4% of geometry discriminates under it, and the available scores disagree. Rather than
+    let the solver guess, the operator says which way up it is and the pose is refitted around
+    that. Position and yaw are re-solved; only the seating is imposed.
+    """
+    name = _safe_name(req.name)
+    src = _sub("ar_fits", name)
+    if not os.path.exists(os.path.join(src, "fit.json")):
+        raise HTTPException(status_code=404, detail=f"no fit '{name}' to adjust")
+    if req.axis.lower() not in ("x", "y", "z"):
+        raise HTTPException(status_code=400, detail="axis must be x, y or z")
+
+    cmd = [sys.executable, "-m", "app.workers.run_ar_fit",
+           "--captures", _sub("ar_captures", _safe_name(req.captures)),
+           "--profile", _sub("calibration", _safe_name(req.profile)),
+           "--model", _sub("ar_models", _safe_name(req.model)),
+           "--out", src, "--from-fit", src,
+           "--rotate", f"{req.axis.lower()},{req.degrees}",
+           "--working-margin", str(req.working_margin)]
+    for spec in (req.cam_profiles or []):
+        tag, fname = spec.split("=", 1)
+        cmd += ["--cam-profile", f"{tag}={_sub('calibration', _safe_name(fname))}"]
+    if req.canny_low is not None:
+        cmd += ["--canny-low", str(req.canny_low)]
+    if req.canny_high is not None:
+        cmd += ["--canny-high", str(req.canny_high)]
+
+    async def job(progress_callback=None):
+        if progress_callback:
+            progress_callback(0, 1, f"re-solving at {req.degrees} deg about {req.axis}")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            tail = (stderr or b"").decode(errors="replace").strip().splitlines()[-6:]
+            raise RuntimeError("adjust failed: " + " | ".join(tail))
+        for line in (stdout or b"").decode(errors="replace").splitlines():
+            if line.strip().startswith("{"):
+                return json.loads(line.strip())
+        raise RuntimeError("adjust produced no JSON result")
+
+    task_id = task_manager.submit_async("ar-fit-adjust", name, job)
+    return {"task_id": task_id, "out": name, "status": "pending"}
+
+
 @router.get("/status/{task_id}")
 async def status(task_id: str):
     task = task_manager.get_task(task_id)

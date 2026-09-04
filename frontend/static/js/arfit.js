@@ -176,6 +176,11 @@ export class ArFitPage {
             if (!r.ok) throw new Error(j.detail || `run ${r.status}`);
             this.taskId = j.task_id;
             this.outName = j.out;
+            this.lastRequest = {
+                captures: body.captures, profile: body.profile, model: body.model,
+                cam_profiles: body.cam_profiles, canny_low: body.canny_low,
+                canny_high: body.canny_high, working_margin: body.working_margin,
+            };
             this._poll();
         } catch (e) {
             status.innerHTML = `<article class="error">Failed to start: ${e.message}</article>`;
@@ -212,6 +217,31 @@ export class ArFitPage {
         tick();
     }
 
+    async _adjust(spec) {
+        const [axis, degrees] = spec.split(',');
+        const status = document.getElementById('arfit-status');
+        status.innerHTML = `<article aria-busy="true">Re-solving at ${degrees}&deg; about
+            ${axis.toUpperCase()}...</article>`;
+        try {
+            const r = await fetch('/api/v1/ar-fit/adjust', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...this.lastRequest, name: this.outName,
+                                       axis, degrees: Number(degrees) }),
+            });
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || `adjust ${r.status}`);
+            this.taskId = j.task_id;
+            this._poll();
+        } catch (e) {
+            status.innerHTML = `<article class="error">Adjust failed: ${e.message}</article>`;
+        }
+    }
+
+    _bindRotation() {
+        document.querySelectorAll('[data-rot]').forEach(b =>
+            b.addEventListener('click', () => this._adjust(b.dataset.rot)));
+    }
+
     _showResult(res) {
         const el = document.getElementById('arfit-result');
         if (!res) { el.innerHTML = '<article>No result payload.</article>'; return; }
@@ -246,9 +276,13 @@ export class ArFitPage {
         const warnHtml = warnings.length
             ? `<article class="error">${warnings.join('<br><br>')}</article>` : '';
 
+        // Cache-bust. A re-solve writes the SAME overlay filenames, so without this the browser
+        // serves the previous image from cache: the numbers update and the picture does not,
+        // which looks exactly like the button having done nothing.
+        const stamp = Date.now();
         const grid = list => (list || []).map(p => `
             <figure style="margin:0">
-              <img src="/outputs/${p}" alt="overlay" style="width:100%">
+              <img src="/outputs/${p}?v=${stamp}" alt="overlay" style="width:100%">
               <figcaption><small>${p.split('/').pop()}</small></figcaption>
             </figure>`).join('');
         const overlays = grid(res.overlays);
@@ -267,10 +301,27 @@ export class ArFitPage {
         el.innerHTML = `
           ${warnHtml}
           <article>
-            <header><strong>Check the overlay before the numbers.</strong>
+            <header><strong>${res.init_source && res.init_source.startsWith('rotated')
+                ? res.init_source.replace(/^rotated/, 'Seating: rotated') + ' &mdash; '
+                : ''}Check the overlay before the numbers.</strong>
               Amber is the starting guess, cyan the fit, magenta the edge pixels it matched
               against. A low RMS at a visibly wrong pose is a wrong pose.</header>
             ${overlays || '<p>No overlay images.</p>'}
+          </article>
+          <article>
+            <header><strong>Seating</strong> &mdash; roll about a part's own axis is not
+              reliably recoverable from two views (only ~3% of this part's geometry differs
+              under it, and the hole pattern that would settle it is below the cameras'
+              resolution). Spin it to match, and the pose is re-solved around that seating.
+            </header>
+            <div role="group">
+              <button class="secondary" data-rot="x,90">Rotate X 90&deg;</button>
+              <button class="secondary" data-rot="y,90">Rotate Y 90&deg;</button>
+              <button class="secondary" data-rot="y,180">Flip Y 180&deg;</button>
+              <button class="secondary" data-rot="z,90">Rotate Z 90&deg;</button>
+            </div>
+            <small>Y is the part's long axis. Re-solving takes a few seconds &mdash; no coarse
+              search, just a refit from the rotated seating.</small>
           </article>
           ${alts}
           <article>
@@ -300,5 +351,6 @@ export class ArFitPage {
                 ? `<small>Skipped: ${res.failures.map(f => `${f.photo} (${f.error})`).join('; ')}</small>`
                 : ''}
           </article>`;
+        this._bindRotation();
     }
 }

@@ -95,8 +95,40 @@ def _work(args) -> None:
         except Exception as exc:                       # noqa: BLE001 - degrade, do not fail
             print(f"mesh unusable ({exc}); continuing without hidden-line removal", file=sys.stderr)
 
-    seed_for_scan = MVF.estimate_position_from_edges(views, model, board)
-    if args.coarse:
+    # Seating (roll about the part's long axis) is enumerated, not solved. Measured on this
+    # part: only 3.4% of points discriminate under a roll, against 52% end-for-end, and the
+    # three available scores disagree about it - full edges prefer 180 by 1.13px (correct),
+    # discriminating points prefer 0 by 0.44px (wrong), render-and-compare is tied at 0.002.
+    # A box section flipped about its long axis nearly maps onto itself, so this is a property
+    # of the geometry. In the cell the fixture fixes it; here it is offered as a choice.
+    rolls = [float(x) for x in (args.rolls or "0").split(",")]
+
+    # Re-solve from a previous fit with a seating rotation applied. Roll is not reliably
+    # recoverable from two views (see --rolls), so the operator supplies it and we refit around
+    # it rather than searching from scratch: same position, same yaw freedom, new seating.
+    if args.from_fit:
+        with open(os.path.join(args.from_fit, "fit.json"), encoding="utf-8") as fh:
+            prev = json.load(fh)
+        R_prev, _ = cv2.Rodrigues(np.asarray(prev["rvec"], float).reshape(3, 1))
+        t_prev = np.asarray(prev["tvec"], float).reshape(3, 1)
+        axis, deg = (args.rotate or "y,0").split(",")
+        vec = np.zeros((3, 1))
+        vec[{"x": 0, "y": 1, "z": 2}[axis.strip().lower()]] = np.radians(float(deg))
+        R_delta, _ = cv2.Rodrigues(vec)
+        # Rotate about the object's own centre so it stays where it is on the bench.
+        lo, hi = MVF.model_bbox(model)
+        centre = ((lo + hi) / 2.0).reshape(3, 1)
+        R_new = R_prev @ R_delta
+        init_rvec, _ = cv2.Rodrigues(R_new)
+        init_tvec = (R_prev @ centre + t_prev) - R_new @ centre
+        init_source = f"rotated {deg} deg about {axis} from {os.path.basename(args.from_fit)}"
+        seed_for_scan = None
+        args.coarse = False
+
+    seed_for_scan = MVF.estimate_position_from_edges(views, model, board)         if not args.from_fit else None
+    if args.from_fit:
+        pass
+    elif args.coarse:
         init_rvec, init_tvec, grid_score = MVF.coarse_search(
             views, model, board, step_mm=args.coarse_step, yaw_step_deg=args.coarse_yaw,
             mesh=mesh,
@@ -287,6 +319,15 @@ def main() -> int:
     ap.add_argument("--coarse-yaw", type=float, default=10.0)
     ap.add_argument("--full-6dof", action="store_true")
     ap.add_argument("--visibility-rounds", type=int, default=3)
+    ap.add_argument("--from-fit", default=None,
+                    help="re-solve starting from a previous fit directory instead of searching")
+    ap.add_argument("--rotate", default=None,
+                    help="seating rotation to apply to --from-fit, as axis,degrees "
+                         "(e.g. y,90). Roll is operator-supplied because two views cannot reliably determine it.")
+    ap.add_argument("--rolls", default="0",
+                    help="comma-separated roll angles (deg) about the part's long axis "
+                         "to try, e.g. 0,180. Roll is not reliably recoverable from two "
+                         "views on a box section - each is fitted and offered, not judged.")
     ap.add_argument("--no-flip", action="store_true",
                     help="skip the 180-degree alternative hypothesis")
     args = ap.parse_args()
