@@ -118,6 +118,12 @@ export class CalibratePage {
                             <select id="cal-device" ${secure ? '' : 'disabled'}>
                                 <option value="">${secure ? 'Select camera…' : 'Live capture needs localhost/HTTPS'}</option>
                             </select>
+                            <select id="cal-res" ${secure ? '' : 'disabled'} title="Resolution is requested by this page, not set in the camera's own utility">
+                                <option value="1920x1080">1920x1080</option>
+                                <option value="2560x1440">2560x1440</option>
+                                <option value="3840x2160">3840x2160 (4K)</option>
+                            </select>
+                            <button id="cal-rescan" class="outline secondary" ${secure ? '' : 'disabled'}>Rescan</button>
                             <button id="cal-start-cam" class="outline" ${secure ? '' : 'disabled'}>Start camera</button>
                             <button id="cal-capture" class="outline" disabled>Capture frame</button>
                             <button id="cal-stop-cam" class="outline secondary" disabled>Stop</button>
@@ -176,14 +182,55 @@ export class CalibratePage {
         });
 
         $('#cal-start-cam')?.addEventListener('click', () => this._startCamera());
+        // Rescan primes camera permission first: a USB camera plugged in after page load, or
+        // before access was granted, is otherwise invisible to enumerateDevices.
+        $('#cal-rescan')?.addEventListener('click', async () => {
+            this._setLiveStatus('Scanning for cameras...');
+            await this._enumerateDevices({ prime: true });
+            const n = (this._videoDevices || []).length;
+            this._setLiveStatus(n ? `Found ${n} camera${n === 1 ? '' : 's'}.`
+                                  : 'No cameras found.', !n);
+        });
         $('#cal-stop-cam')?.addEventListener('click', () => this._stopCamera());
         $('#cal-capture')?.addEventListener('click', () => this._captureFrame());
         $('#cal-upload')?.addEventListener('change', (e) => this._onUpload(e));
         $('#cal-clear-frames')?.addEventListener('click', () => this._clearFrames());
         $('#cal-compute')?.addEventListener('click', () => this._compute());
 
-        if (window.isSecureContext) this._enumerateDevices();
+        if (window.isSecureContext) this._enumerateDevices({ prime: true });
         this._renderFrames();
+    }
+
+    _weakViewAdvice(frame) {
+        // Markers and corners fail for different reasons, and saying "coverage/lighting" for both
+        // is actively misleading: a frame with every marker found but no corners is a perfectly
+        // good photograph of a board whose DIMENSIONS do not match what is configured here.
+        const b = this._board;
+        const size = frame.imageSize ? `${frame.imageSize[0]}x${frame.imageSize[1]}` : 'unknown size';
+        const cfg = `${b.squares_x}x${b.squares_y}, ${b.square_mm}mm, ${b.dictionary}`;
+        if (frame.markers > 0 && frame.corners === 0) {
+            const fix = frame.suggestion
+                ? ` ${frame.suggestion.message} Press "Use ${frame.suggestion.squares_x}x`
+                  + `${frame.suggestion.squares_y}" to correct it.`
+                : ' Set Squares X/Y to match the printed board.';
+            return `Board MISMATCH — found ${frame.markers} markers but 0 corners, so the `
+                 + `dictionary is right and the layout is not.${fix} Sent: ${cfg} · ${size}`;
+        }
+        if (frame.markers === 0) {
+            return `No markers found at all — check focus, that the board fills more of the frame, `
+                 + `and that the dictionary matches. Sent: ${cfg} · ${size}`;
+        }
+        return `Weak view — ${frame.markers} markers, only ${frame.corners} corners. More angle `
+             + `variety and frame-edge coverage. Sent: ${cfg} · ${size}`;
+    }
+
+    _applySuggestion(sug) {
+        if (!sug) return;
+        this.container.querySelector('#cal-sx').value = sug.squares_x;
+        this.container.querySelector('#cal-sy').value = sug.squares_y;
+        this._syncBoard();
+        this._setLiveStatus(`Board set to ${sug.squares_x}x${sug.squares_y}. Recapture your views `
+                            + `- the ones already taken were checked against the wrong layout.`);
     }
 
     _syncBoard() {
@@ -213,18 +260,43 @@ export class CalibratePage {
     // Live webcam
     // ---------------------------------------------------------------
 
-    async _enumerateDevices() {
+    async _enumerateDevices({ prime = false } = {}) {
         if (!navigator.mediaDevices?.enumerateDevices) return;
         try {
-            // A getUserMedia call is needed before labels are populated on some browsers.
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            this._videoDevices = devices.filter(d => d.kind === 'videoinput');
+            let devices = await navigator.mediaDevices.enumerateDevices();
+            let vids = devices.filter(d => d.kind === 'videoinput');
+
+            // Until camera permission is granted the browser hides device LABELS and, on
+            // Chromium, can withhold additional cameras entirely - so a USB camera simply does
+            // not appear and the list shows only the built-in one. The cure is to open a stream
+            // briefly, which triggers the permission prompt, then enumerate again and drop it.
+            // The old code carried a comment saying this was needed and then never did it.
+            if (prime && (!vids.length || vids.some(d => !d.label))) {
+                try {
+                    const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
+                    tmp.getTracks().forEach(t => t.stop());
+                    devices = await navigator.mediaDevices.enumerateDevices();
+                    vids = devices.filter(d => d.kind === 'videoinput');
+                } catch (err) {
+                    this._setLiveStatus(
+                        `Camera permission refused (${err?.name || err}). Allow camera access for ` +
+                        `this site, then press Rescan.`, true);
+                }
+            }
+
+            this._videoDevices = vids;
             const sel = this.container.querySelector('#cal-device');
             if (!sel) return;
-            if (this._videoDevices.length) {
-                sel.innerHTML = this._videoDevices
+            if (vids.length) {
+                const keep = sel.value;
+                sel.innerHTML = vids
                     .map((d, i) => `<option value="${d.deviceId}">${this._esc(d.label || `Camera ${i + 1}`)}</option>`)
                     .join('');
+                if (keep && vids.some(d => d.deviceId === keep)) sel.value = keep;
+            }
+            if (vids.length && vids.every(d => !d.label)) {
+                this._setLiveStatus('Cameras found but unnamed - press Rescan and allow access ' +
+                                    'to see which is which.', true);
             }
         } catch { /* ignore */ }
     }
@@ -234,11 +306,18 @@ export class CalibratePage {
         this._stopStream();
         const sel = this.container.querySelector('#cal-device');
         const deviceId = sel?.value || undefined;
+        // Resolution is a property of the CAPTURE REQUEST, not of the camera - a camera utility
+        // like Logi Tune sets field of view, focus and exposure, but the frame size comes from
+        // whoever opens the stream. Requested as 'ideal' rather than 'exact' so an unsupported
+        // size degrades instead of failing outright; the delivered size is reported below, and a
+        // profile records whatever actually arrived.
+        const resSel = this.container.querySelector('#cal-res');
+        const [rw, rh] = (resSel?.value || '1920x1080').split('x').map(Number);
         const constraints = {
             video: {
                 deviceId: deviceId ? { exact: deviceId } : undefined,
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
+                width: { ideal: rw },
+                height: { ideal: rh },
             },
             audio: false,
         };
@@ -253,7 +332,17 @@ export class CalibratePage {
         this.container.querySelector('#cal-capture').disabled = false;
         this.container.querySelector('#cal-stop-cam').disabled = false;
         this.container.querySelector('#cal-start-cam').disabled = true;
-        this._setLiveStatus('Camera live — point it at the board and capture from several angles.');
+        // Show the resolution ACTUALLY delivered. width/height are requested as 'ideal', which
+        // browsers treat as a hint - a camera that hands back 1280x720 would be calibrated at
+        // 720p, and the resolution gate then rejects every 1080p capture at the rig.
+        const track = this._stream.getVideoTracks()[0];
+        const st = track?.getSettings?.() || {};
+        const res = (st.width && st.height) ? `${st.width}x${st.height}` : 'unknown resolution';
+        const warn = (st.width && st.width < rw);
+        this._setLiveStatus(
+            `Camera live at ${res}${warn ? ` - LOWER than the ${rw}x${rh} requested; the profile `
+            + 'will record what arrived, and captures must later match it' : ''} - point it at the `
+            + 'board and capture from several angles.', warn);
         // Labels may now be available; refresh the device list.
         this._enumerateDevices();
     }
@@ -317,6 +406,9 @@ export class CalibratePage {
             blob,
             url: URL.createObjectURL(blob),
             corners: detection.corners || 0,
+            markers: detection.markers || 0,
+            imageSize: detection.image_size || null,
+            suggestion: detection.suggestion || null,
             ok: !!detection.detected,
             name: blob.name || 'image',
         };
@@ -326,7 +418,7 @@ export class CalibratePage {
             this._setLiveStatus(
                 frame.ok
                     ? `Kept — ${frame.corners} corners. ${this._frames.filter(f => f.ok).length} good view(s) so far.`
-                    : `Weak view — only ${frame.corners} corners. Try better coverage/lighting.`,
+                    : this._weakViewAdvice(frame),
                 !frame.ok
             );
         }

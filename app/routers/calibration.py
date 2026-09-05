@@ -198,17 +198,44 @@ async def detect(
     raw = await frame.read()
     img = _decode_image(raw, frame.filename or "frame")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    corners, ids = _detect_charuco(detector, gray)
+    # Report MARKERS as well as corners. The two fail for different reasons and the difference is
+    # the whole diagnosis: markers decode against the DICTIONARY, corners against the LAYOUT. So
+    # "27 markers, 0 corners" means the squares_x/squares_y are wrong, while "0 markers" means the
+    # image is at fault - too small, soft, or the wrong dictionary. Reporting only corners sent
+    # two people hunting lighting problems on a perfectly good frame.
+    corners, ids, _mc, marker_ids = charuco.detect_board_detailed(detector, gray)
+    n_markers = 0 if marker_ids is None else int(len(marker_ids))
 
     n = 0 if ids is None else int(len(ids))
+
+    # If the layout is wrong, the commonest cause by far is X and Y transposed - the board is
+    # described by its long side and the fields are easy to fill in the order you read them. So
+    # try the swap and say so outright, rather than leaving the user to spot two numbers.
+    suggestion = None
+    if n == 0 and n_markers > 0 and squares_x != squares_y:
+        try:
+            alt = _build_board(squares_y, squares_x, square_mm, marker_mm, dictionary)
+            alt_corners, alt_ids = _detect_charuco(charuco.make_detector(alt), gray)
+            if alt_ids is not None and len(alt_ids) > 0:
+                suggestion = {
+                    "squares_x": squares_y, "squares_y": squares_x,
+                    "corners": int(len(alt_ids)),
+                    "message": ("Squares X and Y look transposed: %dx%d finds %d corners."
+                                % (squares_y, squares_x, len(alt_ids))),
+                }
+        except Exception:                                # pragma: no cover - advisory only
+            suggestion = None
+
     total_corners = (squares_x - 1) * (squares_y - 1)
     coverage = round(n / total_corners, 3) if total_corners else 0.0
     return {
         "detected": n >= MIN_CORNERS_PER_VIEW,
         "corners": n,
+        "markers": n_markers,
         "total_corners": total_corners,
         "coverage": coverage,
         "image_size": [int(img.shape[1]), int(img.shape[0])],
+        "suggestion": suggestion,
     }
 
 
