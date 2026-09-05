@@ -115,7 +115,8 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
            light=(0.3, -0.4, -0.86), noise: float = 2.0, blur: int = 3,
            sun=(0.28, 0.34, 0.90), shadow: float = 0.42, soft: int = 25,
            paper: int = 196, ink: int = 55, ambient: float = 40.0,
-           diffuse: float = 95.0, seed: int = 0) -> np.ndarray:
+           diffuse: float = 95.0, seed: int = 0,
+           specular: float = 0.0, shininess: float = 40.0) -> np.ndarray:
     """One synthetic photograph: white paper, the ChArUco board, and the shaded part."""
     w, h = int(view["width"]), int(view["height"])
     K = np.asarray(profile["K"], np.float64).reshape(3, 3)
@@ -221,8 +222,26 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
         n = n / np.maximum(ln, 1e-9)
         l = np.asarray(light, np.float64)
         l = l / np.linalg.norm(l)
-        # Grey paint, like the print: ambient plus a soft diffuse term, no specular.
+        # Diffuse is VIEW-INDEPENDENT: both cameras see the same brightness on a given facet,
+        # which is what lets stereo match shading at all.
         shade = ambient + diffuse * np.abs(n @ l)
+
+        # Specular is VIEW-DEPENDENT, and that is precisely why it threatens stereo. A highlight
+        # sits where the surface happens to mirror the light towards THIS camera, so it appears in
+        # a different place in each image and is not a feature of the surface at all. A matcher
+        # cannot tell it from texture, and will happily correlate two highlights that correspond
+        # to different points on the object.
+        #
+        # The 1:5 print is matte plastic so the rig cannot test this; bare steel is specular, so
+        # the cell will meet it on day one. Blinn-Phong halfway vector, per facet.
+        if specular > 0.0:
+            cam_centre = (-R_cam.T @ tc).ravel()
+            vdir = cam_centre[None, :] - wtri.mean(axis=1)
+            vdir /= np.maximum(np.linalg.norm(vdir, axis=1, keepdims=True), 1e-9)
+            half = vdir + l[None, :]
+            half /= np.maximum(np.linalg.norm(half, axis=1, keepdims=True), 1e-9)
+            shade = shade + specular * 255.0 * np.abs(np.sum(n * half, axis=1)) ** shininess
+        shade = np.clip(shade, 0, 255)
         uv, _ = cv2.projectPoints(wtri.reshape(-1, 1, 3), rc, tc, K, dist)
         uv = uv.reshape(-1, 3, 2)
         for i in np.argsort(-z.mean(axis=1)):                     # far first
@@ -282,6 +301,11 @@ def main() -> int:
     ap.add_argument("--ink", type=int, default=55, help="board black level (rig measures ~57)")
     ap.add_argument("--ambient", type=float, default=40.0)
     ap.add_argument("--diffuse", type=float, default=95.0)
+    ap.add_argument("--specular", type=float, default=0.0,
+                    help="view-dependent highlight strength, 0-1. The 1:5 print is "
+                         "matte so 0 matches it; bare steel is specular and the cell "
+                         "will meet that, so raise it to predict the real case.")
+    ap.add_argument("--shininess", type=float, default=40.0)
     args = ap.parse_args()
 
     if not args.pose and not args.from_fit:
@@ -318,7 +342,8 @@ def main() -> int:
         img = render(tris, rvec, tvec, v, board, profile, noise=args.noise, blur=args.blur,
                      sun=tuple(float(t) for t in args.sun.split(",")),
                      shadow=args.shadow, soft=args.soft, paper=args.paper, ink=args.ink,
-                     ambient=args.ambient, diffuse=args.diffuse, seed=args.seed)
+                     ambient=args.ambient, diffuse=args.diffuse, seed=args.seed,
+                     specular=args.specular, shininess=args.shininess)
         p = os.path.join(args.out, "%s_%s_synth.png" % (name, v["tag"]))
         cv2.imwrite(p, img)
         written.append(p)

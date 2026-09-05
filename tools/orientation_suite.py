@@ -107,11 +107,12 @@ def pose_at(tris, r0, t0, centroid, yaw_deg, roll_deg, seat=None):
 
 
 def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, proj,
-           distinct=None):
+           distinct=None, spec=0.0):
     """One cell: render, match, and score the four roll hypotheses. Returns (winner, scores, n)."""
     imgs = []
     for v in (left, right):
-        im = SC.render(tris, rvec, tvec, v, board, profile, shadow=0.35, noise=1.5)
+        im = SC.render(tris, rvec, tvec, v, board, profile, shadow=0.35, noise=1.5,
+                       specular=spec)
         if lit:
             im = speckle(im, tris, rvec, tvec, v, profile, grain_mm=grain, proj=proj)
         imgs.append(im)
@@ -158,6 +159,8 @@ def main() -> int:
                          "somewhere different relative to its origin, so borrowing the pose puts "
                          "a foreign part off-frame - where the segmenter grabs the ChArUco board "
                          "instead and the cloud is of the board, not the part.")
+    ap.add_argument("--specular", type=float, default=0.0,
+                    help="0 matches the matte 1:5 print; ~0.5 approximates bare steel")
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
 
@@ -211,7 +214,8 @@ def main() -> int:
             for yaw in yaws:
                 rvec, tvec = pose_at(tris, r0, t0, centroid, yaw, roll, seat)
                 win, scores, n = decide(tris, rvec, tvec, left, right, board, profile,
-                                        args.baseline, args.grain, lit, proj, distinct)
+                                        args.baseline, args.grain, lit, proj, distinct,
+                                        args.specular)
                 if win is None:
                     rows.append({"light": "on" if lit else "off", "roll": roll, "yaw": yaw,
                                  "points": 0, "winner": "", "correct": "", "margin": ""})
