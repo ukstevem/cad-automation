@@ -104,6 +104,26 @@ def rectified_cloud(imA, imB, rvecA, tvecA, rvecB, tvecB, Ka, da, Kb, db, z_hint
 
 
 
+def camera_labels(path=None):
+    """
+    Serial -> human label (A / B / C). Printing serials invites mis-pairing on a busy day.
+
+    The tracked copy lives beside the tools; outputs/calibration/ is gitignored, so a map left
+    only there would be lost on a fresh clone. A local file still wins if present, so the rig can
+    override without a commit.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in ([path] if path else []) + ["outputs/calibration/cameras.json",
+                                            os.path.join(here, "cameras.json")]:
+        try:
+            with open(cand, "r", encoding="utf-8") as fh:
+                return {k: v.get("label", k)
+                        for k, v in json.load(fh).get("cameras", {}).items()}
+        except Exception:
+            continue
+    return {}
+
+
 def serial_of(filename: str):
     """
     The camera serial out of a capture filename, without mistaking the date for it.
@@ -177,6 +197,11 @@ def main() -> int:
     board = charuco.build_board_from_config(default_profile["board"])
     det = charuco.make_detector(board)
 
+    labels = camera_labels()
+
+    def name(serial):
+        return "%s (%s)" % (labels.get(serial, "?"), serial)
+
     cams = collect(args.captures)
     if len(cams) < 2:
         print("need at least two cameras with BOTH _off_ and _on_ frames in %s" % args.captures,
@@ -194,11 +219,11 @@ def main() -> int:
                 break
         rc, tc, _img = board_pose_of(paths["off"], prof, board, det)
         if rc is None:
-            print("  %s: board not found in the projector-OFF frame - skipped" % serial)
+            print("  %s: board not found in the projector-OFF frame - skipped" % name(serial))
             continue
         solved[serial] = {"rvec": rc, "tvec": tc, "profile": prof, "paths": paths}
-        print("  %s: board solved, camera %.0f mm from board origin"
-              % (serial, float(np.linalg.norm(tc))))
+        print("  %s: board solved, %.0f mm from board origin"
+              % (name(serial), float(np.linalg.norm(tc))))
     if len(solved) < 2:
         print("fewer than two cameras solved the board", file=sys.stderr)
         return 2
