@@ -52,8 +52,50 @@ from depth_discriminability import rotate_about_own_axis  # noqa: E402
 ROLLS = [0.0, 90.0, 180.0, 270.0]
 
 
-def pose_at(tris, r0, t0, centroid, yaw_deg, roll_deg):
+def self_symmetries(tris, rolls, tol_frac: float = 0.01):
+    """
+    Which of the candidate rolls map the part ONTO ITSELF, and are therefore meaningless to ask.
+
+    A square-section bar rolled 90 degrees is the same object in the same place. No sensor can
+    distinguish that, and neither counting it correct nor counting it wrong says anything about
+    the method - the question simply has no answer. Discovered the hard way: a plain bar scored
+    100% because every hypothesis tied and max() happened to return the true one first.
+
+    Compared as a point cloud: roll the sampled points about the long axis and measure how far
+    each lands from the original shape, in units of the part's own length.
+    """
+    from scipy.spatial import cKDTree
+
+    pts = np.vstack([tris.reshape(-1, 3), tris.mean(axis=1)])
+    if len(pts) > 4000:
+        pts = pts[np.random.default_rng(0).choice(len(pts), 4000, replace=False)]
+    c = pts.mean(axis=0)
+    d = pts - c
+    evals, evecs = np.linalg.eigh(np.cov(d.T))
+    axis = evecs[:, int(np.argmax(evals))]
+    tol = tol_frac * float(np.ptp(d @ axis))
+    tree = cKDTree(pts)
+
+    out = {}
+    for deg in rolls:
+        if deg == 0.0:
+            out[deg] = True
+            continue
+        rv = axis.reshape(3, 1) * np.radians(deg)
+        R, _ = cv2.Rodrigues(rv)
+        moved = (R @ d.T).T + c
+        dist, _ = tree.query(moved)
+        out[deg] = bool(np.median(dist) < tol)      # True == indistinguishable from the original
+    return out
+
+
+def pose_at(tris, r0, t0, centroid, yaw_deg, roll_deg, seat=None):
     """The true pose: verified rig pose, turned by yaw on the bench, then rolled on its own axis."""
+    if seat is not None:
+        rvec, tvec = SC.seat_on_board(tris, seat[0], seat[1], yaw_deg, 0.0)
+        if roll_deg:
+            rvec, tvec = rotate_about_own_axis(tris, rvec, tvec, "long", roll_deg)
+        return rvec, tvec
     Rz, _ = cv2.Rodrigues(np.array([[0.0], [0.0], [np.radians(yaw_deg)]]))
     R0, _ = cv2.Rodrigues(r0)
     centre = R0 @ centroid + t0
@@ -64,7 +106,8 @@ def pose_at(tris, r0, t0, centroid, yaw_deg, roll_deg):
     return rvec, tvec
 
 
-def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, proj):
+def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, proj,
+           distinct=None):
     """One cell: render, match, and score the four roll hypotheses. Returns (winner, scores, n)."""
     imgs = []
     for v in (left, right):
@@ -86,7 +129,7 @@ def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, 
     cloud = to_world(cloud_cam[on], left)
 
     scores = {}
-    for d in ROLLS:
+    for d in (distinct or ROLLS):
         if d == 0.0:
             rv, tv = rvec, tvec
         else:
@@ -108,6 +151,13 @@ def main() -> int:
     ap.add_argument("--yaw-step", type=float, default=45.0)
     ap.add_argument("--rolls", default="0,90,180,270")
     ap.add_argument("--light", default="on,off", help="which lighting conditions to run")
+    ap.add_argument("--seat", default=None, metavar="X,Y",
+                    help="seat the part's CENTROID here (board mm) instead of reusing the fit's "
+                         "pose. REQUIRED for any mesh other than the one the fit was solved for: "
+                         "a fit positions the object ORIGIN, and every mesh has its geometry "
+                         "somewhere different relative to its origin, so borrowing the pose puts "
+                         "a foreign part off-frame - where the segmenter grabs the ChArUco board "
+                         "instead and the cloud is of the board, not the part.")
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
 
@@ -129,8 +179,26 @@ def main() -> int:
     centroid = np.vstack([tris.reshape(-1, 3),
                           tris.mean(axis=1)]).mean(axis=0).reshape(3, 1)
 
+    seat = None
+    if args.seat:
+        seat = [float(v) for v in args.seat.split(",")]
+        print("seating the part's centroid at (%.0f, %.0f) on the board" % (seat[0], seat[1]))
     yaws = [y for y in np.arange(0.0, 360.0, args.yaw_step)]
     rolls = [float(r) for r in args.rolls.split(",")]
+    # Drop hypotheses that are self-symmetries: they are the same object in the same place, so
+    # scoring them says nothing about the method either way.
+    sym = self_symmetries(tris, rolls)
+    distinct = [0.0] + [d for d in rolls if d != 0.0 and not sym[d]]
+    dropped = [d for d in rolls if d != 0.0 and sym[d]]
+    if dropped:
+        print("self-symmetric rolls, excluded as unanswerable: %s"
+              % ", ".join("%.0f deg" % d for d in dropped))
+    if len(distinct) < 2:
+        print("this part is rotationally symmetric about its long axis - roll is UNDEFINED,")
+        print("not merely hard. Nothing to test.")
+        return 0
+    print("hypotheses actually distinguishable: %s"
+          % ", ".join("%.0f" % d for d in distinct))
     lights = [s.strip() == "on" for s in args.light.split(",")]
     print("suite: %d yaw x %d roll x %d lighting = %d captures"
           % (len(yaws), len(rolls), len(lights), len(yaws) * len(rolls) * len(lights)))
@@ -138,26 +206,31 @@ def main() -> int:
     rows = []
     for lit in lights:
         tag = "projector ON " if lit else "projector OFF"
-        ok = tot = 0
+        ok = tot = amb = 0
         for roll in rolls:
             for yaw in yaws:
-                rvec, tvec = pose_at(tris, r0, t0, centroid, yaw, roll)
+                rvec, tvec = pose_at(tris, r0, t0, centroid, yaw, roll, seat)
                 win, scores, n = decide(tris, rvec, tvec, left, right, board, profile,
-                                        args.baseline, args.grain, lit, proj)
+                                        args.baseline, args.grain, lit, proj, distinct)
                 if win is None:
                     rows.append({"light": "on" if lit else "off", "roll": roll, "yaw": yaw,
                                  "points": 0, "winner": "", "correct": "", "margin": ""})
                     continue
                 tot += 1
-                good = (win == 0.0)          # hypothesis 0 = the pose as rendered = correct
-                ok += int(good)
                 others = [v for k, v in scores.items() if k != 0.0]
                 margin = scores[0.0] - max(others) if others else 0.0
+                # A tie is not a win. Requiring a real margin stops the first-key-wins behaviour
+                # of max() from silently crediting hypotheses the data cannot separate.
+                good = (win == 0.0) and margin > 1e-3
+                ok += int(good)
+                if abs(margin) <= 1e-3:
+                    amb += 1
                 rows.append({"light": "on" if lit else "off", "roll": roll, "yaw": yaw,
                              "points": n, "winner": win, "correct": int(good),
                              "margin": round(margin, 4)})
         rate = 100.0 * ok / tot if tot else float("nan")
-        print("  %s   %3d/%-3d correct  (%.0f%%)" % (tag, ok, tot, rate))
+        print("  %s   %3d/%-3d correct (%.0f%%)   %d too close to call"
+              % (tag, ok, tot, rate, amb))
 
     print("")
     print("chance is 25%% with four hypotheses.")
