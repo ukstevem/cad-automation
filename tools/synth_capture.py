@@ -237,7 +237,13 @@ def render(tris: np.ndarray, rvec_obj, tvec_obj, view: dict, board, profile: dic
         img = cv2.GaussianBlur(img, (blur | 1, blur | 1), 0)
     if noise > 0:
         img = np.clip(img.astype(np.float32)
-                      + np.random.default_rng(seed).normal(0, noise, img.shape), 0, 255).astype(np.uint8)
+                      # Per-VIEW seed. Sensor noise is independent between cameras; seeding both
+                      # identically paints the same grain at the same pixel in each image, which
+                      # is unphysical and gives a stereo matcher a correlated signal fixed to the
+                      # image plane rather than to the surface.
+                      + np.random.default_rng(
+                          (seed * 1000003) ^ (hash(str(view.get("tag", ""))) & 0xFFFFF)
+                      ).normal(0, noise, img.shape), 0, 255).astype(np.uint8)
     return img
 
 
