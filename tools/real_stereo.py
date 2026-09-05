@@ -50,6 +50,80 @@ from stereo_roll_test import score_against  # noqa: E402
 
 ROLLS = [0.0, 90.0, 180.0, 270.0]
 
+def rectified_cloud(imA, imB, rvecA, tvecA, rvecB, tvecB, Ka, da, Kb, db, z_hint=None):
+    """
+    Depth from ANY two calibrated views, via proper rectification.
+
+    The fast path used elsewhere assumes the pair is already rectified - parallel image planes,
+    identical intrinsics - which holds for a virtual sideways offset and fails completely for two
+    real cameras aimed inward at 50 degrees. This does it properly: relative pose from the two
+    board solutions, stereoRectify, remap, SGBM, reproject. Returns points in the frame of camera
+    A, or None if matching found nothing.
+    """
+    h, w = imA.shape[:2]
+    Ra, _ = cv2.Rodrigues(np.asarray(rvecA, np.float64).reshape(3, 1))
+    Rb, _ = cv2.Rodrigues(np.asarray(rvecB, np.float64).reshape(3, 1))
+    ta = np.asarray(tvecA, np.float64).reshape(3, 1)
+    tb = np.asarray(tvecB, np.float64).reshape(3, 1)
+    R_rel = Rb @ Ra.T
+    T_rel = tb - R_rel @ ta
+    baseline = float(np.linalg.norm(T_rel))
+
+    R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(Ka, da, Kb, db, (w, h), R_rel, T_rel,
+                                                flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+    m1x, m1y = cv2.initUndistortRectifyMap(Ka, da, R1, P1, (w, h), cv2.CV_32FC1)
+    m2x, m2y = cv2.initUndistortRectifyMap(Kb, db, R2, P2, (w, h), cv2.CV_32FC1)
+    recA = cv2.remap(imA, m1x, m1y, cv2.INTER_LINEAR)
+    recB = cv2.remap(imB, m2x, m2y, cv2.INTER_LINEAR)
+
+    fx_r = float(P1[0, 0])
+    if z_hint is None:
+        lo, span = 0, 256
+    else:
+        d_far = fx_r * baseline / float(np.percentile(z_hint, 99))
+        d_near = fx_r * baseline / float(np.percentile(z_hint, 1))
+        lo = max(0, int(np.floor(d_far / 16.0) * 16) - 16)
+        span = max(16, int(np.ceil((d_near * 1.35 - lo) / 16.0) * 16))
+    blk = 7
+    sgbm = cv2.StereoSGBM_create(minDisparity=lo, numDisparities=span, blockSize=blk,
+                                 P1=8 * blk * blk, P2=32 * blk * blk, disp12MaxDiff=1,
+                                 uniquenessRatio=10, speckleWindowSize=100, speckleRange=2,
+                                 mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+    disp = sgbm.compute(cv2.cvtColor(recA, cv2.COLOR_BGR2GRAY),
+                        cv2.cvtColor(recB, cv2.COLOR_BGR2GRAY)).astype(np.float32) / 16.0
+    valid = disp > (lo + 0.5)
+    subj = image_edges.segment_subject(recA, grow_px=0)
+    if subj is not None:
+        valid &= subj > 0
+    if valid.sum() < 300:
+        return None, recA, int(valid.sum())
+    pts3 = cv2.reprojectImageTo3D(disp, Q)[valid].reshape(-1, 3)
+    ok = np.isfinite(pts3).all(axis=1) & (np.abs(pts3[:, 2]) < 1e5)
+    cloud_cam = (R1.T @ pts3[ok].T).T                  # rectified -> camera A frame
+    return cloud_cam, recA, int(ok.sum())
+
+
+
+def serial_of(filename: str):
+    """
+    The camera serial out of a capture filename, without mistaking the date for it.
+
+    Capture names look like ``roll0_off_9B17236C_20260907_120000.png``. A naive search for eight
+    hex characters also matches ``20260907`` - every digit is a valid hex digit - so on a name
+    where the date came first it would key the whole pipeline on the timestamp, silently see one
+    camera instead of three, and pick the wrong stereo pair.
+
+    Both known cameras happen to fit the same shape: the C920s report 52FD1B1F and B68DE55F, the
+    Brio 9B17236C. So the rule is eight hex characters that are NOT a plausible date.
+    """
+    for tok in re.split(r"[_.\-]", os.path.basename(filename)):
+        if len(tok) != 8 or not re.fullmatch(r"[0-9A-Fa-f]{8}", tok):
+            continue
+        if tok.isdigit() and tok[:2] in ("19", "20"):     # 20260907 - a date, not a serial
+            continue
+        return tok.upper()
+    return None
+
 
 def collect(capdir: str):
     """Pair each camera's projector-OFF and projector-ON frames, keyed by serial."""
@@ -64,10 +138,10 @@ def collect(capdir: str):
         off = "_off_" in base or "_off." in base
         if not (lit or off):
             continue
-        m = re.search(r"([0-9A-F]{8})", base)          # C920 serials are 8 hex chars
-        if not m:
+        serial = serial_of(base)
+        if not serial:
             continue
-        cams.setdefault(m.group(1), {})["on" if lit else "off"] = path
+        cams.setdefault(serial, {})["on" if lit else "off"] = path
     return {k: v for k, v in cams.items() if "on" in v and "off" in v}
 
 

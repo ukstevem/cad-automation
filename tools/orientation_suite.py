@@ -47,6 +47,7 @@ from app.services import charuco, image_edges, multiview_fit as MVF, visibility 
 import synth_capture as SC  # noqa: E402
 from stereo_preview import offset_camera, projector_pose, speckle  # noqa: E402
 from stereo_roll_test import disparity_range, stereo_cloud, to_world, score_against  # noqa: E402
+from real_stereo import rectified_cloud  # noqa: E402
 from depth_discriminability import rotate_about_own_axis  # noqa: E402
 
 ROLLS = [0.0, 90.0, 180.0, 270.0]
@@ -107,7 +108,7 @@ def pose_at(tris, r0, t0, centroid, yaw_deg, roll_deg, seat=None):
 
 
 def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, proj,
-           distinct=None, spec=0.0):
+           distinct=None, spec=0.0, rig_pair=False):
     """One cell: render, match, and score the four roll hypotheses. Returns (winner, scores, n)."""
     imgs = []
     for v in (left, right):
@@ -116,6 +117,31 @@ def decide(tris, rvec, tvec, left, right, board, profile, baseline, grain, lit, 
         if lit:
             im = speckle(im, tris, rvec, tvec, v, profile, grain_mm=grain, proj=proj)
         imgs.append(im)
+
+    if rig_pair:
+        # Two real cameras aimed inward are NOT a rectified pair; go through stereoRectify, the
+        # same path the real-capture tool uses. The fast formula would silently return nonsense.
+        Ra, _ = cv2.Rodrigues(np.asarray(left["rvec_cam"], np.float64).reshape(3, 1))
+        d, _ = VIS.depth_buffer(tris, rvec, tvec, left, downscale=1)
+        zh = d[d < VIS.FAR / 2]
+        K = np.asarray(profile["K"], np.float64).reshape(3, 3)
+        dc = np.asarray(profile["dist"], np.float64).reshape(-1, 1)
+        cc, _rec, n = rectified_cloud(imgs[0], imgs[1],
+                                      left["rvec_cam"], left["tvec_cam"],
+                                      right["rvec_cam"], right["tvec_cam"],
+                                      K, dc, K, dc, z_hint=zh if len(zh) else None)
+        if cc is None or len(cc) < 500:
+            return None, {}, 0
+        cloud = (Ra.T @ (cc.T - np.asarray(left["tvec_cam"], np.float64).reshape(3, 1))).T
+        scores = {}
+        for dd in (distinct or ROLLS):
+            if dd == 0.0:
+                rv, tv = rvec, tvec
+            else:
+                rv, tv = rotate_about_own_axis(tris, rvec, tvec, "long", dd)
+            _m, _mn, _n, near = score_against(tris, rv, tv, cloud)
+            scores[dd] = near
+        return max(scores, key=scores.get), scores, len(cloud)
 
     lo, span = disparity_range(tris, rvec, tvec, left, profile, baseline)
     cloud_cam, valid, _disp = stereo_cloud(imgs[0], imgs[1], left, profile, baseline,
@@ -161,6 +187,10 @@ def main() -> int:
                          "instead and the cloud is of the board, not the part.")
     ap.add_argument("--specular", type=float, default=0.0,
                     help="0 matches the matte 1:5 print; ~0.5 approximates bare steel")
+    ap.add_argument("--rig-pair", action="store_true",
+                    help="use the rig's two real cameras as the stereo pair instead of a virtual "
+                         "narrow-baseline one. Wide separation triangulates well and matches "
+                         "badly; this measures which effect wins.")
     ap.add_argument("--csv", default=None)
     args = ap.parse_args()
 
@@ -170,7 +200,23 @@ def main() -> int:
     views = SC.rig_from_captures(args.rig, profile, board, det)
     for v in views:
         v["K"], v["dist"] = profile["K"], profile["dist"]
-    left, right = views[0], offset_camera(views[0], args.baseline)
+    if args.rig_pair:
+        # Use the rig's OWN two cameras as the stereo pair, rather than a virtual narrow offset.
+        # This is the honest test of a wide-baseline pair: good for pose, questionable for
+        # correlation matching, and the difference is exactly what needs measuring.
+        left, right = views[0], views[1]
+        Ra, _ = cv2.Rodrigues(np.asarray(left["rvec_cam"], np.float64).reshape(3, 1))
+        Rb, _ = cv2.Rodrigues(np.asarray(right["rvec_cam"], np.float64).reshape(3, 1))
+        ca = -Ra.T @ np.asarray(left["tvec_cam"], np.float64).reshape(3, 1)
+        cb = -Rb.T @ np.asarray(right["tvec_cam"], np.float64).reshape(3, 1)
+        args.baseline = float(np.linalg.norm(ca - cb))
+        za = (Ra.T @ np.array([[0.], [0.], [1.]])).ravel()
+        zb = (Rb.T @ np.array([[0.], [0.], [1.]])).ravel()
+        sep = np.degrees(np.arccos(np.clip(abs(float(za @ zb)), 0, 1)))
+        print("using the RIG pair: baseline %.0f mm, optical axes %.1f deg apart"
+              % (args.baseline, sep))
+    else:
+        left, right = views[0], offset_camera(views[0], args.baseline)
     proj = projector_pose(views, profile, board=board)
 
     tris = VIS.load_stl(args.mesh)
@@ -215,7 +261,7 @@ def main() -> int:
                 rvec, tvec = pose_at(tris, r0, t0, centroid, yaw, roll, seat)
                 win, scores, n = decide(tris, rvec, tvec, left, right, board, profile,
                                         args.baseline, args.grain, lit, proj, distinct,
-                                        args.specular)
+                                        args.specular, args.rig_pair)
                 if win is None:
                     rows.append({"light": "on" if lit else "off", "roll": roll, "yaw": yaw,
                                  "points": 0, "winner": "", "correct": "", "margin": ""})
