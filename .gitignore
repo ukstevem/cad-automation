@@ -84,6 +84,9 @@ iphone/
 *.ifc
 *.IFC
 
+# Generated deliverables (BOM/NC/DXF snapshots — regenerate, don't commit)
+deliverables/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

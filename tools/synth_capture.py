@@ -45,6 +45,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cv2  # noqa: E402
 
@@ -280,6 +281,11 @@ def main() -> int:
                          "turn45 that is turn45_alt, not the chosen fit.")
     ap.add_argument("--out", required=True)
     ap.add_argument("--noise", type=float, default=2.0)
+    ap.add_argument("--speckle-strength", type=float, default=0.0,
+                    help="paint projector speckle over the WHOLE scene - part, floor and board - "
+                         "as a real projector does. 0 = projector off. The rig measured ~0.55.")
+    ap.add_argument("--speckle-grain-mm", type=float, default=4.0,
+                    help="blob size on the surface; the real projector measured 3.95 mm")
     ap.add_argument("--code-version", default=None,
                     help="record which build produced these samples. The container does not "
                          "bind-mount .git, so it cannot read this itself - pass it from the host "
@@ -344,6 +350,16 @@ def main() -> int:
                      shadow=args.shadow, soft=args.soft, paper=args.paper, ink=args.ink,
                      ambient=args.ambient, diffuse=args.diffuse, seed=args.seed,
                      specular=args.specular, shininess=args.shininess)
+        if args.speckle_strength > 0:
+            from stereo_preview import projector_pose, speckle_scene
+            # rig_from_captures returns poses only; the depth buffer needs intrinsics too.
+            for _v in views:
+                _v.setdefault("K", profile["K"])
+                _v.setdefault("dist", profile["dist"])
+            _proj = projector_pose(views, profile, board=board)
+            img = speckle_scene(img, tris, rvec, tvec, v, profile,
+                                grain_mm=args.speckle_grain_mm,
+                                strength=args.speckle_strength, proj=_proj)
         p = os.path.join(args.out, "%s_%s_synth.png" % (name, v["tag"]))
         cv2.imwrite(p, img)
         written.append(p)
@@ -375,6 +391,8 @@ def main() -> int:
             "soft": args.soft, "paper": args.paper, "ink": args.ink,
             "ambient": args.ambient, "diffuse": args.diffuse,
             "noise": args.noise, "blur": args.blur, "seed": args.seed,
+            "speckle_strength": args.speckle_strength,
+            "speckle_grain_mm": args.speckle_grain_mm,
         },
         "profile": os.path.abspath(args.profile),
         "code_commit": args.code_version or commit,

@@ -143,6 +143,76 @@ def projector_pose(views, profile, target=None, board=None, margin_mm: float = 1
     return {"rvec": rvec, "tvec": tp, "K": Kp, "size": (pw, ph)}
 
 
+def speckle_scene(img, tris, rvec, tvec, view, profile, grain_mm=3.0, strength=0.55,
+                  seed=3, proj=None, views=None):
+    """
+    Speckle the WHOLE scene - the part AND the board plane it stands on.
+
+    A projector does not illuminate selectively: everything inside its cone gets the pattern,
+    including the ChArUco board. Speckling only the part was convenient and unrealistic, and it
+    made the board look untouched in every synthetic frame - which is precisely the thing the
+    two-shot capture protocol exists to work around.
+
+    Points on the part come from its depth buffer; everywhere else the camera ray is intersected
+    with the board plane (z = 0). Both then project into the projector and sample the same slide,
+    so the pattern is continuous across the boundary as it would be in reality.
+    """
+    h, w = img.shape[:2]
+    K = np.asarray(view.get("K", profile["K"]), np.float64).reshape(3, 3)
+    R, _ = cv2.Rodrigues(np.asarray(view["rvec_cam"], np.float64).reshape(3, 1))
+    t = np.asarray(view["tvec_cam"], np.float64).reshape(3, 1)
+    cam_centre = (-R.T @ t).ravel()
+
+    depth, _sc = VIS.depth_buffer(tris, rvec, tvec, view, downscale=1)
+    ys, xs = np.mgrid[0:h, 0:w]
+    xs = xs.ravel(); ys = ys.ravel()
+    xn = (xs - K[0, 2]) / K[0, 0]
+    yn = (ys - K[1, 2]) / K[1, 1]
+    dirs_cam = np.stack([xn, yn, np.ones_like(xn)], axis=1)
+    dirs_world = (R.T @ dirs_cam.T).T                    # ray directions in the board frame
+
+    z = depth.ravel()
+    on_part = z < VIS.FAR / 2
+    world = np.zeros((len(xs), 3))
+    # part points: at the rendered depth along the ray
+    if on_part.any():
+        cam_pts = dirs_cam[on_part] * z[on_part][:, None]
+        world[on_part] = (R.T @ (cam_pts.T - t)).T
+    # everything else: where the ray meets the board plane z = 0
+    rest = ~on_part
+    if rest.any():
+        dz = dirs_world[rest][:, 2]
+        ok = np.abs(dz) > 1e-9
+        s = np.zeros(rest.sum())
+        s[ok] = -cam_centre[2] / dz[ok]
+        hit = cam_centre[None, :] + dirs_world[rest] * s[:, None]
+        hit[(s <= 0) | ~ok] = np.nan                     # behind the camera or parallel
+        world[rest] = hit
+
+    if proj is None:
+        proj = projector_pose(views or [view], profile)
+    good = np.isfinite(world).all(axis=1)
+    uv = np.full((len(xs), 2), -1.0)
+    if good.any():
+        p, _ = cv2.projectPoints(world[good].reshape(-1, 1, 3), proj["rvec"], proj["tvec"],
+                                 proj["K"], np.zeros((5, 1)))
+        uv[good] = p.reshape(-1, 2)
+    pw, ph = proj["size"]
+    pat = projector_pattern(pw, ph, dot_px=max(1.5, grain_mm), seed=seed)
+    inside = good & (uv[:, 0] >= 0) & (uv[:, 0] < pw) & (uv[:, 1] >= 0) & (uv[:, 1] < ph)
+    val = np.zeros(len(uv), np.float32)
+    if inside.any():
+        # Clamp after rounding: a coordinate at ph-0.4 passes the "< ph" test and then rounds up
+        # to ph, which is one past the end.
+        py = np.clip(np.round(uv[inside, 1]).astype(np.int64), 0, ph - 1)
+        px = np.clip(np.round(uv[inside, 0]).astype(np.int64), 0, pw - 1)
+        val[inside] = pat[py, px]
+    gain = np.where(inside, 1.0 - strength * val, 1.0).reshape(h, w)
+
+    out = img.astype(np.float32) * gain[:, :, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def speckle(img: np.ndarray, tris, rvec, tvec, view, profile,
             grain_mm: float = 2.0, strength: float = 0.55, seed: int = 3,
             proj: dict | None = None, views=None) -> np.ndarray:
