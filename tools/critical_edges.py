@@ -134,7 +134,7 @@ def mesh_feature_edges(tris, crease_deg=25.0, quant=1e-3):
 
 
 def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, tol_mm=2.0,
-                          cache={}):
+                          cache={}, with_world=False):
     """
     Project the model's feature edges into one view and keep the parts the camera can actually see.
 
@@ -183,7 +183,7 @@ def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, 
 
     depth, _ = VIS.depth_buffer(tris, rvec, tvec, view, downscale=1)
     h, w = depth.shape
-    pts, tan, zs = [], [], []
+    pts, tan, zs, w3 = [], [], [], []
     for i in range(len(e)):
         t = np.linspace(0, 1, npx[i] + 1)[:, None]
         p3 = a[i] * (1 - t) + b[i] * t
@@ -207,9 +207,13 @@ def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, 
         pts.append(p2[ok])
         tan.append(np.tile(d / L, (int(ok.sum()), 1)))
         zs.append(cz[ok])
+        w3.append(p3[ok])
     if not pts:
-        return np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0)
-    return np.vstack(pts), np.vstack(tan), np.concatenate(zs)
+        empty = (np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0))
+        return empty + (np.zeros((0, 3)),) if with_world else empty
+    out = (np.vstack(pts), np.vstack(tan), np.concatenate(zs))
+    # The 3D point behind each sample, which a pose refinement needs to form its Jacobian.
+    return out + (np.vstack(w3),) if with_world else out
 
 
 def geometric_edges(tris, rvec, tvec, view, step=4, depth_step_mm=4.0, crease_deg=25.0,
