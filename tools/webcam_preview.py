@@ -230,7 +230,17 @@ Exposure changes below are live and persist on the camera; still re-run
 <script>
 async function ex(tag, delta, absolute) {
   const el = document.getElementById('v_' + tag);
-  const cur = parseInt(el.value, 10);
+  let cur = parseInt(el.value, 10);
+  // The box can be empty before the first poll lands, and NaN+1 is NaN - which was sent to the
+  // camera, rejected, and answered with the value it already had. That is the "it jumps back"
+  // symptom: the click never asked for anything. Ask the camera what it holds before stepping.
+  if (isNaN(cur)) {
+    try {
+      const r0 = await fetch('/ctrl?tag=' + encodeURIComponent(tag));
+      cur = parseInt((await r0.json()).exposure, 10);
+    } catch (e) {}
+  }
+  if (isNaN(cur)) return;
   const want = Math.min(2047, Math.max(3,
       (absolute !== undefined && !isNaN(absolute)) ? absolute : cur + delta));
   const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag) + '&exposure=' + want);
@@ -306,7 +316,7 @@ CAM_BLOCK = """<div class=cam><span class=tag><b>__LABEL__</b> &nbsp;<small>__TA
  <button onclick="ex('__TAG__',-20)" title="much darker">&laquo;</button>
  <button onclick="ex('__TAG__',-4)" title="darker">&minus;&minus;</button>
  <button onclick="ex('__TAG__',-1)" title="one step darker">&minus;</button>
- <input class=v id="v___TAG__" type="number" min="3" max="2047" step="1"
+ <input class=v id="v___TAG__" type="number" min="3" max="2047" step="1" value="__EXPO__"
         onchange="ex('__TAG__',0,parseInt(this.value,10))"
         title="type a value directly - the control takes any integer from 3 to 2047">
  <button onclick="ex('__TAG__',1)" title="one step brighter">+</button>
@@ -323,8 +333,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
+            # Render the camera's CURRENT exposure into the box. Serving it empty left the first
+            # click with nothing to add a step to.
             blocks = "".join(
                 CAM_BLOCK.replace("__TAG__", t).replace("__LABEL__", c.label)
+                       .replace("__EXPO__", str(c.exposure()[1] if c.exposure()[1] is not None else ""))
                 for t, c in CAMERAS.items()
             )
             body = PAGE.replace("__CAMS__", blocks)
