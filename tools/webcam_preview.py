@@ -267,7 +267,7 @@ Exposure changes below are live and persist on the camera; still re-run
 <code>webcam_capture.py lock</code> when you have finished aiming.</header>
 <div class=wrap>__CAMS__</div>
 <script>
-async function req(tag, extra) {
+window.req = async function req(tag, extra) {
   const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag) + (extra || '')
                         + '&_=' + Date.now(), {cache: 'no-store'});
   const j = await r.json();
@@ -278,12 +278,16 @@ async function req(tag, extra) {
     g.value = j.gain; if (gv) gv.textContent = j.gain;
   }
   return j;
-}
+};
 // Ask the SERVER to move a stop. It knows the ladder the camera honours; the page adding one to
 // a number could only ever request a value that snaps back.
-const ex      = (tag, dir)  => req(tag, '&step=' + dir);
-const setexp  = (tag, v)    => isNaN(v) || req(tag, '&exposure=' + v);
-const setgain = (tag, v)    => isNaN(v) || req(tag, '&gain=' + v);
+//
+// Attached to window deliberately. These are called from inline onclick/onchange attributes,
+// whose scope chain does not reliably reach a top-level `const`, so a handler that looks
+// perfectly correct silently does nothing.
+window.ex      = function (tag, dir) { return req(tag, '&step=' + dir); };
+window.setexp  = function (tag, v) { return isNaN(v) ? null : req(tag, '&exposure=' + v); };
+window.setgain = function (tag, v) { return isNaN(v) ? null : req(tag, '&gain=' + v); };
 async function poll() {
   // Show what the CAMERA holds, not what was last asked for - it snaps exposure to its own
   // ladder about a second after a write, so anything else is fiction.

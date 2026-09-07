@@ -75,6 +75,10 @@ CONTROLS = [
     # is free to trade framerate against exposure and move the exposure value underneath you.
     # Observed on both C920s reading 1 while every other auto was properly pinned to manual.
     ("exposure_dynamic_framerate", "exposure_auto_priority"),
+    # Gain belongs here too. With exposure available only in stops, gain is the sole continuous
+    # brightness control, so it carries real settings - and an unrecorded control is one that
+    # silently differs between the calibration shots and the measurement shots.
+    ("gain", "gain"),
     ("white_balance_automatic", "white_balance_temperature_auto"),
     ("white_balance_temperature", "white_balance_temperature"),
     ("sharpness", "sharpness"),
@@ -432,6 +436,10 @@ def cmd_lock(args) -> int:
             for n in names:
                 if n == "sharpness":
                     values[n] = args.sharpness
+        if args.gain is not None:
+            for n in names:
+                if n == "gain":
+                    values[n] = args.gain
         if args.exposure is not None:
             # Auto-metering optimises for the WHOLE frame, and in a test cell a large dark
             # background (a navy wall, the shadowed area beyond the rig) drags the average down
@@ -574,6 +582,11 @@ def main() -> int:
     lock = sub.add_parser("lock", help="settle then pin focus/exposure/white balance")
     lock.add_argument("--sharpness", type=int, default=0,
                       help="force sharpness (default 0 — in-camera sharpening fabricates edges)")
+    lock.add_argument("--gain", type=int, default=None,
+                      help="override gain (0-255). Exposure comes in stops on a C920, so gain is "
+                           "the trim between them - but it amplifies noise rather than gathering "
+                           "light, so use the lowest value that reaches the brightness you need. "
+                           "tools/gain_sweep.py measures this properly.")
     lock.add_argument("--exposure", type=int, default=None,
                       help="override exposure_time_absolute (units of 100us) instead of trusting "
                            "auto-metering. Needed when a large dark background drags the average "
