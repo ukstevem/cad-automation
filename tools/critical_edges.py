@@ -133,7 +133,7 @@ def mesh_feature_edges(tris, crease_deg=25.0, quant=1e-3):
     return edges, faces, n
 
 
-def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, tol_mm=2.0,
+def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, tol_mm=8.0,
                           cache={}, with_world=False):
     """
     Project the model's feature edges into one view and keep the parts the camera can actually see.
@@ -182,6 +182,20 @@ def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, 
     npx = np.maximum(1, np.ceil(np.linalg.norm(pb - pa, axis=1) / step_px)).astype(int)
 
     depth, _ = VIS.depth_buffer(tris, rvec, tvec, view, downscale=1)
+    # Nearest surface in a small neighbourhood, not the single pixel under the sample. A thin
+    # member on a small part rasterises to a few pixels with gaps in it, and a far-side edge
+    # landing in one of those gaps reads the background depth and passes as visible - which is how
+    # back-face lines the camera can never see end up being scored, and counted as failures
+    # because nothing in the photograph could ever confirm them. Taking the minimum over 3x3 keeps
+    # genuine silhouette points (their neighbourhood contains their own surface) while culling
+    # anything with nearer geometry beside it.
+    #
+    # The tolerance here is a VISIBILITY tolerance and has nothing to do with the measurement
+    # tolerance, though both were called tol_mm and I had them at the same value. It must exceed
+    # the thinnest member - a point on the far face of a 5 mm web has that web's near face right
+    # beside it - while staying far below the part's depth, so that geometry on the other side of
+    # the part is still culled. 8 mm sits comfortably between 5 and 116.
+    near = cv2.erode(depth, np.ones((3, 3), np.uint8))
     h, w = depth.shape
     pts, tan, zs, w3 = [], [], [], []
     for i in range(len(e)):
@@ -197,7 +211,7 @@ def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, 
         # Visible means nothing is NEARER here - not that the buffer agrees. A silhouette point
         # sits exactly on the boundary and rounds to a background pixel as often as not, so an
         # equality test culls precisely the edges that matter most.
-        ok[ok] &= (cz[ok] - depth[y[ok], x[ok]]) < tol_mm
+        ok[ok] &= (cz[ok] - near[y[ok], x[ok]]) < tol_mm
         if not ok.any():
             continue
         d = pb[i] - pa[i]
