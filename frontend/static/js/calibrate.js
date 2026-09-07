@@ -9,6 +9,7 @@
  * Note: getUserMedia only works in a secure context — http://localhost or HTTPS.
  * Over a plain-IP origin the live capture is disabled; use the upload path instead.
  */
+import { attachExposureControls } from './camera-exposure.js';
 
 export class CalibratePage {
     constructor(api) {
@@ -57,6 +58,7 @@ export class CalibratePage {
     }
 
     _stopStream() {
+        if (this._stopExpo) { this._stopExpo(); this._stopExpo = null; }
         if (this._stream) {
             this._stream.getTracks().forEach(t => t.stop());
             this._stream = null;
@@ -129,6 +131,7 @@ export class CalibratePage {
                             <button id="cal-stop-cam" class="outline secondary" disabled>Stop</button>
                         </div>
                         <video id="cal-video" autoplay playsinline muted class="calibrate-video"></video>
+                        <div id="cal-expo" class="capture-expo" hidden></div>
                         <p id="cal-live-status" class="calibrate-live-status"></p>
                     </div>
 
@@ -343,6 +346,13 @@ export class CalibratePage {
             `Camera live at ${res}${warn ? ` - LOWER than the ${rw}x${rh} requested; the profile `
             + 'will record what arrived, and captures must later match it' : ''} - point it at the `
             + 'board and capture from several angles.', warn);
+        // Exposure belongs here as much as on the Capture tab: the calibration shots and the
+        // measurement shots want the SAME settled controls, and the meter's ceiling - do not clip
+        // the board's white squares - is really a statement about board detection, which is
+        // exactly what calibration depends on.
+        this._stopExpo = attachExposureControls(
+            this.container.querySelector('#cal-expo'), this._stream, video,
+            (m, bad) => this._setLiveStatus(m, bad));
         // Labels may now be available; refresh the device list.
         this._enumerateDevices();
     }

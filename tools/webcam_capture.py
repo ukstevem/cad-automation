@@ -286,6 +286,98 @@ def png_size(path: str):
     return struct.unpack(">II", head[16:24])
 
 
+def frame_stats(device: str, fourcc: str = "YUYV", warmup: int = WARMUP_FRAMES):
+    """
+    Brightness statistics for one frame, without adding a dependency to the capture host.
+
+    ffmpeg is asked for raw 8-bit grey straight down a pipe, so the histogram is a few lines of
+    stdlib rather than a reason to install OpenCV on the rig. Returns (p10, p90, clipped_percent)
+    or None if the grab failed.
+    """
+    _require_ffmpeg()
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-f", "v4l2", "-input_format", PIXFMT.get(fourcc, "yuyv422"),
+         "-video_size", f"{RESOLUTION[0]}x{RESOLUTION[1]}", "-i", device,
+         "-vf", f"select=gte(n\\,{int(warmup)}),scale=480:270,format=gray",
+         "-frames:v", "1", "-f", "rawvideo", "-"],
+        capture_output=True, check=False,
+    )
+    buf = proc.stdout
+    if proc.returncode != 0 or len(buf) < 1000:
+        return None
+    hist = [0] * 256
+    for b in buf:
+        hist[b] += 1
+    total = len(buf)
+
+    def pct(f):
+        want, run = total * f, 0
+        for v in range(256):
+            run += hist[v]
+            if run >= want:
+                return v
+        return 255
+    clipped = 100.0 * (hist[254] + hist[255]) / total
+    return pct(0.10), pct(0.90), clipped
+
+
+def cmd_expose(args) -> int:
+    """
+    Sweep exposure and report what each setting does to the picture.
+
+    Exposure on this rig was set low on purpose - auto metered the whole frame, let a dark
+    background drag the average down and blew the subject out. But low exposure starves the DARK
+    end, and the dark end is where the trouble is: creases inside shadowed webs are exactly the
+    edges that go unmeasurable, so lifting the floor is worth something if the ceiling survives.
+
+    The ceiling is not "does it look blown out". It is whether the ChArUco board's white squares
+    still read, because the board IS the world frame and losing it loses every pose derived from
+    it. That test needs the detector, which lives on the analysis box - so this command sweeps,
+    saves a frame per setting, and prints the contrast numbers; run tools/exposure_sweep.py on
+    the saved folder to get the board-detection verdict and a recommendation.
+    """
+    _require_v4l2()
+    _require_ffmpeg()
+    values = [int(v) for v in args.values.split(",")]
+    os.makedirs(args.outdir, exist_ok=True)
+    tags = unique_tags(args.devices)
+    print("exposure is in units of 100us. Higher = brighter = more motion blur, though nothing")
+    print("moves here so blur costs nothing; the real ceiling is clipping the board.")
+    for device, tag in zip(args.devices, tags):
+        if not os.path.exists(device):
+            print(f"{device}: not present, skipping")
+            continue
+        names = resolve_names(device)
+        expo = next((n for n in names if n in ("exposure_time_absolute", "exposure_absolute")), None)
+        auto = next((n for n in names if n in ("auto_exposure", "exposure_auto")), None)
+        if expo is None:
+            print(f"{device}: no exposure control, skipping")
+            continue
+        if auto:
+            set_ctrl(device, auto, AUTO_OFF[auto])
+        print(f"\n{device}  [{tag}]")
+        print("%10s %8s %8s %10s   %s" % ("exposure", "dark", "bright", "clipped", "frame"))
+        for v in values:
+            if not set_ctrl(device, expo, v):
+                print("%10d   (camera refused this value)" % v)
+                continue
+            st = frame_stats(device, args.fourcc)
+            dest = os.path.join(args.outdir, f"expo{v:04d}_{tag}.png")
+            err = capture_frame(device, dest, args.fourcc)
+            got = get_ctrl(device, expo)
+            note = "" if got == v else f"  (camera pulled it to {got})"
+            if st is None or err:
+                print("%10d %8s %8s %10s   %s" % (v, "-", "-", "-", err or "no stats"))
+                continue
+            p10, p90, clip = st
+            print("%10d %8d %8d %9.2f%%   %s%s" % (v, p10, p90, clip, os.path.basename(dest), note))
+    print(f"\nFrames in {args.outdir}. Copy them to the analysis box and run:")
+    print("  docker compose run --rm --no-deps api python tools/exposure_sweep.py \\")
+    print(f"      --frames <that folder> --profile outputs/calibration/RigCam_<serial>.json")
+    return 0
+
+
 def cmd_list(args) -> int:
     _require_v4l2()
     tags = unique_tags(args.devices)
@@ -485,6 +577,11 @@ def main() -> int:
                            "value down further on stream open; whatever survives is recorded.")
     shot = sub.add_parser("shot", help="capture one labelled frame per camera")
     shot.add_argument("label")
+    expo = sub.add_parser("expose", help="sweep exposure and measure what each setting does")
+    expo.add_argument("--values", default="4,8,16,24,32,48,64,96,128",
+                      help="exposure_time_absolute values to try, units of 100us")
+    expo.add_argument("--outdir", default="captures/exposure",
+                      help="where the frame for each setting is written")
     args = ap.parse_args()
     if not args.devices:
         _require_v4l2()
@@ -493,7 +590,8 @@ def main() -> int:
             sys.exit("No video devices found. Camera plugged in? And are you in the 'video' "
                      "group?   sudo usermod -aG video $USER   (then log out and back in)")
 
-    return {"list": cmd_list, "lock": cmd_lock, "shot": cmd_shot}[args.cmd](args)
+    return {"list": cmd_list, "lock": cmd_lock, "shot": cmd_shot,
+            "expose": cmd_expose}[args.cmd](args)
 
 
 if __name__ == "__main__":

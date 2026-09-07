@@ -9,6 +9,7 @@
  * Manual-correspondence registration for the spike; marker-based + auto comes later.
  */
 import * as THREE from 'three';
+import { attachExposureControls } from './camera-exposure.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const MAX_PHOTO_W = 900;
@@ -129,6 +130,7 @@ export class CapturePage {
                     <button id="cap-cam-capture" class="outline" disabled>Capture frame</button>
                     <button id="cap-cam-stop" class="outline secondary" disabled>Stop</button>
                     <video id="cap-cam-video" autoplay playsinline muted class="capture-cam-video"></video>
+                    <div id="cap-expo" class="capture-expo" hidden></div>
                 </div>
                 <p id="cap-status" class="capture-status"></p>
 
@@ -427,6 +429,9 @@ export class CapturePage {
         this.container.querySelector('#cap-cam-stop').disabled = false;
         this.container.querySelector('#cap-cam-start').disabled = true;
         this._enumerateCameras();
+        this._stopExpo = attachExposureControls(
+            this.container.querySelector('#cap-expo'), this._stream, video,
+            (m, bad) => this._setStatus(m, bad));
         this._setStatus('Camera live — frame the part + markers, then Capture frame.');
     }
 
@@ -454,6 +459,7 @@ export class CapturePage {
     }
 
     _stopStream() {
+        if (this._stopExpo) { this._stopExpo(); this._stopExpo = null; }
         if (this._stream) {
             this._stream.getTracks().forEach(t => t.stop());
             this._stream = null;

@@ -2470,3 +2470,26 @@ tr.group-member-row .group-actions button.cls-active-exc {
 .capture-con-row button { margin-bottom: 0; }
 .capture-con-status { min-height: 1.2em; font-size: 0.85rem; margin: 0.4rem 0 0; }
 .capture-con-status.error { color: #dc2626; }
+
+/* ── Live-camera exposure control + meter (Capture tab) ───────────────────────
+   The meter is the point, not the slider: exposure has a hard ceiling that has
+   nothing to do with how the picture looks — clip the board's white squares and
+   ChArUco detection fails, taking the world frame with it. */
+.capture-expo { width: 100%; margin-top: .5rem; }
+.capture-expo-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.capture-expo-row label { display: flex; align-items: center; gap: .5rem; margin: 0; flex: 1 1 18rem; }
+.capture-expo-row input[type="range"] { flex: 1; }
+.capture-expo-val { font-variant-numeric: tabular-nums; min-width: 4ch; text-align: right; }
+.capture-expo-focus { font-size: .85em; opacity: .8; }
+.capture-expo-warn { font-size: .9em; margin: 0 0 .5rem; }
+.capture-expo-meter {
+    display: flex; flex-direction: column; gap: .15rem;
+    margin-top: .5rem; padding: .5rem .7rem;
+    border-left: 3px solid currentColor; border-radius: 3px;
+    font-size: .88em; line-height: 1.4;
+}
+.capture-expo-meter.is-ok   { color: #2e7d32; background: rgba(46, 125, 50, .08); }
+.capture-expo-meter.is-warn { color: #b26a00; background: rgba(178, 106, 0, .09); }
+.capture-expo-meter.is-bad  { color: #c62828; background: rgba(198, 40, 40, .09); }
+.capture-expo-nums { font-variant-numeric: tabular-nums; font-weight: 600; }
+.capture-expo-msg  { opacity: .9; }
