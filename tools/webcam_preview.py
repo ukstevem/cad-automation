@@ -212,6 +212,14 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Test cell preview</title>
    width:30px;height:26px;font-size:15px;cursor:pointer}
  .ctl button:hover{background:#444}
  .ctl .v{min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+ /* Exposure meter. The buttons alone give no target, and "looks about right" is the wrong
+    criterion: the ceiling is set by the board's white squares clipping, and the reason to raise
+    at all is the DARK end, where creases live. */
+ .m{position:absolute;top:6px;right:8px;background:rgba(0,0,0,.72);padding:5px 8px;
+   border-radius:4px;max-width:46%;border-left:3px solid #888}
+ .m b{font-variant-numeric:tabular-nums}
+ .m .msg{display:block;margin-top:3px;opacity:.85;font-size:11.5px;line-height:1.35}
+ .m.ok{border-left-color:#5ac05a}.m.warn{border-left-color:#d79a2b}.m.bad{border-left-color:#e05555}
 </style>
 <header><b>Test cell preview</b> &mdash; MJPG __SIZE__, aiming only.
 Whole part <i>plus</i> board in both views, cameras ~40&deg; apart.
@@ -237,13 +245,57 @@ async function poll() {
     } catch (e) {}
   }
 }
+// ── Exposure meter ────────────────────────────────────────────────────────────
+// Sampled from the live stream in the browser, so it costs the capture host nothing.
+//
+// Two numbers decide the setting. CLIPPED is the ceiling, and it is not an aesthetic judgement:
+// the ChArUco board's white squares blow out before anything else, and the board is the world
+// frame, so an image that merely looks brighter while detecting fewer corners has made every
+// pose downstream worse. DARK is the reason to raise at all - creases inside shadowed webs are
+// where edges go unmeasurable, and lifting the floor is what gives them contrast.
+//
+// This is MJPG preview, not the YUYV format used for measurement, so treat it as a guide that
+// gets you to the right region. Confirm with `webcam_capture.py expose` on real frames.
+function meter(tag) {
+  const img = document.getElementById('i_' + tag);
+  const out = document.getElementById('m_' + tag);
+  if (!img || !out || !img.naturalWidth) return;
+  const cv = meter.cv || (meter.cv = document.createElement('canvas'));
+  cv.width = 192; cv.height = 108;
+  const ctx = cv.getContext('2d', {willReadFrequently: true});
+  try { ctx.drawImage(img, 0, 0, cv.width, cv.height); } catch (e) { return; }
+  const d = ctx.getImageData(0, 0, cv.width, cv.height).data;
+  const h = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) h[(d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)|0]++;
+  const n = d.length / 4;
+  const pct = p => { let w = n*p, r = 0; for (let v = 0; v < 256; v++) { r += h[v]; if (r >= w) return v; } return 255; };
+  const clip = 100*(h[254]+h[255])/n, bright = pct(0.90), dark = pct(0.10);
+  let cls = 'ok', msg;
+  if (clip > 0.5) {
+    cls = 'bad';
+    msg = 'too bright &mdash; the board&rsquo;s white squares clip first, and losing the board '
+        + 'loses the world frame. Come down until clipped is under 0.5%.';
+  } else if (bright < 205) {
+    cls = 'warn';
+    msg = 'room to raise &mdash; headroom to 255, and lifting the top lifts the dark end with it, '
+        + 'which is where creases become measurable.';
+  } else {
+    msg = 'good &mdash; near the top without clipping. A higher dark end means more creases carry '
+        + 'usable contrast.';
+  }
+  out.className = 'm ' + cls;
+  out.innerHTML = 'bright <b>' + bright + '</b> &middot; dark <b>' + dark + '</b> &middot; clipped <b>'
+                + clip.toFixed(2) + '%</b><span class=msg>' + msg + '</span>';
+}
 window.__TAGS__ = __TAGLIST__;
 poll();
+setInterval(() => window.__TAGS__.forEach(meter), 500);
 </script>
 """
 
 CAM_BLOCK = """<div class=cam><span class=tag><b>__LABEL__</b> &nbsp;<small>__TAG__</small></span>
-<img src="/stream/__TAG__" alt="__LABEL__"><div class=t></div><div class=g></div>
+<img src="/stream/__TAG__" id="i___TAG__" alt="__LABEL__"><div class=t></div><div class=g></div>
+<div class=m id="m___TAG__"><span>measuring&hellip;</span></div>
 <div class=ctl><span>exposure</span>
  <button onclick="ex('__TAG__',-20)" title="much darker">&laquo;</button>
  <button onclick="ex('__TAG__',-4)" title="darker">&minus;</button>
