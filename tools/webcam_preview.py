@@ -211,7 +211,8 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Test cell preview</title>
  .ctl button{background:#333;color:#eee;border:1px solid #555;border-radius:3px;
    width:30px;height:26px;font-size:15px;cursor:pointer}
  .ctl button:hover{background:#444}
- .ctl .v{min-width:52px;text-align:center;font-variant-numeric:tabular-nums}
+ .ctl .v{width:64px;text-align:center;font-variant-numeric:tabular-nums;
+   background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 4px}
  /* Exposure meter. The buttons alone give no target, and "looks about right" is the wrong
     criterion: the ceiling is set by the board's white squares clipping, and the reason to raise
     at all is the DARK end, where creases live. */
@@ -229,11 +230,12 @@ Exposure changes below are live and persist on the camera; still re-run
 <script>
 async function ex(tag, delta, absolute) {
   const el = document.getElementById('v_' + tag);
-  const cur = parseInt(el.textContent, 10);
-  const want = absolute !== undefined ? absolute : Math.max(1, cur + delta);
+  const cur = parseInt(el.value, 10);
+  const want = Math.min(2047, Math.max(3,
+      (absolute !== undefined && !isNaN(absolute)) ? absolute : cur + delta));
   const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag) + '&exposure=' + want);
   const j = await r.json();
-  if (j.exposure !== null && j.exposure !== undefined) el.textContent = j.exposure;
+  if (j.exposure !== null && j.exposure !== undefined) el.value = j.exposure;
 }
 async function poll() {
   for (const tag of window.__TAGS__) {
@@ -241,7 +243,10 @@ async function poll() {
       const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag));
       const j = await r.json();
       const el = document.getElementById('v_' + tag);
-      if (el && j.exposure !== null) el.textContent = j.exposure;
+      // Do not stamp on a value being typed, but otherwise show what the CAMERA holds - it can
+      // move underneath the page, and a stale readout makes every button press land somewhere
+      // other than where it looks like it will.
+      if (el && j.exposure !== null && document.activeElement !== el) el.value = j.exposure;
     } catch (e) {}
   }
 }
@@ -289,6 +294,7 @@ function meter(tag) {
 }
 window.__TAGS__ = __TAGLIST__;
 poll();
+setInterval(poll, 2000);
 setInterval(() => window.__TAGS__.forEach(meter), 500);
 </script>
 """
@@ -298,9 +304,13 @@ CAM_BLOCK = """<div class=cam><span class=tag><b>__LABEL__</b> &nbsp;<small>__TA
 <div class=m id="m___TAG__"><span>measuring&hellip;</span></div>
 <div class=ctl><span>exposure</span>
  <button onclick="ex('__TAG__',-20)" title="much darker">&laquo;</button>
- <button onclick="ex('__TAG__',-4)" title="darker">&minus;</button>
- <span class=v id="v___TAG__">?</span>
- <button onclick="ex('__TAG__',4)" title="brighter">+</button>
+ <button onclick="ex('__TAG__',-4)" title="darker">&minus;&minus;</button>
+ <button onclick="ex('__TAG__',-1)" title="one step darker">&minus;</button>
+ <input class=v id="v___TAG__" type="number" min="3" max="2047" step="1"
+        onchange="ex('__TAG__',0,parseInt(this.value,10))"
+        title="type a value directly - the control takes any integer from 3 to 2047">
+ <button onclick="ex('__TAG__',1)" title="one step brighter">+</button>
+ <button onclick="ex('__TAG__',4)" title="brighter">++</button>
  <button onclick="ex('__TAG__',20)" title="much brighter">&raquo;</button>
 </div></div>"""
 

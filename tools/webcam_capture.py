@@ -71,6 +71,10 @@ CONTROLS = [
     ("zoom_absolute", "zoom_absolute"),
     ("auto_exposure", "exposure_auto"),
     ("exposure_time_absolute", "exposure_absolute"),
+    # Left unpinned until now, and it is an auto behaviour like any other: with it on, the camera
+    # is free to trade framerate against exposure and move the exposure value underneath you.
+    # Observed on both C920s reading 1 while every other auto was properly pinned to manual.
+    ("exposure_dynamic_framerate", "exposure_auto_priority"),
     ("white_balance_automatic", "white_balance_temperature_auto"),
     ("white_balance_temperature", "white_balance_temperature"),
     ("sharpness", "sharpness"),
@@ -94,6 +98,7 @@ GEOMETRY_CRITICAL = {
 AUTO_OFF = {                       # value meaning "manual" for each auto control
     "focus_automatic_continuous": 0, "focus_auto": 0,
     "auto_exposure": 1, "exposure_auto": 1,             # 1 = manual, 3 = aperture priority
+    "exposure_dynamic_framerate": 0, "exposure_auto_priority": 0,
     "white_balance_automatic": 0, "white_balance_temperature_auto": 0,
 }
 
