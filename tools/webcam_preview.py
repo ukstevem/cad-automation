@@ -50,6 +50,26 @@ import webcam_capture as WC  # noqa: E402
 BY_ID_DIR = "/dev/v4l/by-id"
 SOI, EOI = b"\xff\xd8", b"\xff\xd9"     # JPEG start/end of image markers
 EXPOSURE_CTRLS = ("exposure_time_absolute", "exposure_absolute")
+
+# The C920 does not honour arbitrary exposure values. It advertises step=1 over 3..2047 and
+# accepts any integer, then quietly snaps to its own ladder about a second later - measured on
+# this rig by setting every value from 3 to 42 and reading back after a settling delay:
+#
+#     asked 5,6,7 -> 4     asked 10..15 -> 9     asked 16..31 -> 19     asked 32..42 -> 38
+#
+# So the usable settings are roughly a doubling series, one photographic stop apart, and a
+# plus-one button can only ever land on a value that snaps back - which is exactly what it looked
+# like it was doing. Stepping the ladder is the honest control. The read-back immediately after a
+# set returns the REQUESTED value, so the snap is invisible unless you wait, which is why this
+# went unnoticed.
+EXPOSURE_LADDER = [3, 4, 9, 19, 38, 77, 156, 312, 625, 1250, 2047]
+
+
+def ladder_step(value: int, direction: int) -> int:
+    """The next exposure the camera will actually honour, up or down from *value*."""
+    if direction >= 0:
+        return next((v for v in EXPOSURE_LADDER if v > value), EXPOSURE_LADDER[-1])
+    return next((v for v in reversed(EXPOSURE_LADDER) if v < value), EXPOSURE_LADDER[0])
 _LETTERS = "ABCDEFGH"
 
 
@@ -117,6 +137,22 @@ class Camera:
             if v is not None:
                 return name, v
         return None, None
+
+    def gain(self):
+        return WC.get_ctrl(self.device, "gain")
+
+    def set_gain(self, value: int):
+        """
+        Fine brightness between exposure stops.
+
+        Exposure moves in full stops here, so gain is the only continuous adjustment available -
+        but it is amplification, not light. It raises the noise floor with the signal, and the
+        noise floor is what buries the low-contrast creases this whole exercise is about. Prefer
+        the next exposure stop; reach for gain to trim what is left over.
+        """
+        WC.set_ctrl(self.device, "gain", int(value))
+        self.controls["gain"] = int(value)
+        return WC.get_ctrl(self.device, "gain")
 
     def set_exposure(self, value: int):
         """Exposure can be changed while streaming, so this takes effect live."""
@@ -211,8 +247,11 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Test cell preview</title>
  .ctl button{background:#333;color:#eee;border:1px solid #555;border-radius:3px;
    width:30px;height:26px;font-size:15px;cursor:pointer}
  .ctl button:hover{background:#444}
- .ctl .v{width:64px;text-align:center;font-variant-numeric:tabular-nums;
+ .ctl .v{width:58px;text-align:center;font-variant-numeric:tabular-nums;
    background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 4px}
+ .ctl span.v{border:0;background:none;width:34px}
+ .ctl .g{width:110px}
+ .ctl .sep{margin-left:10px;opacity:.75}
  /* Exposure meter. The buttons alone give no target, and "looks about right" is the wrong
     criterion: the ceiling is set by the board's white squares clipping, and the reason to raise
     at all is the DARK end, where creases live. */
@@ -228,37 +267,27 @@ Exposure changes below are live and persist on the camera; still re-run
 <code>webcam_capture.py lock</code> when you have finished aiming.</header>
 <div class=wrap>__CAMS__</div>
 <script>
-async function ex(tag, delta, absolute) {
-  const el = document.getElementById('v_' + tag);
-  let cur = parseInt(el.value, 10);
-  // The box can be empty before the first poll lands, and NaN+1 is NaN - which was sent to the
-  // camera, rejected, and answered with the value it already had. That is the "it jumps back"
-  // symptom: the click never asked for anything. Ask the camera what it holds before stepping.
-  if (isNaN(cur)) {
-    try {
-      const r0 = await fetch('/ctrl?tag=' + encodeURIComponent(tag));
-      cur = parseInt((await r0.json()).exposure, 10);
-    } catch (e) {}
-  }
-  if (isNaN(cur)) return;
-  const want = Math.min(2047, Math.max(3,
-      (absolute !== undefined && !isNaN(absolute)) ? absolute : cur + delta));
-  const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag) + '&exposure=' + want);
+async function req(tag, extra) {
+  const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag) + (extra || '')
+                        + '&_=' + Date.now(), {cache: 'no-store'});
   const j = await r.json();
-  if (j.exposure !== null && j.exposure !== undefined) el.value = j.exposure;
-}
-async function poll() {
-  for (const tag of window.__TAGS__) {
-    try {
-      const r = await fetch('/ctrl?tag=' + encodeURIComponent(tag));
-      const j = await r.json();
-      const el = document.getElementById('v_' + tag);
-      // Do not stamp on a value being typed, but otherwise show what the CAMERA holds - it can
-      // move underneath the page, and a stale readout makes every button press land somewhere
-      // other than where it looks like it will.
-      if (el && j.exposure !== null && document.activeElement !== el) el.value = j.exposure;
-    } catch (e) {}
+  const e = document.getElementById('v_' + tag);
+  const g = document.getElementById('g_' + tag), gv = document.getElementById('gv_' + tag);
+  if (e && j.exposure !== null && document.activeElement !== e) e.value = j.exposure;
+  if (g && j.gain !== null && j.gain !== undefined && document.activeElement !== g) {
+    g.value = j.gain; if (gv) gv.textContent = j.gain;
   }
+  return j;
+}
+// Ask the SERVER to move a stop. It knows the ladder the camera honours; the page adding one to
+// a number could only ever request a value that snaps back.
+const ex      = (tag, dir)  => req(tag, '&step=' + dir);
+const setexp  = (tag, v)    => isNaN(v) || req(tag, '&exposure=' + v);
+const setgain = (tag, v)    => isNaN(v) || req(tag, '&gain=' + v);
+async function poll() {
+  // Show what the CAMERA holds, not what was last asked for - it snaps exposure to its own
+  // ladder about a second after a write, so anything else is fiction.
+  for (const tag of window.__TAGS__) { try { await req(tag); } catch (e) {} }
 }
 // ── Exposure meter ────────────────────────────────────────────────────────────
 // Sampled from the live stream in the browser, so it costs the capture host nothing.
@@ -313,15 +342,17 @@ CAM_BLOCK = """<div class=cam><span class=tag><b>__LABEL__</b> &nbsp;<small>__TA
 <img src="/stream/__TAG__" id="i___TAG__" alt="__LABEL__"><div class=t></div><div class=g></div>
 <div class=m id="m___TAG__"><span>measuring&hellip;</span></div>
 <div class=ctl><span>exposure</span>
- <button onclick="ex('__TAG__',-20)" title="much darker">&laquo;</button>
- <button onclick="ex('__TAG__',-4)" title="darker">&minus;&minus;</button>
- <button onclick="ex('__TAG__',-1)" title="one step darker">&minus;</button>
+ <button onclick="ex('__TAG__',-1)" title="down one stop">&minus;</button>
  <input class=v id="v___TAG__" type="number" min="3" max="2047" step="1" value="__EXPO__"
-        onchange="ex('__TAG__',0,parseInt(this.value,10))"
-        title="type a value directly - the control takes any integer from 3 to 2047">
- <button onclick="ex('__TAG__',1)" title="one step brighter">+</button>
- <button onclick="ex('__TAG__',4)" title="brighter">++</button>
- <button onclick="ex('__TAG__',20)" title="much brighter">&raquo;</button>
+        onchange="setexp('__TAG__',parseInt(this.value,10))"
+        title="the camera honours only 3,4,9,19,38,77,156,312,625,1250,2047 - anything else snaps">
+ <button onclick="ex('__TAG__',1)" title="up one stop">+</button>
+ <span class=sep>gain</span>
+ <input class=g id="g___TAG__" type="range" min="0" max="255" step="1" value="__GAIN__"
+        oninput="document.getElementById('gv___TAG__').textContent=this.value"
+        onchange="setgain('__TAG__',parseInt(this.value,10))"
+        title="fine brightness between exposure stops - but it amplifies noise, so prefer a stop">
+ <span class=v id="gv___TAG__">__GAIN__</span>
 </div></div>"""
 
 
@@ -338,6 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             blocks = "".join(
                 CAM_BLOCK.replace("__TAG__", t).replace("__LABEL__", c.label)
                        .replace("__EXPO__", str(c.exposure()[1] if c.exposure()[1] is not None else ""))
+                       .replace("__GAIN__", str(c.gain() if c.gain() is not None else 0))
                 for t, c in CAMERAS.items()
             )
             body = PAGE.replace("__CAMS__", blocks)
@@ -348,6 +380,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
             self.end_headers()
             self.wfile.write(raw)
             return
@@ -359,16 +392,31 @@ class Handler(BaseHTTPRequestHandler):
             if cam is None:
                 self.send_error(404, "no such camera")
                 return
-            if "exposure" in q:
+            if "step" in q:
+                # Move to the next value the camera will honour, rather than by an increment it
+                # will silently discard.
+                try:
+                    _n, cur = cam.exposure()
+                    cam.set_exposure(ladder_step(int(cur), int(q["step"][0])))
+                except (ValueError, TypeError):
+                    pass
+            elif "exposure" in q:
                 try:
                     cam.set_exposure(int(q["exposure"][0]))
                 except (ValueError, TypeError):
                     pass
+            if "gain" in q:
+                try:
+                    cam.set_gain(max(0, min(255, int(q["gain"][0]))))
+                except (ValueError, TypeError):
+                    pass
             _name, value = cam.exposure()
-            raw = json.dumps({"tag": tag, "exposure": value}).encode()
+            raw = json.dumps({"tag": tag, "exposure": value, "gain": cam.gain(),
+                              "ladder": EXPOSURE_LADDER}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
             self.end_headers()
             self.wfile.write(raw)
             return
