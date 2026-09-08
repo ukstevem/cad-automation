@@ -97,28 +97,44 @@ def candidates(tris, min_area_frac=0.02):
     return sorted(out, key=lambda r: -r["area"])
 
 
-def merge_by_yaw(cands, tris, tol_mm=2.0):
+def merge_by_yaw(cands, tris, tol_mm=2.0, samples=400, step_deg=5.0):
     """
-    Drop candidates that differ only by a turn about the vertical.
+    Drop candidates that a turn about the vertical maps onto one another.
 
-    Yaw comes out of the operator's clicks, so two orientations that a turn maps onto each other
-    are one choice, not several. Compared on the rotated point set rather than on angles, which
-    also collapses a part's own symmetries - a square base offers one choice, not four.
+    Tested DIRECTLY - rotate one point set through every yaw and see whether it lands on the other
+    - rather than by comparing rotation-invariant signatures. A signature built from radius and
+    height cannot see handedness at all: every point on a plate's outline exists at both the top
+    and the bottom face, so flipping the plate produces an identical set of (radius, height) pairs
+    and the two orientations merge. Those are exactly the face-up and face-down pair a handedness
+    test exists to tell apart, so losing them is worse than doing the work.
+
+    A reflection cannot be undone by a rotation, which is the whole point: the direct test keeps
+    the pair and a signature test cannot.
     """
-    keep = []
+    from scipy.spatial import cKDTree
+
     P = tris.reshape(-1, 3)
     P = P - P.mean(axis=0)
+    if len(P) > samples:
+        P = P[np.linspace(0, len(P) - 1, samples).astype(int)]
+    yaws = [cv2.Rodrigues(np.array([0.0, 0.0, np.radians(a)]).reshape(3, 1))[0]
+            for a in np.arange(0, 360, step_deg)]
+
+    keep = []
     for c in cands:
         rp = (c["R"] @ P.T).T
-        sig = np.sort(np.round(np.column_stack([np.hypot(rp[:, 0], rp[:, 1]), rp[:, 2]]), 1),
-                      axis=0)
         dup = False
         for k in keep:
-            if sig.shape == k["_sig"].shape and np.abs(sig - k["_sig"]).max() < tol_mm:
-                dup = True
+            tree = k["_tree"]
+            for Ry in yaws:
+                d, _ = tree.query((Ry @ rp.T).T)
+                if float(np.percentile(d, 95)) < tol_mm:
+                    dup = True
+                    break
+            if dup:
                 break
         if not dup:
-            c["_sig"] = sig
+            c["_tree"] = cKDTree(rp)
             keep.append(c)
     return keep
 
