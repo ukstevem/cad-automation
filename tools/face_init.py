@@ -73,6 +73,68 @@ def pose_from_clicks(pairs, view):
     return cv2.Rodrigues(R_ow)[0].ravel(), t_ow.ravel()
 
 
+def pose_seated(pairs, views_by_tag, rest_R, z0=None):
+    """
+    Solve x, y and yaw for a part lying flat, from a handful of clicks.
+
+    THE PART HAS THREE UNKNOWNS, NOT SIX. Once the operator has said which face is down, the
+    orientation is fixed except for a turn about the board normal, and the height follows from the
+    part resting on the table. Solving full 6-DOF PnP instead asks the clicks to rediscover that
+    the part is neither floating nor tilted, and pays for it in precision: measured, that inflated
+    the requirement from three clicks to six, in the same way that giving the refiner tilt made it
+    invent twelve degrees of rotation to explain noise.
+
+    Three clicks give six equations against three unknowns. Each additional click is redundancy
+    against a mis-click rather than a necessity.
+
+    *rest_R* is the rotation putting the chosen face down - the operator's discrete choice, which
+    is also what resolves handedness and roll, neither of which any amount of clicking on a wrong
+    resting face could fix.
+    """
+    from scipy.optimize import least_squares
+
+    obs = []
+    for c in pairs:
+        v = views_by_tag[c["_tag"]]
+        obs.append((np.asarray(c["model"], np.float64), np.asarray(c["image"], np.float64), v))
+    zc = float(z0) if z0 is not None else 0.0
+
+    def residual(p):
+        yaw, tx, ty = p[0], p[1], p[2]
+        tz = p[3] if len(p) > 3 else zc
+        Rz, _ = cv2.Rodrigues(np.array([0.0, 0.0, yaw]).reshape(3, 1))
+        R = Rz @ rest_R
+        t = np.array([tx, ty, tz])
+        out = []
+        for obj, img, v in obs:
+            w = (R @ obj) + t
+            p2, _ = cv2.projectPoints(w.reshape(1, 1, 3), v["rvec_cam"], v["tvec_cam"],
+                                      np.asarray(v["K"], np.float64).reshape(3, 3),
+                                      np.asarray(v["dist"], np.float64))
+            out.extend((p2.reshape(2) - img).tolist())
+        return np.asarray(out)
+
+    best = None
+    # yaw is periodic and the residual is not convex in it, so start from several turns rather
+    # than trusting one - the whole solve is three parameters, so this costs nothing
+    for y0 in np.radians(np.arange(0, 360, 30)):
+        p0 = [y0, float(np.mean([o[0][0] for o in obs])), float(np.mean([o[0][1] for o in obs]))]
+        if z0 is None:
+            p0.append(0.0)
+        try:
+            r = least_squares(residual, p0, method="lm", max_nfev=300)
+        except Exception:
+            continue
+        if best is None or r.cost < best.cost:
+            best = r
+    if best is None:
+        raise ValueError("the seated solve did not converge on these clicks")
+    yaw, tx, ty = best.x[0], best.x[1], best.x[2]
+    tz = best.x[3] if len(best.x) > 3 else zc
+    Rz, _ = cv2.Rodrigues(np.array([0.0, 0.0, yaw]).reshape(3, 1))
+    return cv2.Rodrigues(Rz @ rest_R)[0].ravel(), np.array([tx, ty, tz])
+
+
 def sample_face_points(mesh, n, rng):
     """
     Points an operator could plausibly click: spread over the model, on face interiors.
@@ -104,7 +166,12 @@ def main() -> int:
                     help="no clicks: synthesise them from --fit with known error, and measure how "
                          "much click slop the chain tolerates")
     ap.add_argument("--fit", default=None, help="known-good pose, for --simulate")
-    ap.add_argument("--counts", default="3,4,6,8", help="clicks per view to try, for --simulate")
+    ap.add_argument("--counts", default="2,3,4,6", help="clicks per view to try, for --simulate")
+    ap.add_argument("--free-6dof", action="store_true",
+                    help="solve the clicks as full 6-DOF PnP instead of the seated three "
+                         "unknowns. Kept only to show what it costs: the part cannot tilt or "
+                         "float, and asking the clicks to rediscover that doubles how many are "
+                         "needed.")
     ap.add_argument("--errors", default="5,10,20,40", help="click error in px, for --simulate")
     ap.add_argument("--trials", type=int, default=5)
     ap.add_argument("--out", default=None)
@@ -164,10 +231,25 @@ def main() -> int:
                         p2 = p2.reshape(-1, 2) + rng.normal(0, e, (len(world), 2))
                         pairs_by_view[v["tag"]] = [{"model": o, "image": q}
                                                    for o, q in zip(obj_pts, p2)]
-                    # solve in the view with the most clicks, as the UI would
+                    # The operator has already said which face is down, so the only unknowns
+                    # are the turn and where it sits. rest_R is that stated choice.
                     v0 = views[0]
                     try:
-                        rv0, tv0 = pose_from_clicks(pairs_by_view[v0["tag"]], v0)
+                        if args.free_6dof:
+                            rv0, tv0 = pose_from_clicks(pairs_by_view[v0["tag"]], v0)
+                        else:
+                            flat = []
+                            for tg, ps in pairs_by_view.items():
+                                for c in ps:
+                                    flat.append({**c, "_tag": tg})
+                            rv0, tv0 = pose_seated(flat, {v["tag"]: v for v in views},
+                                                   R_t @ cv2.Rodrigues(
+                                                       np.array([0., 0., -np.arctan2(
+                                                           R_t[1, 0], R_t[0, 0])]).reshape(3, 1)
+                                                   )[0].T @ R_t if False else
+                                                   cv2.Rodrigues(np.array([0., 0., -np.arctan2(
+                                                       R_t[1, 0], R_t[0, 0])]).reshape(3, 1))[0] @ R_t,
+                                                   z0=float(tv_t[2]))
                     except ValueError:
                         ok = False
                     if not ok:
