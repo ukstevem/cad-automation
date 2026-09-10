@@ -32,9 +32,12 @@ low figure means the positions should be discarded rather than adjusted.
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob
+import hashlib
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -46,6 +49,61 @@ import cv2  # noqa: E402
 
 from app.services import charuco, multiview_fit as MVF, visibility as VIS  # noqa: E402
 import pose_refine as PR  # noqa: E402
+
+
+_IFC_B64 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$"
+
+
+def ifc_guid(seed: str) -> str:
+    """
+    An IfcGloballyUniqueId DERIVED from the weld's identity, not minted fresh.
+
+    A random GUID per run would be exactly as unstable as the numbering this file used to have -
+    re-run the detector and every weld becomes a new object, so nothing downstream could ever
+    match a weld to the record it already has. Hashing the identity instead means the same weld
+    on the same part resolves to the same GlobalId forever, which is what the id is for.
+
+    22 characters from IFC's own alphabet: one leading 2-bit group then 21 of 6 bits.
+    """
+    n = int.from_bytes(hashlib.sha1(seed.encode("utf-8")).digest()[:16], "big")
+    out = []
+    for _ in range(21):
+        out.append(_IFC_B64[n & 63])
+        n >>= 6
+    out.append(_IFC_B64[n & 3])
+    return "".join(reversed(out))
+
+
+def _piece_mark(doc, node, override):
+    """
+    The namespace that makes a weld number unique across a JOB rather than a run.
+
+    W001 restarting for every part collides the moment two parts are analysed, and the number is
+    the key a weld map joins on, so the collision is not cosmetic. A piece mark already identifies
+    the part uniquely within a job, so borrowing it inherits that guarantee without a registry.
+
+    Derived where possible and stated in the output either way - a namespace nobody can see is
+    worse than no namespace, because it looks unique without being checkable.
+    """
+    if override:
+        return override, "given on the command line"
+    name = (doc.get("cnc_member_names") or {}).get(node)
+    if name:
+        src = "cnc_member_names[%s]" % node
+    else:
+        # Fall back to the part the solids belong to. Weldment nodes carry no member name of their
+        # own, but every solid in one names its parent, and they agree.
+        names = [(c.get("solid_a") or {}).get("name")
+                 for c in ((doc.get("connections") or {}).get("connections") or [])]
+        names = [x for x in names if x]
+        name = max(set(names), key=names.count) if names else node
+        src = "the part name carried on the solids" if names else "the node id, for want of anything better"
+    mark = re.sub(r"<[^>]*>", "", str(name))                 # drop "<As Machined>" and friends
+    # "_Default" is the CAD system's configuration name, not part of anyone's piece mark. Stripped
+    # by name rather than by pattern, because a real mark may well contain an underscore.
+    mark = re.sub(r"_Default\b", "", mark, flags=re.I)
+    mark = re.sub(r"[^A-Za-z0-9]+", "", mark).upper()[:16]
+    return (mark or "PART"), src
 
 
 def cmd_extract(args) -> int:
@@ -66,41 +124,166 @@ def cmd_extract(args) -> int:
               % (got[0], got[1], want[0], want[1]), file=sys.stderr)
         return 2
 
-    welds = []
+    # ONE WELD PER JOINT. The detector already returns one connection per pair of solids that
+    # meet, with the boolean intersection's several path fragments gathered inside it. This used
+    # to flatten those fragments into separate welds, which turned 64 joints into 269 "welds" and
+    # stacked eight labels on one T-joint. An operator inspects a JOINT - the cleat to the rail -
+    # and a drawing specifies one, so the connection is the unit that carries a number.
+    joints = []
     for c in results.get("connections") or []:
         if c.get("type") != "welded":
             continue
+        segs, length = [], 0.0
         for path in (c.get("weld_paths") or []):
             pts = np.asarray(path, np.float64).reshape(-1, 3)
             if len(pts) < 2:
                 continue
-            seg = np.linalg.norm(np.diff(pts, axis=0), axis=1).sum()
-            if seg < args.min_length:
-                continue
-            sa, sb = c.get("solid_a") or {}, c.get("solid_b") or {}
-            welds.append({
-                "weld_number": "W%03d" % (len(welds) + 1),
-                "joins": ["%s:s%s" % (sa.get("node_id"), sa.get("solid_index")),
-                          "%s:s%s" % (sb.get("node_id"), sb.get("solid_index"))],
-                "method": c.get("weld_method"),
-                "length_mm": round(float(seg), 1),
-                "path": [[round(float(v), 2) for v in p] for p in pts],
-            })
-    if not welds:
-        print("detection found no weld paths above %.0f mm" % args.min_length, file=sys.stderr)
+            length += float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+            segs.append(pts)
+        if not segs:
+            continue
+        # The detector's own figure where it has one: it measures the contact, while summing the
+        # fragments measures the polylines that approximate it, and the two differ by ~3%.
+        length = float(c.get("weld_length_mm") or length)
+        sa, sb = c.get("solid_a") or {}, c.get("solid_b") or {}
+        ids = ["%s:s%s" % (sa.get("node_id"), sa.get("solid_index")),
+               "%s:s%s" % (sb.get("node_id"), sb.get("solid_index"))]
+        joints.append({"ids": sorted(ids), "segs": segs, "length": length,
+                       "method": c.get("weld_method"),
+                       "centre": np.vstack(segs).mean(axis=0)})
+    if not joints:
+        print("detection found no welded joints above %.0f mm" % args.min_length, file=sys.stderr)
         return 1
 
-    total = sum(w["length_mm"] for w in welds)
-    out = {"source": os.path.basename(args.analysis), "node": args.node, "scope": args.scope,
-           "frame": "model coordinates as stored by the detector - the same frame the pose maps "
-                    "from, so no further transform is applied downstream",
-           "weld_count": len(welds), "total_length_mm": round(total, 1), "welds": welds}
+    # NUMBERED BY POSITION, NOT BY ITERATION ORDER. This is what makes the identifier survive a
+    # re-run: a joint's centroid does not move when --min-length changes, so the joints present in
+    # both runs keep their numbers, and only the ones that appear or vanish disturb the sequence.
+    # Sorting by length - which the projection stage used to do - reshuffles everything below any
+    # weld that crosses the filter. X leads because it is the extrusion axis by convention here,
+    # so the numbers run along the member the way a welder walks it. The solid-id pair breaks ties
+    # deterministically, since two joints can share a rounded centroid but never an id pair.
+    q = max(args.sort_tol, 1e-6)
+    joints.sort(key=lambda j: (round(j["centre"][0] / q), round(j["centre"][1] / q),
+                               round(j["centre"][2] / q), tuple(j["ids"])))
+
+    mark, mark_src = _piece_mark(doc, args.node, args.piece_mark)
+    project = str(doc.get("cnc_project_number") or "").strip()
+
+    # A NUMBER, ONCE ISSUED, IS ISSUED. The first attempt at this numbered the joints that survived
+    # --min-length, and its own stability test failed at 0 of 50: an ordinal is a RANK, so dropping
+    # fourteen short welds shifted every number above them. Two changes make it hold.
+    #
+    # First, number the whole set and filter afterwards, so a display threshold cannot renumber
+    # anything. The sequence then has gaps where welds were filtered out, which is correct - weld
+    # maps gain gaps at every revision, and a gap is honest where a renumber is not.
+    #
+    # Second, carry previous assignments forward by identity. Geometric order still shifts if the
+    # DETECTOR finds a joint it missed before, because a new weld inserts into the middle of the
+    # order. Real fabrication does not renumber for that; it keeps the numbers already issued and
+    # allocates new ones at the end. --carry-forward does exactly that.
+    prior = {}
+    if args.carry_forward and os.path.exists(args.carry_forward):
+        with open(args.carry_forward, "r", encoding="utf-8") as fh:
+            for w in (json.load(fh).get("welds") or []):
+                prior[tuple(w.get("ConnectedTo") or [])] = w.get("Name")
+
+    used = set(prior.values())
+    nxt = 1
+    for j in joints:
+        key = tuple(j["ids"])
+        if key in prior:
+            j["name"] = prior[key]
+            continue
+        while ("%s-W%03d" % (mark, nxt)) in used:
+            nxt += 1
+        j["name"] = "%s-W%03d" % (mark, nxt)
+        used.add(j["name"])
+        nxt += 1
+    carried = sum(1 for j in joints if tuple(j["ids"]) in prior)
+
+    joints = [j for j in joints if j["length"] >= args.min_length]
+    if not joints:
+        print("every joint was shorter than --min-length %.0f" % args.min_length, file=sys.stderr)
+        return 1
+
+    welds = []
+    for j in joints:
+        name = j["name"]
+        # Only what we actually know. A null Process or a null throat thickness would assert that
+        # the weld was specified as nothing, where absence correctly says nobody has specified it
+        # yet - see docs/weld-identification-and-ifc.md section 4.
+        pset = {}
+        if j["method"]:
+            pset["Type1"] = j["method"]
+        welds.append({
+            # Seeded from WHAT the weld is, never from where it sits in a list. The first version
+            # included the ordinal and so inherited every renumber - a GlobalId that changes is
+            # not an identifier, it is a serial number for the run.
+            "GlobalId": ifc_guid("|".join([project, mark] + j["ids"])),
+            "Name": name,
+            "Tag": name,
+            "PredefinedType": "WELD",
+            "Description": "solid %s to solid %s" % (j["ids"][0].rsplit(":s", 1)[-1],
+                                                     j["ids"][1].rsplit(":s", 1)[-1]),
+            "ConnectedTo": j["ids"],
+            "Pset_FastenerWeld": pset,
+            # OUR MEASUREMENTS, kept out of Pset_FastenerWeld deliberately. That Pset describes a
+            # weld somebody specified; this describes one we found. Writing the measured length
+            # into `l` would be the tempting shortcut and would be wrong - `l` is the length of a
+            # single weld ELEMENT, so on any intermittent weld it would state something false.
+            "Pset_PSS_WeldGeometry": {
+                "MeasuredLengthMm": round(j["length"], 1),
+                "SegmentCount": len(j["segs"]),
+                "CentroidMm": [round(float(v), 2) for v in j["centre"]],
+            },
+            "Representation": {
+                "type": "Polyline",
+                "segments": [[[round(float(v), 2) for v in p] for p in s] for s in j["segs"]],
+            },
+        })
+
+    total = sum(w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] for w in welds)
+    out = {
+        # The schema version is not decoration: IFC4X3 renamed the single-letter ISO 2553 measures
+        # (`l` -> WeldElementLength and the rest), so a reader has to know which naming applies.
+        # IFC2X3 cannot carry this at all - it has IfcFastener but no IfcFastenerTypeEnum and no
+        # Pset_FastenerWeld, so a WELD there needs ObjectType text and a custom Pset.
+        "schema": "IFC4",
+        "generator": "cad-automation weld_locate",
+        "generated": datetime.datetime.now(datetime.timezone.utc)
+                             .replace(microsecond=0).isoformat(),
+        "project": project or None,
+        "steel_grade": doc.get("cnc_steel_grade"),
+        "piece_mark": {"value": mark, "derived_from": mark_src},
+        "source": {"analysis": os.path.basename(args.analysis), "node": args.node,
+                   "scope": args.scope},
+        "placement": {
+            "frame": "model",
+            "units": "mm",
+            "note": "model coordinates as stored by the detector - the same frame the pose maps "
+                    "from, so no further transform is applied downstream. An IFC export must "
+                    "place these in the project coordinate system explicitly rather than assume "
+                    "the two agree.",
+            "to_project": None,
+        },
+        "summary": {"weld_count": len(welds), "total_length_mm": round(total, 1)},
+        "welds": welds,
+    }
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
-    print("%d weld runs, %.0f mm total -> %s" % (len(welds), total, args.out))
-    print("longest: %s" % ", ".join("%s %.0fmm" % (w["weld_number"], w["length_mm"])
-                                    for w in sorted(welds, key=lambda w: -w["length_mm"])[:5]))
+
+    typed = sum(1 for w in welds if w["Pset_FastenerWeld"].get("Type1"))
+    print("%d welded joints, %.0f mm total -> %s" % (len(welds), total, args.out))
+    print("piece mark %s (%s), project %s" % (mark, mark_src, project or "unknown"))
+    if args.carry_forward:
+        print("carried %d weld numbers forward from %s, issued %d new"
+              % (carried, os.path.basename(args.carry_forward), len(joints) - carried))
+    print("joint type known for %d of %d (%.0f%%) - the rest carry no Type1, which is absence "
+          "rather than a null" % (typed, len(welds), 100.0 * typed / len(welds)))
+    print("longest: %s" % ", ".join(
+        "%s %.0fmm" % (w["Name"], w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])
+        for w in sorted(welds, key=lambda w: -w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])[:4]))
     return 0
 
 
@@ -117,6 +300,12 @@ def _hull_depth(mesh, rvec, tvec, view):
 def cmd_project(args) -> int:
     with open(args.welds, "r", encoding="utf-8") as fh:
         wd = json.load(fh)
+    if not wd.get("schema"):
+        print("%s is an old-format sidecar, written before welds carried stable identifiers."
+              % args.welds, file=sys.stderr)
+        print("Re-run `weld_locate.py extract` to produce one - the numbers in the old file are "
+              "not the numbers this stage would have used, which was the bug.", file=sys.stderr)
+        return 2
     welds = wd["welds"]
     src = args.fit if not os.path.isdir(args.fit) else os.path.join(args.fit, "fit.json")
     with open(src, "r", encoding="utf-8") as fh:
@@ -162,34 +351,37 @@ def cmd_project(args) -> int:
     print("")
 
     R, _ = cv2.Rodrigues(rvec)
-    if args.min_weld > 0:
-        welds = [w for w in welds if w["length_mm"] * args.scale >= args.min_weld]
 
-    # GROUP BY JOINT. The boolean intersection returns several path fragments per contact, so one
-    # T-joint arrives as eight separate runs and numbering each stacks eight labels on the same
-    # place. An operator inspects a JOINT - "the cleat to the rail" - not a fragment of its
-    # perimeter, so the fragments are gathered by the pair of solids they join, their lengths
-    # summed, and one number issued per joint. That is also how a weld would be specified on a
-    # drawing, which matters when this eventually carries a WPS reference.
-    groups = {}
-    for w in welds:
-        key = tuple(sorted(w.get("joins") or [w["weld_number"]]))
-        g = groups.setdefault(key, {"paths": [], "length": 0.0, "method": w.get("method")})
-        g["paths"].append(np.asarray(w["path"], np.float64).reshape(-1, 3) * args.scale)
-        g["length"] += w["length_mm"] * args.scale
+    # THE NUMBERS ARE READ, NEVER MINTED. Both stages used to number independently and the two
+    # disagreed, so a weld's label depended on which file you were looking at. `extract` owns the
+    # identifier now - it is the stage that knows the piece mark - and everything downstream
+    # carries it through unchanged. Filtering happens on whole joints, so a short weld is dropped
+    # or kept entire rather than losing part of itself.
+    if args.min_weld > 0:
+        welds = [w for w in welds
+                 if w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
+    if not welds:
+        print("every joint was filtered out by --min-weld %.0f" % args.min_weld, file=sys.stderr)
+        return 1
 
     rows, drawn = [], []
-    for n, (key, g) in enumerate(sorted(groups.items(), key=lambda kv: -kv[1]["length"]), start=1):
-        num = "W%03d" % n
-        worlds = [(R @ p.T).T + tvec.ravel() for p in g["paths"]]
-        centre = np.vstack(worlds).mean(axis=0)
-        rows.append((num, centre, g["length"], g["method"], len(g["paths"])))
-        drawn.append((num, worlds))
+    for w in welds:
+        paths = [np.asarray(s, np.float64).reshape(-1, 3) * args.scale
+                 for s in w["Representation"]["segments"]]
+        worlds = [(R @ p.T).T + tvec.ravel() for p in paths]
+        rows.append((w["Name"], np.vstack(worlds).mean(axis=0),
+                     w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale,
+                     w["Pset_FastenerWeld"].get("Type1"), len(paths)))
+        drawn.append((w["Name"], worlds))
 
-    print("%-6s %28s %9s %10s %5s" % ("weld", "centre in the board frame (mm)", "length",
-                                       "method", "runs"))
-    for num, c, L, meth, nseg in rows[:args.list_max]:
-        print("%-6s %8.1f %8.1f %8.1f %7.0f mm %10s %5d"
+    print("piece %s, project %s, %s"
+          % (wd.get("piece_mark", {}).get("value", "?"), wd.get("project") or "unknown",
+             wd.get("schema")))
+    print("")
+    print("%-14s %26s %9s %10s %5s" % ("weld", "centre in the board frame (mm)", "length",
+                                       "type", "runs"))
+    for num, c, L, meth, nseg in sorted(rows, key=lambda r: -r[2])[:args.list_max]:
+        print("%-14s %8.1f %8.1f %8.1f %7.0f mm %10s %5d"
               % (num, c[0], c[1], c[2], L, (meth or "-")[:10], nseg))
     if len(rows) > args.list_max:
         print("... and %d more" % (len(rows) - args.list_max))
@@ -246,9 +438,13 @@ def cmd_project(args) -> int:
                     shown += 1
                     seen_here.append(num)
                     m = keep[len(keep) // 2]
-                    cv2.putText(out, num, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    # Just the ordinal on the image - every weld in shot shares the piece mark, so
+                    # repeating it 60 times costs legibility and says nothing. The full identifier
+                    # is in the header and in the sidecar.
+                    short = num.rsplit("-", 1)[-1]
+                    cv2.putText(out, short, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.42, (30, 30, 30), 3, lineType=cv2.LINE_AA)
-                    cv2.putText(out, num, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(out, short, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.42, (40, 230, 255), 1, lineType=cv2.LINE_AA)
             cv2.rectangle(out, (0, 0), (out.shape[1], 46), (26, 26, 26), -1)
             cv2.putText(out, "%s   %d joints on this face   pose %.0f%% silhouette"
@@ -287,8 +483,23 @@ def main() -> int:
     e.add_argument("--node", default="")
     e.add_argument("--scope", default="within-part")
     e.add_argument("--min-length", type=float, default=10.0,
-                   help="ignore runs shorter than this; short fragments are usually the boolean "
+                   help="ignore joints shorter than this; the short ones are usually the boolean "
                         "intersection finding a corner rather than a weld")
+    e.add_argument("--piece-mark", default=None,
+                   help="the namespace that makes weld numbers unique across a JOB. Derived from "
+                        "the member or part name when omitted, and recorded in the output either "
+                        "way so it is never ambiguous which was used.")
+    e.add_argument("--sort-tol", type=float, default=1.0,
+                   help="millimetres to round joint centroids to before ordering them. Coarse "
+                        "enough that solver noise cannot reorder two welds, fine enough that two "
+                        "genuinely different joints do not collide - and where they do, the pair "
+                        "of solid ids breaks the tie deterministically.")
+    e.add_argument("--carry-forward", default=None, metavar="PREVIOUS.json",
+                   help="a previous sidecar for this part. Weld numbers already issued there are "
+                        "kept for the same joints and new joints are allocated fresh numbers at "
+                        "the end, which is how a weld map survives a revision. Without it a joint "
+                        "the detector newly finds inserts into the geometric order and shifts "
+                        "every number above it.")
     e.add_argument("--out", required=True)
     p = sub.add_parser("project", help="weld sidecar + pose -> positions and an overlay")
     p.add_argument("--welds", required=True)

@@ -43,7 +43,7 @@ Everything in §2 follows from those two lines.
 
 ---
 
-## 2. The identification scheme (PROPOSED — not yet implemented)
+## 2. The identification scheme
 
 ```
 <piece-mark>-W<nnn>
@@ -55,44 +55,55 @@ identifies the part uniquely within a job, so namespacing by it inherits that gu
 A flat sequence across a whole job would need a registry and would still collide whenever two
 assemblies are analysed independently.
 
-**The ordinal is derived from geometry, not from iteration order.** Sort joints by their centroid
-in model coordinates — a deterministic lexicographic sort on (x, y, z), rounded to a tolerance
-coarse enough to be robust to solver noise but fine enough to be unambiguous. This is the property
-that makes the number survive a re-run: the centroid of a joint does not change when the detector's
-`--min-length` changes, so the joints that survive both runs keep their numbers.
+**The ordinal follows geometry, not iteration order.** Joints are sorted by centroid — lexicographic
+on (x, y, z), rounded to `--sort-tol` (1 mm by default), with the solid-id pair breaking ties. X
+leads because it is the extrusion axis by convention here, so the numbers run along the member the
+way a welder walks it. Sorting by **length** instead — what the projection stage used to do —
+reshuffles everything below any weld that crosses a filter.
 
-Sorting by **length** — which is what the projection stage does today — fails this outright. Add
-one weld, or filter one out, and every number below it shifts.
+**But a geometric sort is not sufficient, and this is the part that caught us out.** An ordinal is
+a *rank*, so it shifts whenever the set changes. The first implementation numbered the joints that
+survived `--min-length` and failed its own stability test at **0 of 50**: dropping fourteen short
+welds moved every number above them. Two further rules make it hold.
+
+*Number the whole set, filter afterwards.* A display threshold then cannot renumber anything. The
+sequence gains gaps where welds were filtered out, which is correct — weld maps gain gaps at every
+revision, and a gap is honest where a renumber is not.
+
+*Carry previous assignments forward by identity.* Geometric order still shifts if the **detector**
+finds a joint it previously missed, because a new weld inserts into the middle. Real fabrication
+does not renumber for that: it keeps the numbers already issued and allocates new ones at the end.
+`--carry-forward <previous.json>` does exactly that.
 
 **Number once, at joint level.** A "joint" is the pair of solids being joined, not a fragment of a
 weld perimeter. An operator inspects *the cleat to the rail*, and a drawing specifies it that way,
 so that is the unit that carries a number and eventually a WPS reference. The detector's path
 fragments are geometry, not identity.
 
-### Consequences for the pipeline
+### Measured behaviour
 
-Numbering belongs in `extract`, which is the stage that has the model and the piece mark.
-`project` and every downstream consumer **reads** the number and never mints one.
+| test | result |
+|---|---|
+| re-run at `--min-length` 10 → 200 (64 → 50 joints) | **50 of 50** kept `Name` and `GlobalId` |
+| detector finds 3 joints it previously missed | **61 of 61** kept their number; new ones issued W062–W064 |
+
+Numbering lives in `extract`, the stage that knows the piece mark. `project` and every downstream
+consumer **reads** the number and never mints one.
 
 ---
 
-## 3. Current state — and a defect
+## 3. What this replaced
 
-`tools/weld_locate.py` currently assigns weld numbers **twice, independently, and the two
-disagree**:
+`weld_locate.py` used to assign weld numbers **twice, independently, and the two disagreed**:
+`extract` numbered path *fragments* in detector order, and `project` discarded those and renumbered
+*joints* by descending length. The same physical weld carried a different number depending on which
+file you read, and the numbers moved whenever `--min-length` changed.
 
-- `extract` ([tools/weld_locate.py:82](../tools/weld_locate.py#L82)) numbers path **fragments**
-  `W001…Wnnn` in detector order.
-- `project` ([tools/weld_locate.py:183](../tools/weld_locate.py#L183)) discards those, groups
-  fragments by the solid pair they join, and renumbers **joints** `W001…Wnnn` sorted by descending
-  total length.
+It also mistook fragments for welds. The detector already returns **one connection per joint** —
+the boolean intersection's several path fragments are gathered inside it — so flattening them
+turned 64 joints into 269 "welds" and stacked eight labels on one T-joint.
 
-So the same physical weld carries a different number depending on which stage you read, the numbers
-shift when `--min-length` changes, and there is no piece-mark namespace so they collide across a
-job.
-
-Tracked as **cad-automation-dwd** (P1). The grouping logic in `project` is correct and should move
-into `extract`; what has to change is *when* and *how* the number is issued.
+Fixed in **cad-automation-dwd**.
 
 ---
 
@@ -101,12 +112,13 @@ into `extract`; what has to change is *when* and *how* the number is issued.
 Measured on the real test assembly (`outputs/welds/mainframe.json`, node `0:1:1:1:1`):
 
 ```
-269 path fragments  ->  64 joints  ->  18 596 mm of weld
-joint length: min 124 mm, median 260 mm, max 875 mm
-joint type detected: 106 of 269 fragments (39%) — the rest are null
+64 welded joints  ->  19 245 mm of weld
+joint length: min 124 mm, median 260 mm, max 896 mm
+joint type detected: 21 of 64 joints (33%) — the rest carry no Type1
 ```
 
-That 39% matters. Connection detection currently labels some contacts `t-joint` and leaves the
+That 33% matters. (An earlier draft said 39%, counting *fragments* rather than joints; the joint
+figure is the meaningful one, since a joint is what carries a number and a type.) Connection detection currently labels some contacts `t-joint` and leaves the
 majority unclassified, so **joint type is not reliably available from geometry today**. Anything
 downstream that needs `Type1`/`Type2` has to tolerate its absence.
 
@@ -117,7 +129,7 @@ More fundamentally, there is a hard boundary here that no amount of detection wo
 | weld position (path, centroid) | throat thickness, leg length |
 | weld length | penetration depth |
 | which two solids are joined | welding process |
-| joint type *(partly, 39%)* | intermittent vs continuous, pitch |
+| joint type *(partly, 33%)* | intermittent vs continuous, pitch |
 | surface form (planar/curved) | quality level, NDT requirement |
 
 The right-hand column comes from the **WPS**, not from the model. The exporter's job is to carry
@@ -154,8 +166,8 @@ shared properties can sit on the type object.
 
 | property | type | ISO basis | can we populate it? |
 |---|---|---|---|
-| `Type1`, `Type2` | IfcLabel | ISO 2553 seam type | partly — 39% today |
-| `Surface1`, `Surface2` | IfcLabel | plane / curved / hollow | yes, from face geometry |
+| `Type1`, `Type2` | IfcLabel | ISO 2553 seam type | partly — 33% today |
+| `Surface1`, `Surface2` | IfcLabel | plane / curved / hollow | in principle, but `contact_faces` is null today |
 | `Process` | IfcInteger | **ISO 4063** process number | no — from WPS |
 | `ProcessName` | IfcLabel | text alternative | no — from WPS |
 | `a` | IfcPositiveLengthMeasure | nominal throat thickness | no — engineering |
@@ -169,8 +181,9 @@ shared properties can sit on the type object.
 | `Intermittent` | IfcBoolean | — | no — engineering |
 | `Staggered` | IfcBoolean | — | no — engineering |
 
-So of seventeen properties, our pipeline can honestly populate **three** (`Surface1`, `Surface2`,
-and `Type1`/`Type2` when detected) plus a qualified `l`. That is not a shortfall — it is the
+So of sixteen properties, our pipeline populates exactly **one** today — `Type1`, on the 33% of
+joints where the detector names a type. `Surface1`/`Surface2` are derivable in principle but the
+detector returns `contact_faces: null`, so they are not available yet. That is not a shortfall — it is the
 correct division of labour. The Pset is designed to hold a *specified* weld; we are supplying the
 *detected* geometry that a specification gets attached to.
 
@@ -210,56 +223,76 @@ from.
 
 ---
 
-## 6. The sidecar (current prototype)
+## 6. The sidecar
 
-`tools/weld_locate.py extract` writes a sidecar that is the prototype for the IFC payload. Current
-shape:
+`weld_locate.py extract` writes a sidecar shaped like the IFC payload, so the eventual export is a
+serialisation step rather than a re-modelling one — and so the schema questions get asked now,
+while they are cheap.
 
 ```json
 {
-  "source": "e8a0ba3c_Structural Package 25-05-2026.json",
-  "node": "0:1:1:1:1",
-  "scope": "within-part",
-  "frame": "model coordinates as stored by the detector",
-  "weld_count": 269,
-  "total_length_mm": 18595.8,
-  "welds": [
-    {
-      "weld_number": "W001",
-      "joins": ["0:1:1:1:1:s4", "0:1:1:1:1:s26"],
-      "method": "t-joint",
-      "length_mm": 40.0,
-      "path": [[-210.0, 0.0, 164.0]]
-    }
-  ]
+  "schema": "IFC4",
+  "generator": "cad-automation weld_locate",
+  "generated": "2026-09-10T06:58:17+00:00",
+  "project": "10370",
+  "steel_grade": "S355",
+  "piece_mark": { "value": "MAINFRAME", "derived_from": "the part name carried on the solids" },
+  "source": { "analysis": "...", "node": "0:1:1:1:1", "scope": "within-part" },
+  "placement": { "frame": "model", "units": "mm", "to_project": null, "note": "..." },
+  "summary": { "weld_count": 64, "total_length_mm": 19244.7 },
+  "welds": [{
+    "GlobalId": "1c2cBjcPpv4Uw7e7fsKJ44",
+    "Name": "MAINFRAME-W025",
+    "Tag": "MAINFRAME-W025",
+    "PredefinedType": "WELD",
+    "Description": "solid 0 to solid 1",
+    "ConnectedTo": ["0:1:1:1:1:s0", "0:1:1:1:1:s1"],
+    "Pset_FastenerWeld":     { "Type1": "t-joint" },
+    "Pset_PSS_WeldGeometry": { "MeasuredLengthMm": 896.0, "SegmentCount": 16,
+                               "CentroidMm": [-156.95, 2133.33, 190.26] },
+    "Representation": { "type": "Polyline", "segments": [[[...]]] }
+  }]
 }
 ```
 
-Mapping to the IFC target:
+Four decisions in that are worth defending.
 
-| sidecar | IFC |
-|---|---|
-| `weld_number` | `IfcFastener.Name` — **once §2 is implemented** |
-| `joins` | the `IfcRelConnects*` the fastener relates |
-| `method` | `Pset_FastenerWeld.Type1` / `Type2` |
-| `length_mm` | see §5.3 — **not** simply `l` |
-| `path` | the fastener's representation |
-| `frame` | must resolve to the IFC project coordinate system |
+**Two Psets, deliberately.** `Pset_FastenerWeld` holds what somebody *specified*;
+`Pset_PSS_WeldGeometry` holds what we *measured*. That makes §4's boundary structural instead of a
+paragraph in a document, and it keeps the measured length out of `l`, where it would assert
+something false about any intermittent weld (§5.3).
 
-The `frame` field is load-bearing and easy to lose: the paths are in *model* coordinates as stored
-by the detector, which is the same frame the AR pose maps from. Any IFC export has to place them in
-the project coordinate system explicitly rather than assuming the two agree.
+**Only what we know.** No null `Process`, no null throat thickness. A missing property says "not
+specified yet"; a null says "specified as nothing". Only the second is a lie. In practice
+`Pset_FastenerWeld` carries `Type1` alone, on 33% of joints.
 
----
+**`GlobalId` seeded from identity, never from position in a list.** The first version included the
+ordinal in the seed and so inherited every renumber — a GlobalId that changes is not an identifier,
+it is a serial number for the run. It is now `sha1(project | piece mark | solid pair)` rendered in
+IFC's own 22-character alphabet. Verified on all 64: 22 characters, correct alphabet, leading
+character in 0–3, no collisions.
+
+**The schema version is declared, not assumed.** IFC4X3 renamed the single-letter measures (§5.4),
+so a reader has to know which naming applies. `IFC4` is the target because **IFC2X3 cannot carry
+this at all** — it has `IfcFastener` but no `IfcFastenerTypeEnum` and no `Pset_FastenerWeld`, so a
+weld there needs `ObjectType` text and a custom Pset. Verified against both schemas via
+ifcopenshell.
+
+Still to resolve: `placement.to_project` is null. The paths are in *model* coordinates — the same
+frame the AR pose maps from — and an IFC export must place them in the project coordinate system
+explicitly rather than assume the two agree.
 
 ## 7. Open questions
 
 - **Joint type coverage.** 61% of fragments have no detected type. Worth knowing whether that is a
   detection gap or genuinely ambiguous geometry before deciding how much effort it deserves.
-- **Piece mark availability.** §2 assumes the piece mark is reachable at `extract` time. Confirm it
-  is, or the scheme needs a different namespace.
-- **Centroid sort tolerance.** Needs choosing against real data — coarse enough to be stable under
-  solver noise, fine enough that no two joints tie.
+- **Piece mark provenance.** Resolved for now — derived from the part name on the solids
+  (`MAINFRAME`) and recorded in the output, with `--piece-mark` to override. But it is a CAD part
+  name, not a fabrication piece mark, and on a real job those should agree explicitly.
+- **`Surface1`/`Surface2`.** The detector returns `contact_faces: null`, so the one other property
+  geometry could fill is unavailable. Worth finding out whether that is cheap to populate.
+- **`placement.to_project`.** Null today. An IFC export needs the model → project transform stated,
+  not assumed.
 - **Execution class.** The exporter should probably take EXC as a parameter rather than assume one.
 - **ISO 4063 values.** Common structural process numbers (111 MMA, 135 MAG, 136 FCAW, 141 TIG) are
   **from recollection and unverified** — check against the document before embedding them anywhere.
