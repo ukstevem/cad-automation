@@ -167,6 +167,16 @@ def extract_all_solids(
                 continue
 
             children = node.get("children", [])
+            # Solid children are SYNTHETIC. `_embed_solid_children` writes them into the sidecar
+            # tree for the portal export, with ids like "0:1:1:2:s0" that are not XCAF labels, so
+            # recursing into them resolves no shape and the part contributes nothing. A
+            # multi-solid part IS the leaf here - the TopExp_Explorer below splits it into solids
+            # itself and numbers them. Without this a whole weldment silently extracts zero
+            # solids and reports zero connections, which looks like "no welds found" rather than
+            # a failure.
+            if children and all(c.get("node_type") == "solid" for c in children):
+                _extract_leaf(node, branch_id or nid)
+                continue
             if children:
                 if branch_id:
                     # Already inside a branch — keep the same id
