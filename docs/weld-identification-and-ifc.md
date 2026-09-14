@@ -4,6 +4,15 @@ How a weld found by geometry gets a number, keeps it, and travels to the people 
 need it. Written 2026-09-10, against schemas and standards checked at the time — see
 **Verification** at the end for what was confirmed and what is still recollection.
 
+> **Where this went (2026-09-14).** The Weld Map is now produced by **cad-automation-stage3**, not
+> this repo: its `cas_connection` table already numbers and ratifies welds, and the identity rules in
+> §2 were ported there (stage3 bd `5mn`). The agreed contract lives in
+> **pss-production-card**: `docs/adr/0007-weld-map-source-join-key-and-transport.md` and
+> `docs/weld-map-contract.md`. It keeps the IFC-shaped export from §6, but the join key is
+> (project number, weldment mark) and seams are numbered per weldment type. This repo's
+> `weld_locate.py` remains the AR weld-cell consumer. Read this document for the reasoning behind the
+> identity rules; read the contract for the current design.
+
 Scope is deliberately narrow: **identification and carriage**. The broader standards landscape —
 what exists for welding data at all, and why there is no DSTV equivalent — is in the vault at
 `reference/welding-data-standards.md`.
