@@ -153,6 +153,10 @@ def main() -> int:
         print("%s is not an IFC-shaped sidecar - re-run weld_locate.py extract" % args.welds,
               file=sys.stderr)
         return 2
+    if sidecar["welds"] and "PSS_WeldGeometry" not in sidecar["welds"][0]:
+        print("%s was written before its property set dropped the reserved Pset_ prefix (bd nlk) - "
+              "re-run weld_locate.py extract" % args.welds, file=sys.stderr)
+        return 2
     src = args.fit if not os.path.isdir(args.fit) else os.path.join(args.fit, "fit.json")
     with open(src, "r", encoding="utf-8") as fh:
         fit = json.load(fh)
@@ -185,7 +189,7 @@ def main() -> int:
     welds = sidecar["welds"]
     if args.min_weld > 0:
         welds = [w for w in welds
-                 if w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
+                 if w["PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
     if deviation:
         welds, turned = DV.as_built_welds(welds, frame, deviation, args.scale)
         print("as built: %s - %d welds turned with it" % (deviation["description"], len(turned)))
@@ -384,7 +388,7 @@ tr.sel{background:#3a2e10}
   <p class="muted" id="weldnote"></p>
   <div class="tablewrap"><table>
     <thead><tr><th class="l">Weld</th><th>x mm</th><th>y mm</th><th>z mm</th><th>length mm</th>
-      <th class="l">type</th><th class="l">faces</th><th class="l">in view</th></tr></thead>
+      <th class="l">detected as</th><th class="l">faces</th><th class="l">in view</th></tr></thead>
     <tbody id="rows"></tbody>
   </table></div>
 </section>

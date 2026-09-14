@@ -165,7 +165,8 @@ because it is the one thing the whole traceability chain hangs on. The mapping i
 |---|---|
 | weld number (`B041-W003`) | `IfcFastener.Name` (and/or `.Tag`) |
 | WPS reference | `IfcClassificationReference` |
-| geometry and process data | `Pset_FastenerWeld` |
+| specified geometry and process data | `Pset_FastenerWeld` |
+| what we measured | `PSS_WeldGeometry` (ours, so no `Pset_` prefix, which IFC reserves) |
 | the weld path itself | the fastener's own representation |
 
 ### 5.2 `Pset_FastenerWeld` field by field
@@ -175,7 +176,7 @@ shared properties can sit on the type object.
 
 | property | type | ISO basis | can we populate it? |
 |---|---|---|---|
-| `Type1`, `Type2` | IfcLabel | ISO 2553 seam type | partly — 33% today |
+| `Type1`, `Type2` | IfcLabel | ISO 2553 seam type | no — geometry gives the joint, not the seam |
 | `Surface1`, `Surface2` | IfcLabel | plane / curved / hollow | in principle, but `contact_faces` is null today |
 | `Process` | IfcInteger | **ISO 4063** process number | no — from WPS |
 | `ProcessName` | IfcLabel | text alternative | no — from WPS |
@@ -190,8 +191,11 @@ shared properties can sit on the type object.
 | `Intermittent` | IfcBoolean | — | no — engineering |
 | `Staggered` | IfcBoolean | — | no — engineering |
 
-So of sixteen properties, our pipeline populates exactly **one** today — `Type1`, on the 33% of
-joints where the detector names a type. `Surface1`/`Surface2` are derivable in principle but the
+So of sixteen properties, our pipeline populates **none**. It used to write the detector's `t-joint`
+into `Type1` on a third of joints, and that was wrong: `Type1` is the ISO 2553 *seam* type (fillet,
+V, square butt), while a T-joint is joint geometry that can carry a fillet or a butt weld. The
+detector's label now travels as `PSS_WeldGeometry.DetectionMethod` (bd `nlk`, 2026-09-14).
+`Surface1`/`Surface2` are derivable in principle but the
 detector returns `contact_faces: null`, so they are not available yet. That is not a shortfall — it is the
 correct division of labour. The Pset is designed to hold a *specified* weld; we are supplying the
 *detected* geometry that a specification gets attached to.
@@ -258,10 +262,10 @@ while they are cheap.
     "PredefinedType": "WELD",
     "Description": "solid 0 to solid 1",
     "ConnectedTo": ["0:1:1:1:1:s0", "0:1:1:1:1:s1"],
-    "Pset_FastenerWeld":     { "Type1": "t-joint" },
-    "Pset_PSS_WeldGeometry": { "MeasuredLengthMm": 896.0, "SegmentCount": 16,
-                               "CentroidMm": [-156.95, 2133.33, 190.26],
-                               "ArticleFaces": ["+L", "-D"] },
+    "PSS_WeldGeometry": { "MeasuredLengthMm": 896.0, "SegmentCount": 16,
+                          "DetectionMethod": "t-joint",
+                          "CentroidMm": [-156.95, 2133.33, 190.26],
+                          "ArticleFaces": ["+L", "-D"] },
     "Representation": { "type": "Polyline", "segments": [[[...]]] }
   }]
 }
@@ -269,14 +273,16 @@ while they are cheap.
 
 Five decisions in that are worth defending.
 
-**Two Psets, deliberately.** `Pset_FastenerWeld` holds what somebody *specified*;
-`Pset_PSS_WeldGeometry` holds what we *measured*. That makes §4's boundary structural instead of a
+**Two property sets, deliberately.** `Pset_FastenerWeld` holds what somebody *specified*;
+`PSS_WeldGeometry` holds what we *measured*. That makes §4's boundary structural instead of a
 paragraph in a document, and it keeps the measured length out of `l`, where it would assert
-something false about any intermittent weld (§5.3).
+something false about any intermittent weld (§5.3). Ours carries no `Pset_` prefix: IFC reserves it
+for the property sets the standard defines. It was `Pset_PSS_WeldGeometry` until 2026-09-14.
 
 **Only what we know.** No null `Process`, no null throat thickness. A missing property says "not
-specified yet"; a null says "specified as nothing". Only the second is a lie. In practice
-`Pset_FastenerWeld` carries `Type1` alone, on 33% of joints.
+specified yet"; a null says "specified as nothing". Only the second is a lie. Nothing in
+`Pset_FastenerWeld` is known from geometry, so today the set is left out altogether — IFC does not
+allow a property set with no properties, so writing `{}` would not be a faithful shape either.
 
 **`GlobalId` seeded from identity, never from position in a list.** The first version included the
 ordinal in the seed and so inherited every renumber — a GlobalId that changes is not an identifier,
@@ -314,8 +320,11 @@ explicitly rather than assume the two agree.
 
 ## 7. Open questions
 
-- **Joint type coverage.** 61% of fragments have no detected type. Worth knowing whether that is a
-  detection gap or genuinely ambiguous geometry before deciding how much effort it deserves.
+- **Detection method coverage.** 43 of the tower's 64 welds carry no `DetectionMethod`. Worth knowing
+  whether that is a detection gap or genuinely ambiguous geometry before deciding how much effort it
+  deserves.
+- **Where a seam type would come from.** Geometry cannot give ISO 2553 `Type1`. The candidates are a
+  reviewer field, or the WPS register's `joint_type`, which today is descriptive text.
 - **Piece mark provenance.** Resolved for now — derived from the part name on the solids
   (`MAINFRAME`) and recorded in the output, with `--piece-mark` to override. But it is a CAD part
   name, not a fabrication piece mark, and on a real job those should agree explicitly.

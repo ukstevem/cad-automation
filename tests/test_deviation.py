@@ -106,7 +106,7 @@ def test_welds_turn_with_their_half_and_the_sidecar_is_left_as_drawn():
     def weld(name, x):
         p = f["centre"] + f["axes"] @ np.array([x, f["hi"][1] - 3, 0.0])
         q = p + f["axes"][:, 0] * 10
-        return {"Name": name, "Pset_PSS_WeldGeometry": {"ArticleFaces": ["+W"]},
+        return {"Name": name, "PSS_WeldGeometry": {"ArticleFaces": ["+W"]},
                 "Pset_FastenerWeld": {}, "Representation": {"segments": [[list(p / scale), list(q / scale)]]}}
 
     welds = [weld("T-W001", -100.0), weld("T-W002", 100.0)]
@@ -115,7 +115,7 @@ def test_welds_turn_with_their_half_and_the_sidecar_is_left_as_drawn():
     assert welds == original
     assert turned == ["T-W001"]
     assert out[1] == original[1]
-    assert out[0]["Pset_PSS_WeldGeometry"]["ArticleFaces"] == ["+D"]
+    assert out[0]["PSS_WeldGeometry"]["ArticleFaces"] == ["+D"]
     moved = np.asarray(out[0]["Representation"]["segments"][0]) * scale
     assert WF.faces_of(moved, f, band=10) == ["+D"]
 

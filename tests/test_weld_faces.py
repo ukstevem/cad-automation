@@ -105,9 +105,9 @@ def test_a_camera_off_to_one_side_is_presented_that_side_as_well():
 def test_faces_recorded_in_the_sidecar_win_over_computed_ones():
     f = WF.article_frame(_box(400, 100, 100))
     welds = [
-        {"Name": "A-W001", "Pset_PSS_WeldGeometry": {"ArticleFaces": ["-L"]},
+        {"Name": "A-W001", "PSS_WeldGeometry": {"ArticleFaces": ["-L"]},
          "Representation": {"segments": [[[0, 0, 0], [1, 0, 0]]]}},
-        {"Name": "A-W002", "Pset_PSS_WeldGeometry": {},
+        {"Name": "A-W002", "PSS_WeldGeometry": {},
          "Representation": {"segments": [[list(f["centre"]), list(f["centre"])]]}},
     ]
     faces, computed = WF.faces_for_welds(welds, f, scale=1.0, band=10)

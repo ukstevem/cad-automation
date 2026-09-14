@@ -161,7 +161,7 @@ def as_built_welds(welds, frame, dev, scale):
             continue
         w["Representation"]["segments"] = [(((p - pivot) @ R.T + pivot) / scale).tolist()
                                            for p in segs]
-        geometry = w.get("Pset_PSS_WeldGeometry") or {}
+        geometry = w.get("PSS_WeldGeometry") or {}
         if geometry.get("ArticleFaces") is not None:
             geometry["ArticleFaces"] = remap_faces(geometry["ArticleFaces"], frame, dev)
         turned.append(w["Name"])

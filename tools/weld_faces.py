@@ -134,7 +134,7 @@ def faces_for_welds(welds, frame, scale, band):
     here from the same frame. Returns the mapping and how many had to be computed."""
     out, computed = {}, 0
     for w in welds:
-        codes = (w.get("Pset_PSS_WeldGeometry") or {}).get("ArticleFaces")
+        codes = (w.get("PSS_WeldGeometry") or {}).get("ArticleFaces")
         if codes is None:
             pts = np.vstack([np.asarray(s, np.float64).reshape(-1, 3)
                              for s in w["Representation"]["segments"]]) * scale

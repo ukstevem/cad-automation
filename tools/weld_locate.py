@@ -225,14 +225,20 @@ def cmd_extract(args) -> int:
         # Only what we actually know. A null Process or a null throat thickness would assert that
         # the weld was specified as nothing, where absence correctly says nobody has specified it
         # yet - see docs/weld-identification-and-ifc.md section 4.
+        #
+        # That includes Type1. Pset_FastenerWeld.Type1 is the ISO 2553 SEAM type - fillet, V, square
+        # butt. The detector's method ('t-joint', 'coplanar') is how the joint was found, which is
+        # joint geometry: a T-joint can carry a fillet or a butt weld. It used to be written into
+        # Type1 and so stated a seam nobody had specified; it travels as DetectionMethod in our own
+        # set instead (bd nlk).
         pset = {}
-        if j["method"]:
-            pset["Type1"] = j["method"]
         geometry = {
             "MeasuredLengthMm": round(j["length"], 1),
             "SegmentCount": len(j["segs"]),
             "CentroidMm": [round(float(v), 2) for v in j["centre"]],
         }
+        if j["method"]:
+            geometry["DetectionMethod"] = j["method"]
         if frame is not None:
             geometry["ArticleFaces"] = WF.faces_of(np.vstack(j["segs"]) * scale, frame, band)
         welds.append({
@@ -246,20 +252,23 @@ def cmd_extract(args) -> int:
             "Description": "solid %s to solid %s" % (j["ids"][0].rsplit(":s", 1)[-1],
                                                      j["ids"][1].rsplit(":s", 1)[-1]),
             "ConnectedTo": j["ids"],
-            "Pset_FastenerWeld": pset,
+            # An IfcPropertySet must hold at least one property, so an empty one is left out rather
+            # than written as {}. Nothing in it is known from geometry, so today it always is.
+            **({"Pset_FastenerWeld": pset} if pset else {}),
             # OUR MEASUREMENTS, kept out of Pset_FastenerWeld deliberately. That Pset describes a
             # weld somebody specified; this describes one we found. Writing the measured length
             # into `l` would be the tempting shortcut and would be wrong - `l` is the length of a
             # single weld ELEMENT, so on any intermittent weld it would state something false.
-            # ArticleFaces belongs here for the same reason: it is measured, not specified.
-            "Pset_PSS_WeldGeometry": geometry,
+            # ArticleFaces belongs here for the same reason: it is measured, not specified. No Pset_
+            # prefix: IFC reserves it for the property sets the standard itself defines.
+            "PSS_WeldGeometry": geometry,
             "Representation": {
                 "type": "Polyline",
                 "segments": [[[round(float(v), 2) for v in p] for p in s] for s in j["segs"]],
             },
         })
 
-    total = sum(w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] for w in welds)
+    total = sum(w["PSS_WeldGeometry"]["MeasuredLengthMm"] for w in welds)
     out = {
         # The schema version is not decoration: IFC4X3 renamed the single-letter ISO 2553 measures
         # (`l` -> WeldElementLength and the rest), so a reader has to know which naming applies.
@@ -294,18 +303,18 @@ def cmd_extract(args) -> int:
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
 
-    typed = sum(1 for w in welds if w["Pset_FastenerWeld"].get("Type1"))
+    typed = sum(1 for w in welds if w["PSS_WeldGeometry"].get("DetectionMethod"))
     print("%d welded joints, %.0f mm total -> %s" % (len(welds), total, args.out))
     print("piece mark %s (%s), project %s" % (mark, mark_src, project or "unknown"))
     if args.carry_forward:
         print("carried %d weld numbers forward from %s, issued %d new"
               % (carried, os.path.basename(args.carry_forward), len(joints) - carried))
-    print("joint type known for %d of %d (%.0f%%) - the rest carry no Type1, which is absence "
-          "rather than a null" % (typed, len(welds), 100.0 * typed / len(welds)))
+    print("detection method recorded for %d of %d (%.0f%%); the ISO 2553 seam type (Type1) is left "
+          "to whoever specifies the weld" % (typed, len(welds), 100.0 * typed / len(welds)))
     if frame is not None:
         per_face, on_none = {}, 0
         for w in welds:
-            codes = w["Pset_PSS_WeldGeometry"]["ArticleFaces"]
+            codes = w["PSS_WeldGeometry"]["ArticleFaces"]
             on_none += not codes
             for code in codes:
                 per_face[code] = per_face.get(code, 0) + 1
@@ -313,8 +322,8 @@ def cmd_extract(args) -> int:
               % (band, ", ".join("%s %d" % (k, per_face[k]) for k in WF.FACES if k in per_face),
                  "  - %d welds on NO face, so no camera will show them" % on_none if on_none else ""))
     print("longest: %s" % ", ".join(
-        "%s %.0fmm" % (w["Name"], w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])
-        for w in sorted(welds, key=lambda w: -w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])[:4]))
+        "%s %.0fmm" % (w["Name"], w["PSS_WeldGeometry"]["MeasuredLengthMm"])
+        for w in sorted(welds, key=lambda w: -w["PSS_WeldGeometry"]["MeasuredLengthMm"])[:4]))
     return 0
 
 
@@ -358,8 +367,8 @@ def place_welds(welds, rvec, tvec, scale):
         placed.append((w["Name"], worlds, {
             "name": w["Name"],
             "centre": np.vstack(worlds).mean(axis=0),
-            "length": w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * scale,
-            "type": w["Pset_FastenerWeld"].get("Type1"),
+            "length": w["PSS_WeldGeometry"]["MeasuredLengthMm"] * scale,
+            "type": w["PSS_WeldGeometry"].get("DetectionMethod"),
             "runs": len(segs)}))
     return placed
 
@@ -408,7 +417,7 @@ def cmd_project(args) -> int:
     # or kept entire rather than losing part of itself.
     if args.min_weld > 0:
         welds = [w for w in welds
-                 if w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
+                 if w["PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
     if not welds:
         print("every joint was filtered out by --min-weld %.0f" % args.min_weld, file=sys.stderr)
         return 1
