@@ -35,6 +35,12 @@ length, so a stretch where the article departs from its model stands out from a 
 TRUST BEFORE POSITION. Silhouette confirmation is checked first. Below --min-silhouette the weld
 positions are withheld: a weld from a wrong pose is not approximately right, it is somewhere
 plausible and wrong. The outline is still shown, so the page says why.
+
+AS BUILT (bd 0sb). An article that does not match its drawing fails the trust gate, which is right
+but says nothing about why. --deviation applies a measured departure from the drawing (see
+tools/deviation.py) to the outline model and to the welds on the part that departs, so the page shows
+the article as it is, draws those welds in blue where they are on it, and says plainly that it is not
+as drawn. The IFC sidecar is never edited.
 """
 from __future__ import annotations
 
@@ -54,6 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cv2  # noqa: E402
 
 from app.services import visibility as VIS  # noqa: E402
+import deviation as DV  # noqa: E402
 import line_check as LC  # noqa: E402
 import pose_refine as PR  # noqa: E402
 import weld_faces as WF  # noqa: E402
@@ -133,6 +140,9 @@ def main() -> int:
                          "count as visible")
     ap.add_argument("--min-weld", type=float, default=0.0,
                     help="leave out joints shorter than this, in the fitted model's units")
+    ap.add_argument("--deviation", default=None,
+                    help="a measured departure from the drawing (tools/deviation.py), to show the "
+                         "article as built; the mesh then defaults to the one it was measured on")
     ap.add_argument("--width", type=int, default=1400, help="photo width on the page, px")
     ap.add_argument("--out", required=True, help="directory for ar_view.html and ar_view.json")
     args = ap.parse_args()
@@ -148,9 +158,15 @@ def main() -> int:
         fit = json.load(fh)
     rvec = np.asarray(fit["rvec"], np.float64).reshape(3, 1)
     tvec = np.asarray(fit["tvec"], np.float64).reshape(3, 1)
-    mesh_path = args.mesh or os.path.join("outputs/ar_models",
-                                          os.path.basename(fit.get("mesh") or ""))
-    mesh = VIS.load_stl(mesh_path)
+    deviation = DV.load(args.deviation) if args.deviation else None
+    drawn = deviation["article"]["mesh"] if deviation else os.path.basename(fit.get("mesh") or "")
+    mesh = VIS.load_stl(args.mesh or os.path.join("outputs/ar_models", drawn))
+    # The article frame always comes from the DRAWN mesh: face codes and deviations are defined in it.
+    frame = WF.article_frame(mesh)
+    turned = []
+    if deviation:
+        DV.check_article(deviation, frame)
+        mesh, _mask = DV.as_built_mesh(mesh, frame, deviation)
 
     views = WL.load_views(args.captures, args.profile, args.cam_profile)
     if not views:
@@ -170,9 +186,11 @@ def main() -> int:
     if args.min_weld > 0:
         welds = [w for w in welds
                  if w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale >= args.min_weld]
+    if deviation:
+        welds, turned = DV.as_built_welds(welds, frame, deviation, args.scale)
+        print("as built: %s - %d welds turned with it" % (deviation["description"], len(turned)))
     placed = WL.place_welds(welds, rvec, tvec, args.scale)
 
-    frame = WF.article_frame(mesh)
     band = args.face_band if args.face_band else WF.default_band(frame)
     faces_by_weld, computed = WF.faces_for_welds(welds, frame, args.scale, band)
     name_of = {code: WF.face_name(frame, rvec, code) for code in WF.FACES}
@@ -235,7 +253,8 @@ def main() -> int:
             rows.append({"name": name, "centre": [round(float(x), 1) for x in r["centre"]],
                          "length": round(float(r["length"]), 1), "type": r["type"],
                          "runs": r["runs"], "seen": seen_by[name],
-                         "faces": [name_of[c] for c in faces_by_weld.get(name, [])]})
+                         "faces": [name_of[c] for c in faces_by_weld.get(name, [])],
+                         "as_built": name in turned})
         rows.sort(key=lambda r: -r["length"])
 
     data = {
@@ -250,6 +269,7 @@ def main() -> int:
                     "project": sidecar.get("project"), "welds": len(sidecar["welds"])},
         "faces": {"band_mm": round(float(band), 1), "min_cos": args.min_face_cos,
                   "source": "sidecar" if not computed else "computed", "no_face": no_face},
+        "deviation": DV.summary(deviation, turned, args.deviation) if deviation else None,
         "tol_mm": args.tol, "scale": args.scale, "low_band": args.low_band,
         "views": page_views, "bands": bands, "low_runs": lows, "welds": rows,
     }
@@ -292,7 +312,7 @@ PAGE = r"""<!doctype html>
 <title>Tower AR</title>
 <style>
 :root{--bg:#121417;--panel:#1b1e23;--line:#2a2e35;--text:#e6e8ec;--dim:#9aa1ab;
-      --weld:#ffb000;--ok:#35c97a;--miss:#ff5a4f;--blind:#7d838c}
+      --weld:#ffb000;--asbuilt:#5ec8ff;--ok:#35c97a;--miss:#ff5a4f;--blind:#7d838c}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
      font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:20px 24px 40px}
@@ -306,6 +326,9 @@ h1{font-size:22px;margin:0}
 .banner{border-radius:6px;padding:10px 14px;margin:0 0 12px;border:1px solid;max-width:110ch}
 .banner.bad{background:#3a1715;border-color:#7a2a24}
 .banner.note{background:#2c2410;border-color:#6b5316}
+.banner.dev{background:#0f2536;border-color:#1f5578}
+.tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:11px;
+     color:var(--asbuilt);background:#0f2536;border:1px solid #1f5578}
 .tools{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;margin:0 0 12px;color:var(--dim)}
 .tools label{display:inline-flex;gap:6px;align-items:center;cursor:pointer;color:var(--text)}
 .tools input:focus-visible{outline:2px solid var(--weld);outline-offset:2px}
@@ -347,6 +370,7 @@ tr.sel{background:#3a2e10}
   <span></span>
   <label><input type="checkbox" id="tw"><span class="sw" style="background:var(--weld)"></span>welds</label>
   <label><input type="checkbox" id="tl">weld numbers</label>
+  <span id="asbuiltkey" hidden><span class="sw" style="background:var(--asbuilt)"></span> welds as built</span>
 </div>
 <div class="views" id="views"></div>
 <section>
@@ -368,6 +392,7 @@ const D = __DATA__;
 const el = id => document.getElementById(id);
 const S = {2: true, 1: true, 0: false, welds: true, labels: true, sel: null};
 const COL = {2: '#35c97a', 1: '#ff5a4f', 0: '#7d838c'};
+const TURNED = new Set(D.deviation ? D.deviation.turned_welds : []);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
 
 el('meta').textContent = `${D.captures} · pose from ${D.pose.source} · ${D.sidecar.file} ` +
@@ -378,9 +403,18 @@ el('chips').innerHTML =
   chip('outline confirmed', D.trust.confirmed.toFixed(0) + '%') +
   chip('tolerance', '±' + D.tol_mm + ' mm') +
   chip('face band', D.faces.band_mm + ' mm') +
-  chip('weld positions', D.trust.withheld ? 'withheld' : D.welds.length);
+  chip('weld positions', D.trust.withheld ? 'withheld' : D.welds.length) +
+  (D.deviation ? chip('as built', `${D.deviation.turned_half} half turned ${D.deviation.angle_deg}°`) : '');
 
 let banners = '';
+if (D.deviation) {
+  el('asbuiltkey').hidden = false;
+  banners += `<div class="banner dev"><b>As built, not as drawn.</b> ${esc(D.deviation.description)}` +
+    (D.deviation.joint ? ` (${esc(D.deviation.joint)})` : '') + `, found by fitting the photographs.
+    The outline is checked against the article as built, and the ${TURNED.size} welds on the turned
+    half are drawn in blue where they are on this article. The drawing and its IFC weld sidecar are
+    unchanged.</div>`;
+}
 if (D.trust.withheld) banners += `<div class="banner bad"><b>Weld positions withheld.</b>
   Silhouette confirmation is ${D.trust.silhouette.toFixed(0)}%, below the ${D.trust.min_silhouette}%
   needed to trust the pose. A weld placed from a wrong pose is somewhere plausible and wrong, so
@@ -419,7 +453,7 @@ function draw() {
     if (!S.welds) return;
     x.lineCap = 'round'; x.lineJoin = 'round';
     for (const [name, lines] of Object.entries(v.welds)) {
-      const hot = S.sel === name;
+      const hot = S.sel === name, tone = TURNED.has(name) ? '#5ec8ff' : '#ffb000';
       for (const l of lines) {
         x.beginPath();
         for (let k = 0; k < l.length; k += 2) {
@@ -428,7 +462,7 @@ function draw() {
         }
         if (l.length === 2) x.lineTo(l[0] / 10 + 0.1, l[1] / 10);
         x.lineWidth = hot ? 8 : 5; x.strokeStyle = 'rgba(0,0,0,.65)'; x.stroke();
-        x.lineWidth = hot ? 5 : 2.5; x.strokeStyle = hot ? '#ffffff' : '#ffb000'; x.stroke();
+        x.lineWidth = hot ? 5 : 2.5; x.strokeStyle = hot ? '#ffffff' : tone; x.stroke();
       }
       if (S.labels || hot) {
         const l = lines.reduce((a, b) => b.length > a.length ? b : a);
@@ -436,7 +470,7 @@ function draw() {
         const lx = l[m] / 10 + 6, ly = l[m + 1] / 10 - 6, t = name.split('-').pop();
         x.font = '600 13px system-ui,sans-serif';
         x.lineWidth = 3; x.strokeStyle = '#000'; x.strokeText(t, lx, ly);
-        x.fillStyle = hot ? '#ffffff' : '#ffb000'; x.fillText(t, lx, ly);
+        x.fillStyle = hot ? '#ffffff' : tone; x.fillText(t, lx, ly);
       }
     }
   });
@@ -463,8 +497,10 @@ if (D.trust.withheld) {
 } else {
   el('weldnote').textContent = `Each weld's centre in the rig (board) frame, from the IFC sidecar ` +
     `through the solved pose, in millimetres on this article. A camera shows the welds on the ` +
-    `article faces it looks at. Click a row to find the weld on the photos.`;
-  tb.innerHTML = D.welds.map(r => `<tr data-n="${esc(r.name)}"><td class="l">${esc(r.name)}</td>
+    `article faces it looks at. Click a row to find the weld on the photos.` +
+    (D.deviation ? ` Welds tagged as built are on the turned half: they are drawn where they are on ` +
+      `this article, not where the drawing puts them.` : '');
+  tb.innerHTML = D.welds.map(r => `<tr data-n="${esc(r.name)}"><td class="l">${esc(r.name)}${r.as_built ? ' <span class="tag">as built</span>' : ''}</td>
     <td>${r.centre[0].toFixed(1)}</td><td>${r.centre[1].toFixed(1)}</td><td>${r.centre[2].toFixed(1)}</td>
     <td>${r.length.toFixed(0)}</td><td class="l">${r.type ? esc(r.type) : '<span class="muted">–</span>'}</td>
     <td class="l">${r.faces.length ? esc(r.faces.join(', ')) : '<span class="muted">none</span>'}</td>
