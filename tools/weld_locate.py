@@ -206,6 +206,19 @@ def cmd_extract(args) -> int:
         print("every joint was shorter than --min-length %.0f" % args.min_length, file=sys.stderr)
         return 1
 
+    # WHICH FACE OF THE ARTICLE each weld is on (bd bn5), worked out once here from the geometry so
+    # every consumer - the AR view, a weld map, a drawing - agrees about it. It needs the article's
+    # mesh, and the detector's coordinates are the assembly's, so --scale states the contract
+    # between the two (the 1:5 tower needs 0.2). Without --mesh the sidecar simply carries no faces,
+    # and a consumer computes them from the same function instead.
+    frame = band = None
+    scale = float(getattr(args, "scale", None) or 1.0)
+    if getattr(args, "mesh", None):
+        import weld_faces as WF
+        frame = WF.article_frame(VIS.load_stl(args.mesh))
+        band = (float(args.face_band) if getattr(args, "face_band", None)
+                else WF.default_band(frame))
+
     welds = []
     for j in joints:
         name = j["name"]
@@ -215,6 +228,13 @@ def cmd_extract(args) -> int:
         pset = {}
         if j["method"]:
             pset["Type1"] = j["method"]
+        geometry = {
+            "MeasuredLengthMm": round(j["length"], 1),
+            "SegmentCount": len(j["segs"]),
+            "CentroidMm": [round(float(v), 2) for v in j["centre"]],
+        }
+        if frame is not None:
+            geometry["ArticleFaces"] = WF.faces_of(np.vstack(j["segs"]) * scale, frame, band)
         welds.append({
             # Seeded from WHAT the weld is, never from where it sits in a list. The first version
             # included the ordinal and so inherited every renumber - a GlobalId that changes is
@@ -231,11 +251,8 @@ def cmd_extract(args) -> int:
             # weld somebody specified; this describes one we found. Writing the measured length
             # into `l` would be the tempting shortcut and would be wrong - `l` is the length of a
             # single weld ELEMENT, so on any intermittent weld it would state something false.
-            "Pset_PSS_WeldGeometry": {
-                "MeasuredLengthMm": round(j["length"], 1),
-                "SegmentCount": len(j["segs"]),
-                "CentroidMm": [round(float(v), 2) for v in j["centre"]],
-            },
+            # ArticleFaces belongs here for the same reason: it is measured, not specified.
+            "Pset_PSS_WeldGeometry": geometry,
             "Representation": {
                 "type": "Polyline",
                 "segments": [[[round(float(v), 2) for v in p] for p in s] for s in j["segs"]],
@@ -266,6 +283,10 @@ def cmd_extract(args) -> int:
                     "the two agree.",
             "to_project": None,
         },
+        # How the ArticleFaces codes were assigned, so a reader can check them rather than trust
+        # them: the article's axes, extents and the band a weld had to fall within.
+        "article_frame": (WF.frame_to_json(frame, band, os.path.basename(args.mesh), scale)
+                          if frame is not None else None),
         "summary": {"weld_count": len(welds), "total_length_mm": round(total, 1)},
         "welds": welds,
     }
@@ -281,20 +302,66 @@ def cmd_extract(args) -> int:
               % (carried, os.path.basename(args.carry_forward), len(joints) - carried))
     print("joint type known for %d of %d (%.0f%%) - the rest carry no Type1, which is absence "
           "rather than a null" % (typed, len(welds), 100.0 * typed / len(welds)))
+    if frame is not None:
+        per_face, on_none = {}, 0
+        for w in welds:
+            codes = w["Pset_PSS_WeldGeometry"]["ArticleFaces"]
+            on_none += not codes
+            for code in codes:
+                per_face[code] = per_face.get(code, 0) + 1
+        print("article faces (band %.1f mm): %s%s"
+              % (band, ", ".join("%s %d" % (k, per_face[k]) for k in WF.FACES if k in per_face),
+                 "  - %d welds on NO face, so no camera will show them" % on_none if on_none else ""))
     print("longest: %s" % ", ".join(
         "%s %.0fmm" % (w["Name"], w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])
         for w in sorted(welds, key=lambda w: -w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"])[:4]))
     return 0
 
 
-def _hull_depth(mesh, rvec, tvec, view):
-    """Depth buffer of the part's CONVEX HULL - the surface it presents to this camera."""
-    from scipy.spatial import ConvexHull
-    pts = mesh.reshape(-1, 3)
-    h = ConvexHull(pts)
-    tris = pts[h.simplices].reshape(-1, 3, 3)
-    d, _ = VIS.depth_buffer(tris, rvec, tvec, view, downscale=1)
-    return d
+def load_views(captures, profile, cam_profile=(),
+               skip=("overlay", "linecheck", "endcheck", "weld", "ar_view")):
+    """A board-in-shot view for every photograph in a capture set, each with its own camera's
+    intrinsics. Shared by `project` and tools/ar_view.py, so the two can never read one capture set
+    two different ways."""
+    base = MVF.load_profile(profile)
+    board = charuco.build_board_from_config(base["board"])
+    det = charuco.make_detector(board)
+    overrides = [(s.split("=", 1)[0], MVF.load_profile(s.split("=", 1)[1]))
+                 for s in cam_profile]
+    views = []
+    for path in sorted(glob.glob(os.path.join(captures, "*"))):
+        b = os.path.basename(path)
+        if any(k in b for k in skip):
+            continue
+        img = cv2.imread(path, cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        prof = next((p for sub, p in overrides if sub in b), base)
+        v = MVF.build_view(img, prof, board, det, label=b)
+        v.update({"K": prof["K"], "dist": prof["dist"], "image": img, "tag": b})
+        views.append(v)
+    return views
+
+
+def place_welds(welds, rvec, tvec, scale):
+    """Every joint's segments put into the board frame through the pose.
+
+    Returns ``[(name, [Nx3 segment, ...], row)]``. The row carries what a table needs - centre,
+    length, type and run count - in the fitted model's units after ``scale``."""
+    R, _ = cv2.Rodrigues(np.asarray(rvec, np.float64).reshape(3, 1))
+    t = np.asarray(tvec, np.float64).ravel()
+    placed = []
+    for w in welds:
+        segs = [np.asarray(s, np.float64).reshape(-1, 3) * scale
+                for s in w["Representation"]["segments"]]
+        worlds = [(R @ p.T).T + t for p in segs]
+        placed.append((w["Name"], worlds, {
+            "name": w["Name"],
+            "centre": np.vstack(worlds).mean(axis=0),
+            "length": w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * scale,
+            "type": w["Pset_FastenerWeld"].get("Type1"),
+            "runs": len(segs)}))
+    return placed
 
 
 def cmd_project(args) -> int:
@@ -316,23 +383,7 @@ def cmd_project(args) -> int:
                                           os.path.basename(fit.get("mesh") or ""))
     mesh = VIS.load_stl(mesh_path)
 
-    base = MVF.load_profile(args.profile)
-    board = charuco.build_board_from_config(base["board"])
-    det = charuco.make_detector(board)
-    overrides = [(s.split("=", 1)[0], MVF.load_profile(s.split("=", 1)[1]))
-                 for s in args.cam_profile]
-    views = []
-    for path in sorted(glob.glob(os.path.join(args.captures, "*"))):
-        b = os.path.basename(path)
-        if any(k in b for k in ("overlay", "linecheck", "endcheck", "weld")):
-            continue
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
-        if img is None:
-            continue
-        prof = next((p for sub, p in overrides if sub in b), base)
-        v = MVF.build_view(img, prof, board, det, label=b)
-        v.update({"K": prof["K"], "dist": prof["dist"], "image": img, "tag": b})
-        views.append(v)
+    views = load_views(args.captures, args.profile, args.cam_profile)
     if not views:
         print("no usable captures", file=sys.stderr)
         return 2
@@ -350,8 +401,6 @@ def cmd_project(args) -> int:
         return 1
     print("")
 
-    R, _ = cv2.Rodrigues(rvec)
-
     # THE NUMBERS ARE READ, NEVER MINTED. Both stages used to number independently and the two
     # disagreed, so a weld's label depended on which file you were looking at. `extract` owns the
     # identifier now - it is the stage that knows the piece mark - and everything downstream
@@ -364,15 +413,19 @@ def cmd_project(args) -> int:
         print("every joint was filtered out by --min-weld %.0f" % args.min_weld, file=sys.stderr)
         return 1
 
-    rows, drawn = [], []
-    for w in welds:
-        paths = [np.asarray(s, np.float64).reshape(-1, 3) * args.scale
-                 for s in w["Representation"]["segments"]]
-        worlds = [(R @ p.T).T + tvec.ravel() for p in paths]
-        rows.append((w["Name"], np.vstack(worlds).mean(axis=0),
-                     w["Pset_PSS_WeldGeometry"]["MeasuredLengthMm"] * args.scale,
-                     w["Pset_FastenerWeld"].get("Type1"), len(paths)))
-        drawn.append((w["Name"], worlds))
+    placed = place_welds(welds, rvec, tvec, args.scale)
+    rows = [r for _name, _worlds, r in placed]
+
+    # WHICH WELDS EACH CAMERA SHOWS: the ones on the article faces it looks at (bd bn5), using the
+    # face codes the sidecar carries or, where it has none, the same function computing them here.
+    import weld_faces as WF
+    frame = WF.article_frame(mesh)
+    band = getattr(args, "face_band", None) or WF.default_band(frame)
+    faces_by_weld, computed = WF.faces_for_welds(welds, frame, args.scale, band)
+    min_cos = getattr(args, "min_face_cos", None) or 0.2
+    occlusion_mm = getattr(args, "occlusion_mm", None) or 8.0
+    print("faces: %s" % ("from the sidecar" if not computed
+                         else "computed here for %d welds, band %.1f mm" % (computed, band)))
 
     print("piece %s, project %s, %s"
           % (wd.get("piece_mark", {}).get("value", "?"), wd.get("project") or "unknown",
@@ -380,77 +433,49 @@ def cmd_project(args) -> int:
     print("")
     print("%-14s %26s %9s %10s %5s" % ("weld", "centre in the board frame (mm)", "length",
                                        "type", "runs"))
-    for num, c, L, meth, nseg in sorted(rows, key=lambda r: -r[2])[:args.list_max]:
+    for r in sorted(rows, key=lambda r: -r["length"])[:args.list_max]:
+        c = r["centre"]
         print("%-14s %8.1f %8.1f %8.1f %7.0f mm %10s %5d"
-              % (num, c[0], c[1], c[2], L, (meth or "-")[:10], nseg))
+              % (r["name"], c[0], c[1], c[2], r["length"], (r["type"] or "-")[:10], r["runs"]))
     if len(rows) > args.list_max:
         print("... and %d more" % (len(rows) - args.list_max))
     print("")
-    print("%d joints, %.0f mm of weld in total" % (len(rows), sum(r[2] for r in rows)))
+    print("%d joints, %.0f mm of weld in total" % (len(rows), sum(r["length"] for r in rows)))
 
     if args.out:
         panels = []
         per_view = {}
         for v in views:
-            depth, _ = VIS.depth_buffer(mesh, rvec, tvec, v, downscale=1)
-            near = cv2.erode(depth, np.ones((3, 3), np.uint8))
             out = v["image"].copy()
-            K = np.asarray(v["K"], np.float64).reshape(3, 3)
-            dist = np.asarray(v["dist"], np.float64)
-            Rc, _ = cv2.Rodrigues(np.asarray(v["rvec_cam"], np.float64).reshape(3, 1))
-            tc = np.asarray(v["tvec_cam"], np.float64).reshape(3, 1)
-            h, wd_ = depth.shape
-            # PRESENTED FACES ONLY, tested against the CONVEX HULL.
-            #
-            # Occlusion alone is not enough: on an open frame a weld on the far web is genuinely
-            # visible through the openings, so nothing occludes it and it draws. But splitting the
-            # part's depth range in half is also wrong - it cuts along the viewing direction, so a
-            # joint on the TOP face near the far end lands on the wrong side of the cut for one
-            # camera and not the other, and the two views disagree about a face they can both see.
-            #
-            # The hull settles it. Every weld on a face the camera is presented - top, or the near
-            # side - lies on the hull's own near surface. A weld on the far web sits deep behind
-            # that surface even with a clear line of sight to it. So both cameras agree about the
-            # top face, and differ only about the sides, which is the physical situation.
-            hull_depth = _hull_depth(mesh, rvec, tvec, v)
-            shown = 0
-            seen_here = []
-            for num, worlds in drawn:
-                world = np.vstack(worlds)
-                p2, _ = cv2.projectPoints(world.reshape(-1, 1, 3), v["rvec_cam"], v["tvec_cam"],
-                                          K, dist)
-                p2 = p2.reshape(-1, 2)
-                cz = (Rc @ world.T + tc)[2]
-                keep = []
-                for (x, y), z_ in zip(p2, cz):
-                    xi, yi = int(round(x)), int(round(y))
-                    if not (0 <= xi < wd_ and 0 <= yi < h):
-                        continue
-                    if (z_ - near[yi, xi]) >= 8.0:      # something nearer is in the way
-                        continue
-                    if (z_ - hull_depth[yi, xi]) > args.shell_mm:   # behind the presented face
-                        continue
-                    keep.append((xi, yi))
-                for a, b in zip(keep[:-1], keep[1:]):
-                    if abs(a[0] - b[0]) + abs(a[1] - b[1]) < 60:
+            shown, status, presented, _cos = WF.visible_weld_points(
+                placed, faces_by_weld, mesh, rvec, tvec, v, frame, min_cos, occlusion_mm)
+            tally = {}
+            for s_ in status.values():
+                tally[s_] = tally.get(s_, 0) + 1
+            print("%-28s faces presented %s | welds %s"
+                  % (v["tag"][:28], ", ".join(WF.face_name(frame, rvec, c_)
+                                              for c_ in WF.FACES if c_ in presented) or "none",
+                     ", ".join("%s %d" % kv for kv in sorted(tally.items()))))
+            for num, lines in shown.items():
+                for line in lines:
+                    pts = [(int(round(x)), int(round(y))) for x, y in line]
+                    for a, b in zip(pts[:-1], pts[1:]):
                         cv2.line(out, a, b, (40, 230, 255), 3, lineType=cv2.LINE_AA)
-                if keep:
-                    shown += 1
-                    seen_here.append(num)
-                    m = keep[len(keep) // 2]
-                    # Just the ordinal on the image - every weld in shot shares the piece mark, so
-                    # repeating it 60 times costs legibility and says nothing. The full identifier
-                    # is in the header and in the sidecar.
-                    short = num.rsplit("-", 1)[-1]
-                    cv2.putText(out, short, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.42, (30, 30, 30), 3, lineType=cv2.LINE_AA)
-                    cv2.putText(out, short, (m[0] + 6, m[1] - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.42, (40, 230, 255), 1, lineType=cv2.LINE_AA)
+                longest = max(lines, key=len)
+                mx, my = longest[len(longest) // 2]
+                # Just the ordinal on the image - every weld in shot shares the piece mark, so
+                # repeating it 60 times costs legibility and says nothing. The full identifier is
+                # in the header and in the sidecar.
+                short = num.rsplit("-", 1)[-1]
+                cv2.putText(out, short, (int(mx) + 6, int(my) - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.42, (30, 30, 30), 3, lineType=cv2.LINE_AA)
+                cv2.putText(out, short, (int(mx) + 6, int(my) - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.42, (40, 230, 255), 1, lineType=cv2.LINE_AA)
             cv2.rectangle(out, (0, 0), (out.shape[1], 46), (26, 26, 26), -1)
             cv2.putText(out, "%s   %d joints on this face   pose %.0f%% silhouette"
-                        % (v["tag"][:26], shown, sil),
+                        % (v["tag"][:26], len(shown), sil),
                         (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (240, 240, 240), 2)
-            per_view[v["tag"]] = seen_here
+            per_view[v["tag"]] = list(shown)
             panels.append(out)
         hh = min(p.shape[0] for p in panels)
         row = np.hstack([cv2.resize(p, (int(p.shape[1] * hh / p.shape[0]), hh)) for p in panels])
@@ -500,6 +525,16 @@ def main() -> int:
                         "the end, which is how a weld map survives a revision. Without it a joint "
                         "the detector newly finds inserts into the geometric order and shifts "
                         "every number above it.")
+    e.add_argument("--mesh", default=None,
+                   help="the article's mesh. Given, each weld is assigned the article faces it is "
+                        "on (ArticleFaces) and the frame they were measured in is recorded - see "
+                        "tools/weld_faces.py. Omitted, the sidecar carries no faces.")
+    e.add_argument("--scale", type=float, default=1.0,
+                   help="detector coordinates into the mesh's units, for the face assignment - "
+                        "the 1:5 tower needs 0.2")
+    e.add_argument("--face-band", type=float, default=None,
+                   help="mm in from a face plane a weld may sit and still be on that face; "
+                        "default 20%% of the smaller cross-section extent")
     e.add_argument("--out", required=True)
     p = sub.add_parser("project", help="weld sidecar + pose -> positions and an overlay")
     p.add_argument("--welds", required=True)
@@ -515,10 +550,15 @@ def main() -> int:
                         "between the two halves and it has to be stated, not guessed: a wrong "
                         "scale puts every weld somewhere plausible and wrong.")
     p.add_argument("--min-silhouette", type=float, default=60.0)
-    p.add_argument("--shell-mm", type=float, default=25.0,
-                   help="how far behind the convex hull's near surface a weld may sit and still "
-                        "count as presented to this camera. Roughly the depth of the members the "
-                        "operator can reach into.")
+    p.add_argument("--face-band", type=float, default=None,
+                   help="mm in from a face plane a weld may sit and still be on that face, used "
+                        "only where the sidecar carries no ArticleFaces")
+    p.add_argument("--min-face-cos", type=float, default=0.2,
+                   help="how squarely a camera must face an article face to be shown its welds; "
+                        "grazing faces are excluded")
+    p.add_argument("--occlusion-mm", type=float, default=8.0,
+                   help="how far behind the surface in front of it a weld point may sit and still "
+                        "count as visible")
     p.add_argument("--min-weld", type=float, default=0.0,
                    help="ignore runs shorter than this, in model units. 269 numbered welds is an "
                         "illegible display, and the short ones are mostly tacks and corner "

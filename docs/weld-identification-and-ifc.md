@@ -248,6 +248,8 @@ while they are cheap.
   "piece_mark": { "value": "MAINFRAME", "derived_from": "the part name carried on the solids" },
   "source": { "analysis": "...", "node": "0:1:1:1:1", "scope": "within-part" },
   "placement": { "frame": "model", "units": "mm", "to_project": null, "note": "..." },
+  "article_frame": { "extent_mm": { "L": 432.6, "W": 116.0, "D": 116.0 },
+                     "face_band_mm": 23.2, "axes_in_model": { "...": "..." }, "codes": { "...": "..." } },
   "summary": { "weld_count": 64, "total_length_mm": 19244.7 },
   "welds": [{
     "GlobalId": "1c2cBjcPpv4Uw7e7fsKJ44",
@@ -258,13 +260,14 @@ while they are cheap.
     "ConnectedTo": ["0:1:1:1:1:s0", "0:1:1:1:1:s1"],
     "Pset_FastenerWeld":     { "Type1": "t-joint" },
     "Pset_PSS_WeldGeometry": { "MeasuredLengthMm": 896.0, "SegmentCount": 16,
-                               "CentroidMm": [-156.95, 2133.33, 190.26] },
+                               "CentroidMm": [-156.95, 2133.33, 190.26],
+                               "ArticleFaces": ["+L", "-D"] },
     "Representation": { "type": "Polyline", "segments": [[[...]]] }
   }]
 }
 ```
 
-Four decisions in that are worth defending.
+Five decisions in that are worth defending.
 
 **Two Psets, deliberately.** `Pset_FastenerWeld` holds what somebody *specified*;
 `Pset_PSS_WeldGeometry` holds what we *measured*. That makes §4's boundary structural instead of a
@@ -286,6 +289,24 @@ so a reader has to know which naming applies. `IFC4` is the target because **IFC
 this at all** — it has `IfcFastener` but no `IfcFastenerTypeEnum` and no `Pset_FastenerWeld`, so a
 weld there needs `ObjectType` text and a custom Pset. Verified against both schemas via
 ifcopenshell.
+
+**Faces come from the article's own frame.** Each weld carries `ArticleFaces`: the faces of the
+article it sits on. `±L` are the ends, and `±W` and `±D` are the long faces. They are measured in the
+model frame, so they describe the article however it is lying; which one is the top is a question for
+a placement, answered from the pose. A camera shows the welds on the faces it looks at (bd `bn5`).
+This replaced a convex-hull test under which each rig camera showed only the welds at its own end of
+the tower, because on an open frame "close to the outer envelope" is not "on a face".
+
+Two details decided whether it worked. The cross axes come from the tightest box around the
+cross-section, not from principal axes, which on the tower's square section came out 23° off the
+rails. And a weld counts as on a face if it lies within a band of that face's plane, because welds sit
+on the members' inner faces, 16–20 mm in from the envelope. The default band is 20% of the smaller
+cross-section extent, 23.2 mm on the tower.
+
+On the tower every weld is on at least one face: 36 on one, 23 on two, 5 on three. Both rig cameras
+look at the top and the same long side. Of the 16 top-face welds, each camera shows 14 and both show
+12; the rest are blocked from one camera's angle. `article_frame` in the envelope records the axes,
+extents and band, so the codes can be checked rather than trusted.
 
 Still to resolve: `placement.to_project` is null. The paths are in *model* coordinates — the same
 frame the AR pose maps from — and an IFC export must place them in the project coordinate system

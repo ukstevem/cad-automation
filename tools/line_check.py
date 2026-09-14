@@ -212,11 +212,18 @@ def solve_discrepancy(per_view, tol_mm=10.0, iters=6):
     return d, inl, len(b)
 
 
-def check(mesh, rvec, tvec, views, tol_mm=10.0, step=3, reach=2.5, topology=True):
+def check(mesh, rvec, tvec, views, tol_mm=10.0, step=3, reach=2.5, topology=True,
+          with_world=False):
     per_view = []
     for v in views:
-        pts, tan, z = (visible_feature_edges(mesh, rvec, tvec, v)
-                       if topology else geometric_edges(mesh, rvec, tvec, v, step=step))
+        world = None
+        if topology and with_world:
+            # The 3D point behind each sample, for a caller that needs to know WHERE on the part a
+            # line was or was not confirmed - along its length, for instance.
+            pts, tan, z, world = visible_feature_edges(mesh, rvec, tvec, v, with_world=True)
+        else:
+            pts, tan, z = (visible_feature_edges(mesh, rvec, tvec, v)
+                           if topology else geometric_edges(mesh, rvec, tvec, v, step=step))
         fx = float(np.asarray(v["K"], np.float64).reshape(3, 3)[0, 0])
         if not len(pts):
             per_view.append({"view": v, "pts": pts, "off": np.zeros(0),
@@ -238,7 +245,7 @@ def check(mesh, rvec, tvec, views, tol_mm=10.0, step=3, reach=2.5, topology=True
                                                    (pts[:, 1] + ny * t * sc).astype(np.float32)))
         blind = (~found) & (best < 12.0)
         per_view.append({"view": v, "pts": pts, "tan": tan, "z": z, "off": off, "found": found,
-                         "blind": blind, "dev": np.abs(off), "fx": fx})
+                         "blind": blind, "dev": np.abs(off), "fx": fx, "world": world})
     return per_view
 
 
