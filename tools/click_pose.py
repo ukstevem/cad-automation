@@ -49,66 +49,86 @@ from face_init import pose_seated  # noqa: E402
 VIEW_W = 900
 
 
-def render_with_lookup(tris, R, size=VIEW_W, cam_R=None):
+def render_perspective_with_lookup(tris, R, view, K, dist, size=VIEW_W, hidden_mm=1.0):
     """
-    A shaded view of the part lying on the chosen face, plus the model point behind every pixel.
+    The part lying on the chosen face, drawn IN PERSPECTIVE from the camera that took the photo,
+    plus the model point behind every pixel.
 
-    The lookup is the whole trick: it turns "click somewhere on that face" into an exact 3D point
-    without the operator having to identify a named feature. Painter's algorithm, nearest last, so
-    the lookup holds the surface actually seen.
+    The previous view was orthographic, turned to the camera's direction. That put the operator on
+    the right side of the part but did not draw it the way the photo does: the rig cameras are 700 to
+    900 mm from a 433 mm tower, so the near end is drawn far larger than the far end, and an
+    orthographic view draws both the same size - matching a point on one to the other meant doing
+    that correction by eye (Steve, 2026-09-14). The camera's lens and its pose to the board are
+    known; only where the part sits on the board is not, which is what the clicks are for. So the
+    model is placed where this camera's centre ray meets the table, which is near enough for the
+    foreshortening to match, and the view is cropped to the part.
+
+    The lookup is the surface point under each pixel, interpolated perspective-correctly across its
+    triangle (1/z and point/z are linear on screen). It used to be the triangle's CENTROID - and on
+    the tower 338 triangles are rail faces over 300 mm long, so a click near one end of a rail was
+    recorded at its middle.
     """
-    P = (R @ tris.reshape(-1, 3).T).T.reshape(-1, 3, 3)
-    # View from where the CAMERA actually is. A fixed three-quarter view shows the part from one
-    # side while the photograph looks from another, so the two do not correspond and only the
-    # faces they happen to share can be clicked. The camera's direction is known from the board
-    # pose even though the part's yaw is not, so this at least puts the operator on the right side
-    # of the part; the remaining turn is offered as separate variants below.
-    if cam_R is not None:
-        M = np.asarray(cam_R, np.float64).copy()
-        M[1] *= -1.0          # image y runs down; keep the preview the same way up as the photo
-        M[2] *= -1.0
-    else:
-        look, _ = cv2.Rodrigues(np.array([-1.05, 0.0, 0.0]))
-        spin, _ = cv2.Rodrigues(np.array([0.0, 0.0, -0.6]))
-        M = look @ spin
-    V = (M @ P.reshape(-1, 3).T).T.reshape(-1, 3, 3)
-    flat = V.reshape(-1, 3)
-    lo, hi = flat.min(axis=0), flat.max(axis=0)
-    span = max(hi[0] - lo[0], hi[1] - lo[1]) or 1.0
-    s = (size - 40) / span
-    h = int((hi[1] - lo[1]) * s + 40)
+    model = np.asarray(tris, np.float64).reshape(-1, 3, 3)
+    rc = np.asarray(view["rvec_cam"], np.float64).reshape(3, 1)
+    tc = np.asarray(view["tvec_cam"], np.float64).reshape(3)
+    Rc, _ = cv2.Rodrigues(rc)
+    K = np.asarray(K, np.float64).reshape(3, 3)
+    dist = np.asarray(dist, np.float64).ravel()
+
+    P = (R @ model.reshape(-1, 3).T).T
+    lo, hi = P.min(axis=0), P.max(axis=0)
+    # The board frame has the part at negative Z resting on Z = 0. Put its middle where the camera's
+    # centre ray crosses the plane at half the part's height.
+    eye = -Rc.T @ tc
+    ray = Rc.T @ np.linalg.solve(K, np.array([K[0, 2], K[1, 2], 1.0]))
+    hit = eye + ray * ((-(hi[2] - lo[2]) / 2.0 - eye[2]) / ray[2])
+    t = np.array([hit[0] - (lo[0] + hi[0]) / 2.0, hit[1] - (lo[1] + hi[1]) / 2.0, -hi[2]])
+
+    def project(points):
+        uv, _ = cv2.projectPoints(points.reshape(-1, 1, 3), rc, tc, K, dist)
+        return uv.reshape(-1, 2), (Rc @ points.reshape(-1, 3).T).T[:, 2] + tc[2]
+
+    uv, z = project(P + t)
+    ulo, uhi = uv.min(axis=0), uv.max(axis=0)
+    s = (size - 40) / max(uhi[0] - ulo[0], uhi[1] - ulo[1], 1e-6)
+    h = int((uhi[1] - ulo[1]) * s + 40)
+    Q = ((uv - ulo) * s + 20).reshape(-1, 3, 2)
+    iz = (1.0 / z).reshape(-1, 3)
+
     img = np.full((h, size, 3), 255, np.uint8)
     lut = np.full((h, size, 3), np.nan, np.float32)
-    zbuf = np.full((h, size), -1e9, np.float32)
-
-    # Fill the triangles to get two things at once: the lookup that turns a click into a model
-    # point, and a depth buffer to hide the lines behind the part. Neither fill is ever shown.
-    order = np.argsort(V[:, :, 2].mean(axis=1))
-    for i in order:
-        q = ((V[i, :, :2] - lo[:2]) * s + 20).astype(np.int32)
-        q[:, 1] = h - q[:, 1]
-        m = np.zeros((h, size), np.uint8)
-        cv2.fillConvexPoly(m, q, 1)
+    ibuf = np.zeros((h, size), np.float64)        # 1/depth of the nearest surface drawn; 0 = none
+    for i in range(len(model)):
+        q = Q[i]
+        x0, y0 = np.maximum(np.floor(q.min(axis=0)).astype(int), 0)
+        x1, y1 = np.minimum(np.ceil(q.max(axis=0)).astype(int), [size - 1, h - 1])
+        if x1 < x0 or y1 < y0:
+            continue
+        m = np.zeros((y1 - y0 + 1, x1 - x0 + 1), np.uint8)
+        cv2.fillConvexPoly(m, np.round(q - [x0, y0]).astype(np.int32), 1)
         ys, xs = np.nonzero(m)
         if not len(xs):
             continue
-        lut[ys, xs] = tris.reshape(-1, 3, 3)[i].mean(axis=0)
-        # Depth INTERPOLATED across the triangle, not its mean. A long thin member is one long
-        # triangle, and testing an edge against the average depth of the triangle it lies on puts
-        # it tens of millimetres out at the ends - which culls the edge in dashes along its own
-        # surface. Screen-space depth is planar, so three corners determine it.
-        A = np.array([[q[0, 0], q[0, 1], 1.0], [q[1, 0], q[1, 1], 1.0], [q[2, 0], q[2, 1], 1.0]])
-        try:
-            coef = np.linalg.solve(A, V[i, :, 2])
-        except np.linalg.LinAlgError:
-            zbuf[ys, xs] = float(V[i, :, 2].mean())
-            continue
-        zbuf[ys, xs] = coef[0] * xs + coef[1] * ys + coef[2]
+        ys, xs = ys + y0, xs + x0
+        A = np.column_stack([q, np.ones(3)])
+        if abs(np.linalg.det(A)) < 1e-6:          # edge-on: a sliver with no area to interpolate over
+            pix_iz = np.full(len(xs), iz[i].mean())
+            pix_p = np.tile(model[i].mean(axis=0), (len(xs), 1))
+        else:
+            # Screen barycentrics, CLAMPED to the triangle: the filled pixels overhang its true edge
+            # slightly, and extrapolating there put looked-up points up to 8 mm off an edge-on face.
+            bary = np.column_stack([xs, ys, np.ones(len(xs))]) @ np.linalg.inv(A)
+            bary = np.clip(bary, 0.0, None)
+            bary /= np.maximum(bary.sum(axis=1, keepdims=True), 1e-12)
+            wz = bary * iz[i]                       # perspective-correct: weight each corner by 1/z
+            pix_iz = wz.sum(axis=1)
+            pix_p = (wz @ model[i]) / pix_iz[:, None]
+        nearer = pix_iz > ibuf[ys, xs]
+        ibuf[ys[nearer], xs[nearer]] = pix_iz[nearer]
+        lut[ys[nearer], xs[nearer]] = pix_p[nearer]
 
-    # A wireframe with hidden lines removed - an engineering view, not a see-through one. Every
-    # feature edge is sampled along its length and each sample kept only where nothing nearer is
-    # drawn over it, so an edge disappears behind the part and reappears the other side rather
-    # than being drawn or dropped whole.
+    # Hidden-line wireframe, as before: each feature edge sampled along its length and kept where
+    # nothing nearer than it by more than hidden_mm was drawn over that pixel.
     from critical_edges import mesh_feature_edges
     edges, faces, fn = mesh_feature_edges(tris, crease_deg=25.0)
     if len(edges):
@@ -117,17 +137,21 @@ def render_with_lookup(tris, R, size=VIEW_W, cam_R=None):
         dot = np.ones(len(faces))
         dot[~lone] = np.sum(fn[f0[~lone]] * fn[f1[~lone]], axis=1)
         keep = lone | (np.degrees(np.arccos(np.clip(dot, -1, 1))) > 25.0)
-        E = (M @ (R @ edges[keep].reshape(-1, 3).T)).T.reshape(-1, 2, 3)
-        for e in E:
-            a = np.array([(e[0, 0] - lo[0]) * s + 20, h - ((e[0, 1] - lo[1]) * s + 20), e[0, 2]])
-            b = np.array([(e[1, 0] - lo[0]) * s + 20, h - ((e[1, 1] - lo[1]) * s + 20), e[1, 2]])
+        euv, ez = project((R @ edges[keep].reshape(-1, 3).T).T + t)
+        E = ((euv - ulo) * s + 20).reshape(-1, 2, 2)
+        EZ = ez.reshape(-1, 2)
+        # Against the FARTHEST surface in a 3x3 neighbourhood: an edge is the boundary of the faces
+        # it joins, and the pixel beside it often belongs to the nearer one, which drew visible edges
+        # as dashes. Background (0) stays 0, so silhouettes are kept.
+        far = cv2.erode(ibuf, np.ones((3, 3), np.uint8))
+        for (a, b), (za, zb) in zip(E, EZ):
             n = max(2, int(np.hypot(b[0] - a[0], b[1] - a[1])))
-            t = np.linspace(0, 1, n)[:, None]
-            pts = a * (1 - t) + b * t
-            xi = np.clip(pts[:, 0].astype(int), 0, size - 1)
-            yi = np.clip(pts[:, 1].astype(int), 0, h - 1)
-            # visible where this edge is at least as near as whatever filled that pixel
-            vis = pts[:, 2] >= zbuf[yi, xi] - 0.5
+            f = np.linspace(0, 1, n)
+            xi = np.clip((a[0] + (b[0] - a[0]) * f).astype(int), 0, size - 1)
+            yi = np.clip((a[1] + (b[1] - a[1]) * f).astype(int), 0, h - 1)
+            ze = 1.0 / (1.0 / za + (1.0 / zb - 1.0 / za) * f)
+            buf = far[yi, xi]
+            vis = (buf == 0) | (ze <= 1.0 / np.maximum(buf, 1e-12) + hidden_mm)
             run = None
             for k in range(n):
                 if vis[k] and run is None:
@@ -173,8 +197,9 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Place the part</title>
 <header><b>Place the part</b> &mdash; pick how it is lying, then click three pairs:
 a point on the model, then the same point on the photo.
 <span class=hint>Rough is fine &mdash; about 30&nbsp;px of slop still converges. The orientations
-below are drawn from this camera's direction and differ by a roll and a turn, so compare where the
-holes and brackets sit. Hidden lines are removed, so this reads like the photograph.</span></header>
+below are drawn in perspective from the camera that took the photo, as if the part sat in the middle
+of its view, and differ by a roll and a turn &mdash; compare where the holes and brackets sit. Hidden
+lines are removed, so this reads like the photograph.</span></header>
 <div class=rests id=rests>__RESTS__</div>
 <div class=panes>
   <div class=pane><h3>the model &mdash; click a point</h3><canvas id=cm></canvas></div>
@@ -299,7 +324,6 @@ def cmd_prepare(args) -> int:
     board0 = charuco.build_board_from_config(prof0["board"])
     v0 = MVF.build_view(img, prof0, board0, charuco.make_detector(board0),
                         label=os.path.basename(shot))
-    cam_R, _ = cv2.Rodrigues(np.asarray(v0["rvec_cam"], np.float64).reshape(3, 1))
 
     entries, figs = [], []
     variants = []
@@ -309,7 +333,7 @@ def cmd_prepare(args) -> int:
             Ry, _ = cv2.Rodrigues(np.array([0.0, 0.0, np.radians(yaw)]).reshape(3, 1))
             variants.append((i, yaw, Ry @ R0))
     for j, (i, yaw, R) in enumerate(variants):
-        png, lut = render_with_lookup(tris, R, cam_R=cam_R)
+        png, lut = render_perspective_with_lookup(tris, R, v0, prof0["K"], prof0["dist"])
         # The lookup travels as an IMAGE, not as JSON. Written out per pixel it came to 35 MB for
         # six orientations; as an 8-bit RGB encoding of xyz over the model's bounding box it is a
         # few hundred kilobytes, and 8 bits across a 433 mm part is 1.7 mm - far finer than the
