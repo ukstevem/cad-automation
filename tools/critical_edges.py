@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -142,7 +143,10 @@ def visible_feature_edges(tris, rvec, tvec, view, crease_deg=25.0, step_px=2.0, 
     agrees with its own depth - so self-occlusion is handled without trusting the buffer to LOCATE
     an edge, which is the job it was bad at.
     """
-    ck = id(tris)
+    # Keyed on the mesh's CONTENT. It was id(tris), and ids are reused once an array is freed, so a
+    # script scoring several mesh variants in a loop could be handed an earlier variant's edges (bd qhf).
+    arr = np.ascontiguousarray(tris, np.float64)
+    ck = (arr.shape, hashlib.sha1(arr.tobytes()).hexdigest())
     if ck not in cache:
         cache[ck] = mesh_feature_edges(tris, crease_deg=crease_deg)
     edges, faces, n = cache[ck]
