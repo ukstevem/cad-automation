@@ -263,7 +263,8 @@ def main() -> int:
         "pose": {"source": fit.get("init") or "multiview fit", "fit": os.path.normpath(src),
                  "resting_index": fit.get("resting_index")},
         "trust": {"confirmed": round(float(confirmed), 1), "silhouette": round(float(silhouette), 1),
-                  "min_silhouette": args.min_silhouette, "withheld": bool(withheld)},
+                  "min_silhouette": args.min_silhouette, "withheld": bool(withheld),
+                  "default_min_silhouette": ap.get_default("min_silhouette")},
         "sidecar": {"file": os.path.basename(args.welds), "schema": sidecar.get("schema"),
                     "piece_mark": (sidecar.get("piece_mark") or {}).get("value"),
                     "project": sidecar.get("project"), "welds": len(sidecar["welds"])},
@@ -415,6 +416,11 @@ if (D.deviation) {
     half are drawn in blue where they are on this article. The drawing and its IFC weld sidecar are
     unchanged.</div>`;
 }
+if (!D.trust.withheld && D.trust.min_silhouette < D.trust.default_min_silhouette)
+  banners += `<div class="banner note"><b>Trust gate lowered for this page.</b> Silhouette confirmation
+  is ${D.trust.silhouette.toFixed(0)}%. Weld positions are shown from ${D.trust.min_silhouette}% instead
+  of the usual ${D.trust.default_min_silhouette}%, so treat them as indicative and check them against
+  the photographs.</div>`;
 if (D.trust.withheld) banners += `<div class="banner bad"><b>Weld positions withheld.</b>
   Silhouette confirmation is ${D.trust.silhouette.toFixed(0)}%, below the ${D.trust.min_silhouette}%
   needed to trust the pose. A weld placed from a wrong pose is somewhere plausible and wrong, so
