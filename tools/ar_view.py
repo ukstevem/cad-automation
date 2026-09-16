@@ -29,8 +29,14 @@ top, the long sides, the ends - from `weld_faces`, and a camera shows the welds 
 presented. That replaced a convex-hull test which made each camera show only its own end of the
 tower. See tools/weld_faces.py for the reasoning and the measurements behind the defaults.
 
-ALONG THE LENGTH. Outline confirmation is also pooled across the cameras by tenths of the part's
-length, so a stretch where the article departs from its model stands out from a whole-part average.
+ALONG THE LENGTH, IN MILLIMETRES (bd h04). Deviation is pooled across the cameras by tenths of the
+part's length and reported as a median, because that is the measurement an inspector can act on and
+defend. A pass fraction cannot do that job: on the tower it reads 54% while the pose is good to about
+half a millimetre, since it counts every sample with no contrast as a failure. Deviation is measured
+in a WIDER window than the pass tolerance (--dev-tol), or the tolerance would truncate the very tail
+that marks a defect. Bands whose median stands out from the rest of the part are flagged: on the
+glued tower that is 2.0 mm at 40-50% of the length against 0.4 mm either side, which is where its two
+halves meet.
 
 TRUST BEFORE POSITION. Silhouette confirmation is checked first. Below --min-silhouette the weld
 positions are withheld: a weld from a wrong pose is not approximately right, it is somewhere
@@ -101,6 +107,41 @@ def low_stretches(bands, below):
     return out
 
 
+def deviation_regions(bands, factor=2.5, least_mm=1.0, min_samples=100):
+    """Consecutive tenths whose median deviation stands out from the rest of the part.
+
+    Compared against the part's own typical deviation rather than a fixed limit, because what counts
+    as normal depends on the article, the camera distance and the model's fidelity. A stretch needs
+    enough measured samples to be worth flagging - some tenths of an open frame hold almost nothing
+    the cameras can see.
+
+    Returns ``([(from_pct, to_pct, worst_mm)], typical_mm, threshold_mm)``."""
+    usable = sorted(b["median_mm"] for b in bands
+                    if b["median_mm"] is not None and b["n"] >= min_samples)
+    if not usable:
+        return [], None, None
+    # The part's own standard is what it achieves WHERE IT FITS - the lower quartile of the tenths -
+    # not their median. A defect drags the median up and then hides behind it: on the glued tower the
+    # median of the tenths is 1.00 mm, so a median-based threshold would sit above the 1.98 mm bump
+    # it exists to catch, while the quarter-best is 0.70 mm and the bump stands well clear.
+    typical = usable[max(0, (len(usable) - 1) // 4)]
+    threshold = max(least_mm, factor * typical)
+    out, cur = [], None
+    for b in bands:
+        bad = (b["median_mm"] is not None and b["n"] >= min_samples
+               and b["median_mm"] >= threshold)
+        if bad and cur is None:
+            cur = [b["from"], b["to"], b["median_mm"]]
+        elif bad:
+            cur[1], cur[2] = b["to"], max(cur[2], b["median_mm"])
+        elif cur is not None:
+            out.append(tuple(cur))
+            cur = None
+    if cur is not None:
+        out.append(tuple(cur))
+    return out, typical, threshold
+
+
 def jpeg_data_uri(img, width):
     """The photograph, shrunk to the page width and embedded, so the page is one portable file."""
     s = min(1.0, width / float(img.shape[1]))
@@ -129,6 +170,17 @@ def main() -> int:
                     help="below this, weld positions are withheld")
     ap.add_argument("--low-band", type=float, default=70.0,
                     help="flag stretches of the length whose outline confirmation falls below this")
+    ap.add_argument("--dev-tol", type=float, default=5.0,
+                    help="mm either side of a model edge to LOOK for the photographed line when "
+                         "measuring how far off it is. Wider than --tol on purpose: measuring "
+                         "deviation inside the pass tolerance truncates the tail that marks a defect")
+    ap.add_argument("--dev-factor", type=float, default=2.5,
+                    help="a tenth of the length is flagged when its median deviation reaches this "
+                         "multiple of what the part achieves where it fits well - the lower quartile "
+                         "of the tenths, not their median, which a defect would drag up with it "
+                         "(and at least --dev-least)")
+    ap.add_argument("--dev-least", type=float, default=1.0,
+                    help="mm below which a stretch is never flagged, however it compares")
     ap.add_argument("--face-band", type=float, default=None,
                     help="mm in from a face plane a weld may sit and still be on that face; "
                          "default 20%% of the smaller cross-section extent. Used only where the "
@@ -184,7 +236,15 @@ def main() -> int:
 
     ax_w, c_w, s_lo, s_hi = length_axis(mesh, rvec, tvec)
     span = max(s_hi - s_lo, 1e-9)
+    # TWO passes, because the two questions want different windows. Pass or fail is asked at --tol,
+    # and asking it there also keeps "untestable" meaning "no contrast within the pass tolerance",
+    # which is what the outline colours and every confirmation figure have always meant. Deviation is
+    # asked in the wider --dev-tol window, because a line found 4 mm away is a measurement, and the
+    # pass tolerance would record it as "nothing there".
     per_view = LC.check(mesh, rvec, tvec, views, tol_mm=args.tol, reach=1.0, with_world=True)
+    window = max(args.tol, args.dev_tol)
+    per_dev = (per_view if window <= args.tol else
+               LC.check(mesh, rvec, tvec, views, tol_mm=window, reach=1.0, with_world=True))
 
     welds = sidecar["welds"]
     if args.min_weld > 0:
@@ -204,9 +264,10 @@ def main() -> int:
                            ", %d welds on no face" % no_face if no_face else ""))
 
     band_hit, band_test = np.zeros(BANDS), np.zeros(BANDS)
+    band_dev = [[] for _ in range(BANDS)]
     seen_by = {name: [] for name, _w, _r in placed}
     page_views = []
-    for i, (v, pv) in enumerate(zip(views, per_view)):
+    for i, (v, pv, pd) in enumerate(zip(views, per_view, per_dev)):
         uri, s, w, h = jpeg_data_uri(v["image"], args.width)
         letter = "ABCDEFGH"[i % 8]
         entry = {"tag": v["tag"], "letter": letter, "img": uri, "w": w, "h": h, "outline": [],
@@ -220,6 +281,14 @@ def main() -> int:
             testable = code != UNTESTABLE
             np.add.at(band_test, band_idx[testable], 1)
             np.add.at(band_hit, band_idx[code == CONFIRMED], 1)
+            # Deviation comes from the wider pass: every edge whose line was found, however far off.
+            if pd.get("world") is not None and len(pd["dev"]):
+                dpos = np.clip(((pd["world"] - c_w) @ ax_w - s_lo) / span, 0.0, 0.999999)
+                didx = (dpos * BANDS).astype(int)
+                for k in range(BANDS):
+                    sel = pd["found"] & (didx == k)
+                    if sel.any():
+                        band_dev[k].append(pd["dev"][sel])
             # tenths of a page pixel as integers: exact enough to draw, a third of the size as JSON
             xy = np.round(pts * s * 10).astype(int)
             entry["outline"] = np.column_stack([xy, code]).ravel().tolist()
@@ -247,9 +316,14 @@ def main() -> int:
     bands = []
     for k in range(BANDS):
         pct = 100.0 * band_hit[k] / band_test[k] if band_test[k] else None
+        d = np.concatenate(band_dev[k]) if band_dev[k] else np.zeros(0)
         bands.append({"from": 10 * k, "to": 10 * (k + 1), "testable": int(band_test[k]),
-                      "pct": None if pct is None else round(float(pct), 1)})
+                      "pct": None if pct is None else round(float(pct), 1),
+                      "n": int(len(d)),
+                      "median_mm": round(float(np.median(d)), 2) if len(d) else None,
+                      "p90_mm": round(float(np.percentile(d, 90)), 2) if len(d) else None})
     lows = low_stretches(bands, args.low_band)
+    regions, typical_mm, dev_threshold = deviation_regions(bands, args.dev_factor, args.dev_least)
 
     rows = []
     if not withheld:
@@ -276,6 +350,9 @@ def main() -> int:
                   "source": "sidecar" if not computed else "computed", "no_face": no_face},
         "deviation": DV.summary(deviation, turned, args.deviation) if deviation else None,
         "tol_mm": args.tol, "scale": args.scale, "low_band": args.low_band,
+        "dev": {"window_mm": window, "typical_mm": typical_mm, "threshold_mm": dev_threshold,
+                "factor": args.dev_factor, "least_mm": args.dev_least},
+        "dev_regions": regions,
         "views": page_views, "bands": bands, "low_runs": lows, "welds": rows,
     }
 
@@ -290,9 +367,19 @@ def main() -> int:
         fh.write(html)
 
     print("")
-    print("along the length: " + "  ".join("%d-%d%% %s" % (b["from"], b["to"],
-                                          "-" if b["pct"] is None else "%.0f" % b["pct"])
-                                          for b in bands))
+    print("deviation along the length, median mm (measured in a +/-%.0f mm window):" % window)
+    print("  " + "  ".join("%d-%d%% %s" % (b["from"], b["to"],
+                           "-" if b["median_mm"] is None else "%.2f" % b["median_mm"])
+                           for b in bands))
+    if typical_mm is not None:
+        print("  typical for this part %.2f mm; a stretch is flagged at %.2f mm"
+              % (typical_mm, dev_threshold))
+    for lo, hi, worst in regions:
+        print("  DEPARTS FROM THE MODEL at %d-%d%% of the length: %.2f mm against %.2f mm typical"
+              % (lo, hi, worst, typical_mm))
+    print("confirmed within %.0f mm: " % args.tol
+          + "  ".join("%d-%d%% %s" % (b["from"], b["to"],
+                      "-" if b["pct"] is None else "%.0f" % b["pct"]) for b in bands))
     for lo, hi, worst in lows:
         print("  outline confirmation below %.0f%% from %d%% to %d%% of the length (lowest %.0f%%)"
               % (args.low_band, lo, hi, worst))
@@ -350,6 +437,9 @@ h2{font-size:15px;margin:0 0 8px}
 .bar{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 2px;
      text-align:center;font-variant-numeric:tabular-nums;font-size:12px;color:var(--dim)}
 .bar b{display:block;color:var(--text);font-size:14px}
+.bar .sub{display:block;font-size:11px;color:var(--dim)}
+.bar.flag{border-color:#7a2a24;background:#2a1613}
+.bar.flag b{color:#ff8b80}
 .bar i{display:block;height:6px;border-radius:3px;margin:4px 3px 0}
 .muted{color:var(--dim)}
 p.muted{margin:6px 0 10px;max-width:110ch}
@@ -379,7 +469,7 @@ tr.sel{background:#3a2e10}
 </div>
 <div class="views" id="views"></div>
 <section>
-  <h2>Outline confirmed along the tower's length</h2>
+  <h2>How far the part is from its model, along the tower's length</h2>
   <div class="strip" id="strip"></div>
   <p class="muted" id="stripnote"></p>
 </section>
@@ -434,6 +524,10 @@ if (D.low_runs.length) banners += `<div class="banner note"><b>The part and the 
   D.low_runs.map(r => `${r[0]}–${r[1]}% of the length (lowest ${r[2].toFixed(0)}%)`).join(', ') +
   `. Weld positions in that stretch are where the model says they should be, which may not be
   where they are on this part.</div>`;
+if (D.dev_regions.length) banners += `<div class="banner bad"><b>The part departs from its model.</b>
+  ` + D.dev_regions.map(r => `${r[0]}–${r[1]}% of the length is out by ${r[2].toFixed(2)} mm`).join(', ') +
+  `, against ${D.dev.typical_mm.toFixed(2)} mm typical for the rest of it. Weld positions there are
+  where the model puts them, which is not where they are on this part.</div>`;
 if (D.faces.no_face) banners += `<div class="banner note">${D.faces.no_face} welds are on no face of
   the article at a ${D.faces.band_mm} mm band, so no camera shows them.</div>`;
 el('banners').innerHTML = banners;
@@ -491,14 +585,23 @@ D.views.forEach((v, i) => { const im = new Image(); im.onload = draw; im.src = v
   el(id).onchange = e => { S[k] = e.target.checked; draw(); };
 });
 
+const flagged = pct => D.dev_regions.some(r => pct >= r[0] && pct < r[1]);
 el('strip').innerHTML = D.bands.map(b => {
-  const p = b.pct;
+  const p = b.pct, m = b.median_mm;
   const c = p === null ? '#3a3f47' : p >= 80 ? '#35c97a' : p >= D.low_band ? '#e3a42a' : '#ff5a4f';
-  return `<div class="bar" title="${b.testable} testable outline samples">${b.from}–${b.to}%
-    <b>${p === null ? '–' : p.toFixed(0) + '%'}</b><i style="background:${c}"></i></div>`;
+  return `<div class="bar${flagged(b.from) ? ' flag' : ''}"
+    title="${b.n} measured deviations, ${b.testable} testable samples, 90th percentile ${b.p90_mm === null ? '–' : b.p90_mm + ' mm'}">${b.from}–${b.to}%
+    <b>${m === null ? '–' : m.toFixed(2) + ' mm'}</b>
+    <span class="sub">${p === null ? '–' : p.toFixed(0) + '% within ' + D.tol_mm + ' mm'}</span>
+    <i style="background:${c}"></i></div>`;
 }).join('');
-el('stripnote').textContent = `All cameras pooled; untestable samples are left out. ` +
-  `Green is 80% or more, amber ${D.low_band}–80%, red below ${D.low_band}%. ` +
+el('stripnote').textContent =
+  `Median distance from each model edge to the line found in the photographs, all cameras pooled, ` +
+  `searched up to ±${D.dev.window_mm} mm. Typical for this part is ` +
+  `${D.dev.typical_mm === null ? '–' : D.dev.typical_mm.toFixed(2) + ' mm'}; a stretch is flagged at ` +
+  `${D.dev.threshold_mm === null ? '–' : D.dev.threshold_mm.toFixed(2) + ' mm'} ` +
+  `(${D.dev.factor}× typical, never below ${D.dev.least_mm} mm). The percentage underneath is the ` +
+  `share of testable samples confirmed within ${D.tol_mm} mm, and the bar's colour follows it. ` +
   `The two ends of the strip are the two ends of the part, taken from its own geometry.`;
 
 const tb = el('rows');
