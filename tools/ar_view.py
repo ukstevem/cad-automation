@@ -35,8 +35,9 @@ defend. A pass fraction cannot do that job: on the tower it reads 54% while the 
 half a millimetre, since it counts every sample with no contrast as a failure. Deviation is measured
 in a WIDER window than the pass tolerance (--dev-tol), or the tolerance would truncate the very tail
 that marks a defect. Bands whose median stands out from the rest of the part are flagged: on the
-glued tower that is 2.0 mm at 40-50% of the length against 0.4 mm either side, which is where its two
-halves meet.
+glued tower that is 2.0-2.2 mm at 40-50% of the length against 0.4-0.7 mm elsewhere, on every capture.
+What causes it is NOT established. It was first described as the glue joint, which was an assumption,
+and Steve has confirmed it is not where he glued the tower (2026-09-16).
 
 TRUST BEFORE POSITION. Silhouette confirmation is checked first. Below --min-silhouette the weld
 positions are withheld: a weld from a wrong pose is not approximately right, it is somewhere
