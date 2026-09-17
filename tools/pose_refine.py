@@ -225,6 +225,8 @@ def main() -> int:
                     help="search windows in mm, wide to narrow; the window is the trust region")
     ap.add_argument("--iters", type=int, default=4)
     ap.add_argument("--step-px", type=float, default=2.0)
+    ap.add_argument("--stereo", default=None,
+                    help="RigStereo file from tools/stereo_calibrate.py: one board pose from both cameras")
     args = ap.parse_args()
 
     base = MVF.load_profile(args.profile)
@@ -260,6 +262,9 @@ def main() -> int:
     if not views:
         print("no usable captures", file=sys.stderr)
         return 2
+    if args.stereo:
+        from app.services import stereo_rig as SR
+        print("stereo rig: " + SR.describe(SR.apply(views, SR.load(args.stereo), base["board"])))
 
     before = score(mesh, rvec, tvec, views)
     print("start   confirmed %.0f%%   silhouette %.0f%%   (silhouettes cannot lack contrast, so"

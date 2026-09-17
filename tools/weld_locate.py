@@ -328,10 +328,13 @@ def cmd_extract(args) -> int:
 
 
 def load_views(captures, profile, cam_profile=(),
-               skip=("overlay", "linecheck", "endcheck", "weld", "ar_view")):
+               skip=("overlay", "linecheck", "endcheck", "weld", "ar_view"), stereo=None):
     """A board-in-shot view for every photograph in a capture set, each with its own camera's
     intrinsics. Shared by `project` and tools/ar_view.py, so the two can never read one capture set
-    two different ways."""
+    two different ways.
+
+    With ``stereo`` (a RigStereo file from tools/stereo_calibrate.py) the two rig cameras share ONE
+    board pose solved from both views together, instead of each finding the board on its own (bd ghn)."""
     base = MVF.load_profile(profile)
     board = charuco.build_board_from_config(base["board"])
     det = charuco.make_detector(board)
@@ -349,6 +352,10 @@ def load_views(captures, profile, cam_profile=(),
         v = MVF.build_view(img, prof, board, det, label=b)
         v.update({"K": prof["K"], "dist": prof["dist"], "image": img, "tag": b})
         views.append(v)
+    if stereo:
+        from app.services import stereo_rig as SR
+        info = SR.apply(views, SR.load(stereo), base["board"])
+        print("stereo rig %s: %s" % (os.path.basename(stereo), SR.describe(info)))
     return views
 
 

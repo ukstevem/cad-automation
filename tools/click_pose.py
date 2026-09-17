@@ -368,7 +368,7 @@ def cmd_prepare(args) -> int:
         fh.write(page)
     with open(os.path.join(args.out, "session.json"), "w", encoding="utf-8") as fh:
         json.dump({"mesh": os.path.abspath(args.mesh), "captures": os.path.abspath(args.captures),
-                   "profile": args.profile, "cam_profile": args.cam_profile,
+                   "profile": args.profile, "cam_profile": args.cam_profile, "stereo": args.stereo,
                    "photo": os.path.basename(shot), "scale": scale}, fh, indent=2)
     print("wrote %s" % dest)
     print("Open it, pick how the part is lying, click three pairs, Save, and drop clicks.json")
@@ -406,6 +406,9 @@ def cmd_solve(args) -> int:
         v.update({"K": prof["K"], "dist": prof["dist"], "image": im, "tag": b})
         views.append(v)
 
+    if sess.get("stereo"):
+        from app.services import stereo_rig as SR
+        print("stereo rig: " + SR.describe(SR.apply(views, SR.load(sess["stereo"]), base["board"])))
     tag = clicks.get("view") or sess["photo"]
     v = next((x for x in views if tag in x["tag"]), None)
     if v is None:
@@ -456,6 +459,8 @@ def main() -> int:
     p.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
     p.add_argument("--cam-profile", action="append", default=[], metavar="SUBSTR=PATH")
     p.add_argument("--out", default="outputs/ar_click")
+    p.add_argument("--stereo", default=None,
+                   help="RigStereo file from tools/stereo_calibrate.py, recorded for the solve step")
     s = sub.add_parser("solve", help="solve and refine from the saved clicks")
     s.add_argument("--dir", default="outputs/ar_click")
     args = ap.parse_args()

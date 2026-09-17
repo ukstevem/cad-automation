@@ -171,6 +171,9 @@ def main() -> int:
                     help="below this, weld positions are withheld")
     ap.add_argument("--low-band", type=float, default=70.0,
                     help="flag stretches of the length whose outline confirmation falls below this")
+    ap.add_argument("--stereo", default=None,
+                    help="RigStereo file from tools/stereo_calibrate.py: the two cameras share one board "
+                         "pose solved from both views, instead of each finding the board on its own")
     ap.add_argument("--dev-tol", type=float, default=5.0,
                     help="mm either side of a model edge to LOOK for the photographed line when "
                          "measuring how far off it is. Wider than --tol on purpose: measuring "
@@ -225,7 +228,7 @@ def main() -> int:
         DV.check_article(deviation, frame)
         mesh, _mask = DV.as_built_mesh(mesh, frame, deviation)
 
-    views = WL.load_views(args.captures, args.profile, args.cam_profile)
+    views = WL.load_views(args.captures, args.profile, args.cam_profile, stereo=args.stereo)
     if not views:
         print("no usable captures in %s" % args.captures, file=sys.stderr)
         return 2
@@ -340,7 +343,8 @@ def main() -> int:
         "generated": datetime.datetime.now().replace(microsecond=0).isoformat(sep=" "),
         "captures": os.path.basename(os.path.normpath(args.captures)),
         "pose": {"source": fit.get("init") or "multiview fit", "fit": os.path.normpath(src),
-                 "resting_index": fit.get("resting_index")},
+                 "resting_index": fit.get("resting_index"),
+                 "stereo": os.path.basename(args.stereo) if args.stereo else None},
         "trust": {"confirmed": round(float(confirmed), 1), "silhouette": round(float(silhouette), 1),
                   "min_silhouette": args.min_silhouette, "withheld": bool(withheld),
                   "default_min_silhouette": ap.get_default("min_silhouette")},
