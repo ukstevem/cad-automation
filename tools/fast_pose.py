@@ -246,7 +246,8 @@ def locate(mesh, views, maps, rvec, tvec, model_centre, model_length_axis, cap_p
     return R, t, r.fun, timing
 
 
-def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, tilt=5.0, polish=True, passes=4):
+def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, tilt=5.0, polish=True, passes=4,
+           maps=None):
     """Take a rough pose - from clicks, a placement target, a previous fit - to the pose the photographs support.
 
     Fast locate first (slide, turn, height and a bounded tilt), then, with ``polish``, a short pass of the
@@ -265,7 +266,7 @@ def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, t
     t_start = time.perf_counter()
     fr = article_frame(mesh)
     R0, t0 = _rot(rvec), np.asarray(tvec, np.float64).ravel()
-    maps = [edge_maps(v) for v in views]
+    maps = maps if maps is not None else [edge_maps(v) for v in views]      # reusable across starts
     R, t, cham, timing = locate(mesh, views, maps, _vec(R0), t0, fr["centre"], fr["axes"][:, 0],
                                 along=along, across=across, yaw=yaw, dz=dz, tilt=tilt)
     # Narrower searches from each answer until the pose stops moving. The first grid runs at the START's tilt,
