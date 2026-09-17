@@ -111,9 +111,26 @@ def test_the_search_finds_the_part_from_an_offset_start():
     the accurate refinement that follows it measures, so the bar here is 'close enough to hand over', 2 mm."""
     start_R, start_t = FP.LockedPose(FP._vec(TRUE_R), TRUE_T, CENTRE, LENGTH).at(-24.0, 17.0, -3.5)
     maps = [FP.edge_maps(v) for v in VIEWS]
-    samples = FP.prepare_samples(PART, FP._vec(start_R), start_t, VIEWS)
-    base = FP.LockedPose(FP._vec(start_R), start_t, CENTRE, LENGTH)
-    R, t, _p, cham, timing = FP.search(base, samples, maps)
+    R, t, cham, timing = FP.locate(PART, VIEWS, maps, FP._vec(start_R), start_t, CENTRE, LENGTH)
     assert _mean_gap(start_R, start_t) > 25.0
     assert _mean_gap(R, t) < 2.0, (_mean_gap(R, t), cham)
     assert timing["grid_poses"] == 9 * 7 * 7
+
+
+def test_the_search_finds_a_tilt_the_table_did_not_promise():
+    """The part is NOT lying flat on the board plane - propped, or the board is not the surface it rests on.
+    The search starts from the flat pose and has to find the 2.5 deg itself (bd 6et: tower09 was 2.2 deg)."""
+    flat = FP.LockedPose(FP._vec(TRUE_R), TRUE_T, CENTRE, LENGTH)
+    R_true, t_true = flat.at(0, 0, 0, -4.0, 0.0, 2.5)
+    views = [dict(v) for v in VIEWS]
+    for v in views:
+        v["image"] = _render(PART, R_true, t_true, v)
+    maps = [FP.edge_maps(v) for v in views]
+    start_R, start_t = flat.at(12.0, -8.0, 2.0)
+    R, t, _cham, _timing = FP.locate(PART, views, maps, FP._vec(start_R), start_t, CENTRE, LENGTH)
+    p = PART.reshape(-1, 3)
+    gap = float(np.linalg.norm(p @ R.T + t - (p @ R_true.T + t_true), axis=1).mean())
+    assert gap < 2.0, gap
+    seated_best = min(FP.chamfer(*flat.at(a, c, 0), FP.prepare_samples(PART, FP._vec(TRUE_R), TRUE_T, views), maps, 8.0)
+                      for a in (-2, 0, 2) for c in (-2, 0, 2))
+    assert _cham < seated_best                                                # the tilt is what makes it fit

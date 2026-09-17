@@ -39,10 +39,17 @@ from app.services import visibility as VIS  # noqa: E402
 
 
 def rotation_putting_down(n):
-    """Rotation taking the unit vector *n* to -z, i.e. laying that face on the table."""
+    """Rotation taking the outward face normal *n* to +z, i.e. laying that face on the table.
+
+    +z, because the pose lives in the ChArUco board frame, whose z points INTO the table: the cameras sit at
+    z of about -560 mm and a part on the board has negative z. Until 2026-09-17 this took *n* to -z, which
+    put the chosen face on TOP and left the part resting on whatever was opposite. On a box that is the
+    same pose. On the tower, whose end plate stands 16.4 mm proud of the frame, it pitched the part 2.19 deg
+    the wrong way - plate edge on the table, open end 33 mm in the air - and every seated fit inherited it
+    (bd 6et)."""
     n = np.asarray(n, np.float64)
     n = n / max(np.linalg.norm(n), 1e-12)
-    target = np.array([0.0, 0.0, -1.0])
+    target = np.array([0.0, 0.0, 1.0])
     v = np.cross(n, target)
     c = float(np.dot(n, target))
     if np.linalg.norm(v) < 1e-9:
@@ -141,7 +148,9 @@ def merge_by_yaw(cands, tris, tol_mm=2.0, samples=400, step_deg=5.0):
 
 def thumbnail(tris, R, size=220):
     """A small shaded view of the part in this orientation, for the operator to recognise."""
-    P = (R @ tris.reshape(-1, 3).T).T.reshape(-1, 3, 3)
+    # the drawing below has z UP; the board frame has it down - turn half a revolution about x (a rotation,
+    # not a mirror, so a handed part keeps its hand)
+    P = (np.diag([1.0, -1.0, -1.0]) @ R @ tris.reshape(-1, 3).T).T.reshape(-1, 3, 3)
     P = P - P.reshape(-1, 3).min(axis=0)
     # a fixed three-quarter view, so every thumbnail is comparable
     look, _ = cv2.Rodrigues(np.array([-1.05, 0.0, 0.0]))

@@ -18,17 +18,19 @@ What makes it cheap is that almost nothing changes between candidate poses:
 - per candidate pose: move those points, project them with a pinhole model, and read the distance maps.
 
 Orientation is NOT searched. The score cannot tell this tower end-for-end or a quarter roll apart (bd q1h,
-6et), so which face is down and which end is where come from the operator; only position and a small turn
-are searched here.
+6et), so which face is down and which end is where come from the operator. Searched: a slide along and
+across, a turn about the vertical, and - in the fine stage - height and a small TILT.
 
-Measured on tower09 (2026-09-17, both cameras, stereo rig): edge maps 0.5 s for both photographs, edge
-points 0.4 s per target, search 2.1 s (441 grid poses in 1.1 s, then the fine stage) - against minutes for
-the same search on the accurate score. From the placement target and from the 24 random starts it lands on
-one of TWO poses the accurate score also rates equally (60/56% and 61/60%): the clicked pose (5 of 24
-starts, 0.8-1.7 mm) or one 7 mm across and 2.25 deg turned from it (most of the rest). Camera A confirms
-86% of lines at the first and 70% at the second, camera B the reverse - the cameras disagree about the
-part, by 14 mm sideways to both their rays at the open end, with the stereo rig and without it. That is an
-accuracy finding, not a search defect; see bd 6et.
+The tilt is not optional. Every pose so far was "seated": the part resting flat on the board's plane. On
+tower09 (2026-09-17) that plane was 1.4-1.7 deg off the table (the paper board lay over the mat's edge), so
+the seated pose was tilted with it, and no seated pose could satisfy both cameras - camera A confirmed 86% of
+lines at one pose and camera B 87% at another 2.25 deg away, which read as the cameras disagreeing. Board
+raised onto the tower: the cameras agree there to 2-4 mm and 0.4 deg. With height and tilt free, five of six
+starts reach one pose, 2.2 deg tilted the same way as the table, 88% / 89% confirmed by the two cameras,
+accurate score 94 / 76% against 60 / 56% seated.
+
+Timing on tower09, both cameras: edge maps 0.5 s for both photographs, edge points 0.4 s per target, search
+about 2 s.
 """
 from __future__ import annotations
 
@@ -74,24 +76,26 @@ def photo_edges(image, blur=1.2, contrast=3.0, floor=8.0, window_px=41):
 
 
 def edge_maps(view, cap_px=40.0):
-    """Distance maps to the photograph's edges, one per orientation bin, on the UNDISTORTED image."""
+    """Distance maps to the photograph's edges on the UNDISTORTED image, one per orientation bin. Each map
+    holds the distance to an edge in its own bin OR either neighbouring bin, so an edge 20 deg off still
+    matches and a crossing edge does not."""
     K = np.asarray(view["K"], np.float64).reshape(3, 3)
     und = cv2.undistort(view["image"], K, np.asarray(view["dist"], np.float64))
     edges, gx, gy = photo_edges(und)
     line_deg = (np.degrees(np.arctan2(gy, gx)) + 90.0) % 180.0
     bins = (line_deg // (180.0 / N_BINS)).astype(np.int16) % N_BINS
     h, w = edges.shape
-    dt = np.empty((N_BINS, h, w), np.float32)
+    own = np.empty((N_BINS, h, w), np.float32)
     for b in range(N_BINS):
         src = np.where((edges > 0) & (bins == b), 0, 255).astype(np.uint8)
-        dt[b] = np.minimum(cv2.distanceTransform(src, cv2.DIST_L2, 3), cap_px)
-    Rc = _rot(view["rvec_cam"])
-    return {"dt": dt, "K": K, "Rc": Rc, "tc": np.asarray(view["tvec_cam"], np.float64).ravel(), "w": w, "h": h,
-            "edge_px": int((edges > 0).sum())}
+        own[b] = np.minimum(cv2.distanceTransform(src, cv2.DIST_L2, 3), cap_px)
+    dt = np.minimum(np.minimum(own, np.roll(own, 1, axis=0)), np.roll(own, -1, axis=0))
+    return {"dt": dt, "K": K, "Rc": _rot(view["rvec_cam"]), "tc": np.asarray(view["tvec_cam"], np.float64).ravel(),
+            "w": w, "h": h, "edge_px": int((edges > 0).sum())}
 
 
 def prepare_samples(mesh, rvec, tvec, views, step_px=3.0):
-    """The model's visible edge points at a pose, in MODEL coordinates, with their image direction bin."""
+    """The model's visible edge points at a pose, in MODEL coordinates, grouped by image direction bin."""
     R0, t0 = _rot(rvec), np.asarray(tvec, np.float64).ravel()
     out = []
     for v in views:
@@ -99,7 +103,19 @@ def prepare_samples(mesh, rvec, tvec, views, step_px=3.0):
                                                       t0.reshape(3, 1), v, step_px=step_px, with_world=True)
         model = (R0.T @ (world - t0).T).T
         deg = np.degrees(np.arctan2(tan[:, 1], tan[:, 0])) % 180.0
-        out.append({"model": model, "bin": (deg // (180.0 / N_BINS)).astype(np.int64) % N_BINS})
+        b = (deg // (180.0 / N_BINS)).astype(np.int64) % N_BINS
+        order = np.argsort(b, kind="stable")
+        out.append({"model": model[order], "bin": b[order],
+                    "start": np.searchsorted(b[order], np.arange(N_BINS + 1))})
+    return out
+
+
+def subset(samples, keep):
+    """The same samples restricted by a boolean mask per view (e.g. one part of the model)."""
+    out = []
+    for s, k in zip(samples, keep):
+        m, b = s["model"][k], s["bin"][k]
+        out.append({"model": m, "bin": b, "start": np.searchsorted(b, np.arange(N_BINS + 1))})
     return out
 
 
@@ -121,25 +137,20 @@ def chamfer(R, t, samples, maps, cap_px):
         v = K[1, 1] * c[:, 1] / z + K[1, 2]
         inside = (z > 1.0) & (u >= 0) & (v >= 0) & (u < m["w"] - 1) & (v < m["h"] - 1)
         d = np.full(len(z), cap_px, np.float64)
-        if inside.any():
-            b = s["bin"][inside]
-            ui, vi = u[inside], v[inside]
-            best = np.full(len(b), cap_px)
-            for shift in (-1, 0, 1):
-                bb = (b + shift) % N_BINS
-                for k in range(N_BINS):
-                    sel = bb == k
-                    if sel.any():
-                        best[sel] = np.minimum(best[sel], _bilinear(m["dt"][k], ui[sel], vi[sel]))
-            d[inside] = np.minimum(best, cap_px)
+        for k in range(N_BINS):
+            a, b = s["start"][k], s["start"][k + 1]
+            sel = np.nonzero(inside[a:b])[0] + a
+            if len(sel):
+                d[sel] = np.minimum(_bilinear(m["dt"][k], u[sel], v[sel]), cap_px)
         total += float(d.sum())
         n += len(d)
     return total / max(n, 1)
 
 
 class LockedPose:
-    """Poses near a base pose that keep its orientation: a slide along and across the part's length on the
-    table, a turn about the vertical through the part's centre, and a height change."""
+    """Poses near a base pose that keep its orientation up to small changes: a slide along and across the part's
+    length on the table, a turn about the vertical, a height change, and a tilt about the length and about the
+    across direction - all about the part's centre."""
 
     def __init__(self, rvec, tvec, model_centre, model_length_axis):
         self.R, self.t = _rot(rvec), np.asarray(tvec, np.float64).ravel()
@@ -149,14 +160,17 @@ class LockedPose:
         self.L = L / np.linalg.norm(L)
         self.A = np.array([-self.L[1], self.L[0], 0.0])
 
-    def at(self, along, across, yaw_deg, dz=0.0):
-        Rz = _rot([0.0, 0.0, np.radians(yaw_deg)])
-        return Rz @ self.R, Rz @ (self.t - self.c_w) + self.c_w + along * self.L + across * self.A + np.array([0.0, 0.0, dz])
+    def at(self, along, across, yaw_deg, dz=0.0, tilt_length_deg=0.0, tilt_across_deg=0.0):
+        Rm = (_rot(np.radians(tilt_length_deg) * self.L) @ _rot(np.radians(tilt_across_deg) * self.A)
+              @ _rot([0.0, 0.0, np.radians(yaw_deg)]))
+        c_new = self.c_w + along * self.L + across * self.A + np.array([0.0, 0.0, dz])
+        return Rm @ self.R, Rm @ (self.t - self.c_w) + c_new
 
 
-def search(base, samples, maps, along=40.0, across=30.0, yaw=6.0, dz=10.0, coarse=(10.0, 10.0, 2.0),
+def search(base, samples, maps, along=40.0, across=30.0, yaw=6.0, dz=15.0, tilt=3.0, coarse=(10.0, 10.0, 2.0),
            cap_coarse=25.0, cap_fine=8.0, starts=3):
-    """Coarse grid, then Nelder-Mead from the best few. Returns (R, t, params, chamfer_px, timings)."""
+    """Coarse grid over slide and turn, a 4-parameter polish (adding height) from the best few, then all six
+    parameters (adding tilt) from the best of those. Returns (R, t, params, chamfer_px, timings)."""
     from scipy.optimize import minimize
 
     t0 = time.perf_counter()
@@ -164,21 +178,56 @@ def search(base, samples, maps, along=40.0, across=30.0, yaw=6.0, dz=10.0, coars
     for a in np.arange(-along, along + 1e-9, coarse[0]):
         for c in np.arange(-across, across + 1e-9, coarse[1]):
             for y in np.arange(-yaw, yaw + 1e-9, coarse[2]):
-                R, t = base.at(a, c, y)
-                grid.append((chamfer(R, t, samples, maps, cap_coarse), a, c, y))
+                grid.append((chamfer(*base.at(a, c, y), samples, maps, cap_coarse), a, c, y))
     grid.sort(key=lambda g: g[0])
     t1 = time.perf_counter()
+
+    lo = np.array([-along, -across, -yaw, -dz, -tilt, -tilt])
+    hi = -lo
+    f = lambda p: chamfer(*base.at(*p), samples, maps, cap_fine)
+
+    def polish(x0, n, steps, maxfev):
+        simplex = np.vstack([x0] + [x0 + np.eye(len(x0))[i] * steps[i] for i in range(n)])
+        # bounded to the searched range: past it the answer is "not in the envelope", not a pose
+        return minimize(f if n == 6 else (lambda p: f(np.concatenate([p, [0.0, 0.0]]))), x0, method="Nelder-Mead",
+                        bounds=list(zip(lo[:n], hi[:n])),
+                        options={"initial_simplex": np.clip(simplex, lo[:n], hi[:n]), "xatol": 0.05, "fatol": 1e-4,
+                                 "maxfev": maxfev})
+
     best = None
     for _score, a, c, y in grid[:starts]:
-        f = lambda p: chamfer(*base.at(p[0], p[1], p[2], p[3]), samples, maps, cap_fine)
-        simplex = np.array([[a, c, y, 0.0], [a + 5, c, y, 0.0], [a, c + 5, y, 0.0], [a, c, y + 1.0, 0.0], [a, c, y, 4.0]])
-        # bounded to the searched range: past it the answer is "not in the envelope", not a pose
-        res = minimize(f, simplex[0], method="Nelder-Mead",
-                       bounds=[(-along, along), (-across, across), (-yaw, yaw), (-dz, dz)],
-                       options={"initial_simplex": np.clip(simplex, [-along, -across, -yaw, -dz], [along, across, yaw, dz]),
-                                "xatol": 0.05, "fatol": 1e-4, "maxfev": 600})
-        if best is None or res.fun < best[0]:
-            best = (res.fun, res.x)
+        r = polish(np.array([a, c, y, 0.0]), 4, (5.0, 5.0, 1.0, 4.0), 300)
+        if best is None or r.fun < best.fun:
+            best = r
     t2 = time.perf_counter()
-    R, t = base.at(*best[1])
-    return R, t, best[1], best[0], {"grid_s": t1 - t0, "grid_poses": len(grid), "fine_s": t2 - t1}
+    r6 = polish(np.concatenate([best.x, [0.0, 0.0]]), 6, (2.0, 2.0, 0.5, 2.0, 0.7, 0.7), 1200)
+    t3 = time.perf_counter()
+    R, t = base.at(*r6.x)
+    return R, t, r6.x, r6.fun, {"grid_s": t1 - t0, "grid_poses": len(grid), "fine_s": t2 - t1, "tilt_s": t3 - t2,
+                                "evals": len(grid) + r6.nfev}
+
+
+def locate(mesh, views, maps, rvec, tvec, model_centre, model_length_axis, cap_px=8.0, **search_kw):
+    """Search from a start pose, then take the model's visible edges again AT the answer and polish once more.
+
+    The edge points come from the start pose, and a start 30 mm and a few degrees out sees a slightly different
+    set of edges from the true pose. A slide or a turn is pinned hard enough not to care; roll about a long
+    member's length is not, and absorbs the difference - 1.75 deg of invented roll, 2.1 mm, on the synthetic
+    bar. Re-taking the points at the answer removes the bias."""
+    from scipy.optimize import minimize
+
+    samples = prepare_samples(mesh, rvec, tvec, views)
+    base = LockedPose(rvec, tvec, model_centre, model_length_axis)
+    R, t, _p, _c, timing = search(base, samples, maps, cap_fine=cap_px, **search_kw)
+    t0 = time.perf_counter()
+    samples = prepare_samples(mesh, _vec(R), t, views)
+    near = LockedPose(_vec(R), t, model_centre, model_length_axis)
+    f = lambda p: chamfer(*near.at(*p), samples, maps, cap_px)
+    x0 = np.zeros(6)
+    lim = np.array([5.0, 5.0, 1.0, 5.0, 1.0, 1.0])
+    r = minimize(f, x0, method="Nelder-Mead", bounds=list(zip(-lim, lim)),
+                 options={"initial_simplex": np.vstack([x0, np.diag([1.0, 1.0, 0.25, 1.0, 0.25, 0.25])]),
+                          "xatol": 0.02, "fatol": 1e-5, "maxfev": 1200})
+    R, t = near.at(*r.x)
+    timing["again_s"] = time.perf_counter() - t0
+    return R, t, r.fun, timing
