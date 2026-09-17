@@ -134,3 +134,32 @@ def test_the_search_finds_a_tilt_the_table_did_not_promise():
     seated_best = min(FP.chamfer(*flat.at(a, c, 0), FP.prepare_samples(PART, FP._vec(TRUE_R), TRUE_T, views), maps, 8.0)
                       for a in (-2, 0, 2) for c in (-2, 0, 2))
     assert _cham < seated_best                                                # the tilt is what makes it fit
+
+
+def test_finish_reports_the_tilt_and_height_the_photographs_asked_for():
+    """The pipeline entry point (click_pose solve, fast_pose CLI): locate twice, polish, score, and say what
+    it changed - so a part propped or on dunnage shows up as a number, not a silent disagreement."""
+    flat = FP.LockedPose(FP._vec(TRUE_R), TRUE_T, CENTRE, LENGTH)
+    R_true, t_true = flat.at(0, 0, 0, -6.0, 0.0, 2.0)                        # 6 mm up, pitched 2 deg
+    views = [dict(v) for v in VIEWS]
+    for v in views:
+        v["image"] = _render(PART, R_true, t_true, v)
+    start_R, start_t = flat.at(-15.0, 10.0, 2.5)
+    res = FP.finish(PART, views, FP._vec(start_R), start_t)
+    p = PART.reshape(-1, 3)
+    R, t = FP._rot(res["rvec"]), np.asarray(res["tvec"])
+    assert float(np.linalg.norm(p @ R.T + t - (p @ R_true.T + t_true), axis=1).mean()) < 2.0
+    # the pitch, which is what was set; roll about a 40 mm bar's length is barely visible (1.4 deg of it moves
+    # the section's edges half a millimetre) and comes back as noise, so the combined tilt is not asserted
+    assert abs(res["tilt_about_across_deg"] - 2.0) < 0.5
+    assert not res["at_bound"]
+
+
+def test_finish_says_so_when_the_answer_is_outside_the_search():
+    flat = FP.LockedPose(FP._vec(TRUE_R), TRUE_T, CENTRE, LENGTH)
+    R_true, t_true = flat.at(0, 0, 0, 0.0, 0.0, 6.0)                         # tilted three times the allowed 2 deg
+    views = [dict(v) for v in VIEWS]
+    for v in views:
+        v["image"] = _render(PART, R_true, t_true, v)
+    res = FP.finish(PART, views, FP._vec(TRUE_R), TRUE_T, tilt=2.0, polish=False)
+    assert res["at_bound"]

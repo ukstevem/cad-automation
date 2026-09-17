@@ -68,12 +68,15 @@ def pose_jacobian(world, view, rvec, tvec, dof="seated", delta=2.0):
     projecting the perturbed points rather than differentiating the projection, which keeps lens
     distortion exact and is cheap at six parameters.
 
-    *dof* picks which freedoms exist. 'seated' is the physically honest one for a part lying on a
-    table: it can slide in x and y, turn about the board normal, and sit at a height that is not
-    known to the millimetre - but it cannot tilt. Handing the solve tilt as well measurably hurts
-    (silhouette confirmation 80% -> 62% on this rig, with 12 degrees of rotation invented to
-    explain noise), which is what an over-parameterised fit does with freedoms reality does not
-    have.
+    *dof* picks which freedoms exist. 'seated' slides in x and y, turns about the board normal, and
+    sits at a height not known to the millimetre - but cannot tilt, so it keeps whatever tilt it is
+    STARTED with. 'full' adds tilt, and from a far or wrongly tilted start it runs away (silhouette
+    80% -> 62%, 12 degrees of rotation invented to explain noise).
+
+    Do not read that as "parts lie flat on their resting face". Until 2026-09-17 the resting faces
+    were upside down (resting_faces.py), and even corrected, the tower lay 2.2 deg off its hull rest.
+    Take the tilt from tools/fast_pose.py (a bounded search) and refine from there: from the located
+    pose 'seated' and 'full' both move under 0.4 mm and change nothing (bd 6et, ren).
     """
     K = np.asarray(view["K"], np.float64).reshape(3, 3)
     dist = np.asarray(view["dist"], np.float64).ravel()
@@ -218,9 +221,9 @@ def main() -> int:
                     help="which freedoms to solve. 'planar' is x, y and turn - the part pinned to "
                          "an assumed table height. 'seated' (default) adds z, because the part "
                          "lies FLAT but its height is not known to a millimetre and seating error "
-                         "is real. 'full' adds tilt, and on this rig it makes things worse: given "
-                         "tilt to play with, the solve explains noise with 12 degrees of rotation "
-                         "a part lying on a table cannot have.")
+                         "is real. Neither can find a TILT: start from tools/fast_pose.py, which "
+                         "searches it within bounds. 'full' adds tilt to this solve, which runs away "
+                         "from a poor start (12 degrees invented) and is harmless from a located one.")
     ap.add_argument("--schedule", default="20,10,5,3,2",
                     help="search windows in mm, wide to narrow; the window is the trust region")
     ap.add_argument("--iters", type=int, default=4)

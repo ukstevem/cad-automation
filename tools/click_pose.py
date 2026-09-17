@@ -425,12 +425,20 @@ def cmd_solve(args) -> int:
     rv, tv = pose_seated(pairs, {v["tag"]: v}, rest_R, z0=None)
     print("clicked pose  t = [%.1f, %.1f, %.1f] mm" % tuple(tv))
     before = PR.score(mesh, rv, tv, views)
-    r, t = PR.refine(mesh, rv, tv, views, schedule=(40., 20., 10., 5., 3., 2.), iters=4,
-                     dof="seated", verbose=True)
-    after = PR.score(mesh, r, t, views)
+    # Finished by the fast locate, not the seated refiner alone: the refiner cannot tilt, and the part is
+    # not on its hull rest - the tower lay 2.2 deg off it, and every seated fit of it came out 57-62%
+    # silhouette where the located pose scores 85-94% (bd 6et, ren).
+    import fast_pose as FP
+    res = FP.finish(mesh, views, rv, tv)
+    r, t = res["rvec"], res["tvec"]
+    after = (res["confirmed"], res["silhouette"])
     print("")
-    print("confirmed %.0f%% -> %.0f%%   silhouette %.0f%% -> %.0f%%"
-          % (before[0], after[0], before[1], after[1]))
+    print("confirmed %.0f%% -> %.0f%%   silhouette %.0f%% -> %.0f%%   (%.1f s)"
+          % (before[0], after[0], before[1], after[1], res["seconds"]))
+    print("the photographs moved it %.1f mm on the table, %+.1f mm in height, and tilted it %.2f deg"
+          % (res["moved_mm"], res["height_mm"], res["tilt_deg"]))
+    if res["at_bound"]:
+        print("WARNING: tilt or height reached the edge of the search - check the orientation you picked.")
     print("")
     print("Silhouette confirmation is the trust signal. High means the placement you chose is the")
     print("one on the table. Low means it is not, and no amount of refinement will rescue it -")
@@ -442,7 +450,9 @@ def cmd_solve(args) -> int:
                    "mesh": os.path.basename(sess["mesh"]),
                    "init": "operator clicks", "clicks": len(pairs),
                    "resting_index": clicks.get("resting_index"),
-                   "confirmed": after[0], "silhouette": after[1]}, fh, indent=2)
+                   "confirmed": after[0], "silhouette": after[1],
+                   "finish": {k: res[k] for k in ("tilt_deg", "height_mm", "moved_mm", "at_bound")}},
+                  fh, indent=2)
     print("wrote %s" % out)
     return 0
 

@@ -36,13 +36,18 @@ about 2 s.
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
 
 import numpy as np
 
-import cv2
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from critical_edges import visible_feature_edges
+import cv2  # noqa: E402
+
+from critical_edges import visible_feature_edges  # noqa: E402
 
 N_BINS = 6                      # 30-degree bins over the undirected 180 degrees of an edge line
 
@@ -175,11 +180,17 @@ def search(base, samples, maps, along=40.0, across=30.0, yaw=6.0, dz=15.0, tilt=
     parameters (adding tilt) from the best of those. Returns (R, t, params, chamfer_px, timings)."""
     from scipy.optimize import minimize
 
+    def steps(limit, step):
+        # symmetric about ZERO: np.arange(-15, 15, 10) is -15, -5, 5, 15, and a later pass that should stay put
+        # cannot (tower02 held at 62% where a +/-10 window, which does include 0, reached 84%)
+        half = np.arange(0.0, limit + 1e-9, step)
+        return np.concatenate([-half[:0:-1], half])
+
     t0 = time.perf_counter()
     grid = []
-    for a in np.arange(-along, along + 1e-9, coarse[0]):
-        for c in np.arange(-across, across + 1e-9, coarse[1]):
-            for y in np.arange(-yaw, yaw + 1e-9, coarse[2]):
+    for a in steps(along, coarse[0]):
+        for c in steps(across, coarse[1]):
+            for y in steps(yaw, coarse[2]):
                 grid.append((chamfer(*base.at(a, c, y), samples, maps, cap_coarse), a, c, y))
     grid.sort(key=lambda g: g[0])
     t1 = time.perf_counter()
@@ -233,3 +244,124 @@ def locate(mesh, views, maps, rvec, tvec, model_centre, model_length_axis, cap_p
     R, t = near.at(*r.x)
     timing["again_s"] = time.perf_counter() - t0
     return R, t, r.fun, timing
+
+
+def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, tilt=5.0, polish=True, passes=4):
+    """Take a rough pose - from clicks, a placement target, a previous fit - to the pose the photographs support.
+
+    Fast locate first (slide, turn, height and a bounded tilt), then, with ``polish``, a short pass of the
+    accurate refiner held seated so it keeps the tilt it is given. Measured 2026-09-17 from the clicked fits:
+    the locate is where the gain is (tower09 60/56 -> 94/76, tower04 63/60 -> 86/72); the polish moves the
+    pose 0.2-0.3 mm and the score not at all, and a full six-freedom refine from the located pose behaves the
+    same - it no longer invents tilt once it starts from the right one.
+
+    Returns a dict: rvec, tvec, confirmed, silhouette, and what changed - the tilt and height the photographs
+    asked for, and ``at_bound`` when either went past ``tilt`` / ``dz``. Each pass is bounded, but the second
+    starts from the first, so the two together can reach further; the flag holds to the limits as given, which
+    are the envelope a part lying the way the operator said should stay inside."""
+    import pose_refine as PR
+    from weld_faces import article_frame
+
+    t_start = time.perf_counter()
+    fr = article_frame(mesh)
+    R0, t0 = _rot(rvec), np.asarray(tvec, np.float64).ravel()
+    maps = [edge_maps(v) for v in views]
+    R, t, cham, timing = locate(mesh, views, maps, _vec(R0), t0, fr["centre"], fr["axes"][:, 0],
+                                along=along, across=across, yaw=yaw, dz=dz, tilt=tilt)
+    # Narrower searches from each answer until the pose stops moving. The first grid runs at the START's tilt,
+    # so from a start that is both far off and tilted wrong it can settle short. From raw clicks on the old
+    # upside-down rest: tower09 (18.8 mm, 2.2 deg out) stopped at 69/62% and a second pass reached 94/76%;
+    # tower02 needed a third, 61/53% -> 84/70%. Putting tilt kicks into the first stage got there too, slower.
+    pts = mesh.reshape(-1, 3)[:: max(1, len(mesh) // 400)]
+    timing = {"passes": [timing]}
+    for _ in range(max(0, passes - 1)):
+        R1, t1, cham1, again = locate(mesh, views, maps, _vec(R), t, fr["centre"], fr["axes"][:, 0],
+                                      along=min(15.0, along), across=min(15.0, across), yaw=min(3.0, yaw),
+                                      dz=dz, tilt=tilt)
+        timing["passes"].append(again)
+        moved = float(np.linalg.norm(pts @ R1.T + t1 - (pts @ R.T + t), axis=1).mean())
+        R, t, cham = R1, t1, cham1
+        if moved < 0.5:
+            break
+    rv = _vec(R)
+    if polish:
+        rv, t = PR.refine(mesh, rv, t, views, schedule=(3.0, 2.0), iters=4, dof="seated", verbose=False)
+        rv, t = np.ravel(rv).astype(float), np.ravel(t).astype(float)
+        R = _rot(rv)
+    conf, sil = PR.score(mesh, rv, t, views)
+    frame = LockedPose(_vec(R0), t0, fr["centre"], fr["axes"][:, 0])
+    up = (R @ R0.T)[:, 2]                                        # where the start's vertical went
+    tilt_length = float(np.degrees(np.arcsin(np.clip(up @ frame.A, -1, 1))))
+    tilt_across = float(np.degrees(np.arcsin(np.clip(up @ frame.L, -1, 1))))
+    c1 = R @ fr["centre"] + t
+    height = float(frame.c_w[2] - c1[2])                         # board z points down: up is positive here
+    return {"rvec": [float(x) for x in rv], "tvec": [float(x) for x in t],
+            "confirmed": float(conf), "silhouette": float(sil), "chamfer_px": float(cham),
+            "tilt_deg": float(np.degrees(np.arccos(np.clip(up[2], -1.0, 1.0)))),
+            "tilt_about_length_deg": tilt_length, "tilt_about_across_deg": tilt_across, "height_mm": height,
+            "moved_mm": float(np.linalg.norm((c1 - frame.c_w)[:2])),
+            "at_bound": bool(max(abs(tilt_length), abs(tilt_across)) > 0.95 * tilt or abs(height) > 0.95 * dz),
+            "seconds": time.perf_counter() - t_start, "timing": timing}
+
+
+def main() -> int:
+    import argparse
+    import json
+
+    import weld_locate as WL
+    from app.services import visibility as VIS
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--captures", required=True)
+    ap.add_argument("--fit", required=True, help="starting pose (a fit.json or its directory)")
+    ap.add_argument("--mesh", default=None, help="defaults to the mesh named in the fit")
+    ap.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
+    ap.add_argument("--cam-profile", action="append", default=[], metavar="SUBSTR=PATH")
+    ap.add_argument("--stereo", default=None, help="RigStereo file: one board pose from both cameras")
+    ap.add_argument("--along", type=float, default=40.0, help="slide searched along the part's length, +/- mm")
+    ap.add_argument("--across", type=float, default=30.0, help="slide searched across it, +/- mm")
+    ap.add_argument("--yaw", type=float, default=6.0, help="turn searched about the vertical, +/- deg")
+    ap.add_argument("--dz", type=float, default=25.0, help="height searched, +/- mm")
+    ap.add_argument("--tilt", type=float, default=5.0,
+                    help="tilt searched about each horizontal axis, +/- deg. A real part sits on a mat, dunnage or "
+                         "a fixture, not on its convex hull; the tower lay 2.2-3.0 deg off its stored rest")
+    ap.add_argument("--no-polish", action="store_true", help="skip the short accurate refine at the end")
+    ap.add_argument("--out", default=None, help="write the fit here")
+    args = ap.parse_args()
+
+    src = args.fit if not os.path.isdir(args.fit) else os.path.join(args.fit, "fit.json")
+    with open(src, "r", encoding="utf-8") as fh:
+        fit = json.load(fh)
+    mesh_path = args.mesh or os.path.join("outputs/ar_models", os.path.basename(fit.get("mesh") or ""))
+    mesh = VIS.load_stl(mesh_path)
+    views = WL.load_views(args.captures, args.profile, args.cam_profile, stereo=args.stereo)
+    if not views:
+        print("no usable captures", file=sys.stderr)
+        return 2
+
+    res = finish(mesh, views, fit["rvec"], fit["tvec"], along=args.along, across=args.across, yaw=args.yaw,
+                 dz=args.dz, tilt=args.tilt, polish=not args.no_polish)
+    print("start    confirmed %s   silhouette %s   (as recorded in the fit)"
+          % tuple(("%.0f%%" % fit[k]) if isinstance(fit.get(k), (int, float)) else "?" for k in ("confirmed", "silhouette")))
+    print("finished confirmed %.0f%%   silhouette %.0f%%   in %.1f s"
+          % (res["confirmed"], res["silhouette"], res["seconds"]))
+    print("         moved %.1f mm on the table, %+.1f mm in height, tilted %.2f deg from the start"
+          % (res["moved_mm"], res["height_mm"], res["tilt_deg"]))
+    if res["at_bound"]:
+        print("WARNING  the tilt or height reached the edge of what was searched - the part may not be where "
+              "the start says, or not lying the way it says. Check the orientation before trusting this.")
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+        out = dict(fit)
+        out.update({k: res[k] for k in ("rvec", "tvec", "confirmed", "silhouette")})
+        out.update({"mesh": os.path.basename(mesh_path), "refined_from": os.path.abspath(src),
+                    "finish": {k: res[k] for k in ("tilt_deg", "height_mm", "moved_mm", "at_bound", "chamfer_px",
+                                                   "seconds")}})
+        with open(os.path.join(args.out, "fit.json"), "w", encoding="utf-8") as fh:
+            json.dump(out, fh, indent=2)
+        print("         wrote %s" % os.path.join(args.out, "fit.json"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
