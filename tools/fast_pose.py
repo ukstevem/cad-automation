@@ -21,13 +21,15 @@ Orientation is NOT searched. The score cannot tell this tower end-for-end or a q
 6et), so which face is down and which end is where come from the operator. Searched: a slide along and
 across, a turn about the vertical, and - in the fine stage - height and a small TILT.
 
-The tilt is not optional. Every pose so far was "seated": the part resting flat on the board's plane. On
-tower09 (2026-09-17) that plane was 1.4-1.7 deg off the table (the paper board lay over the mat's edge), so
-the seated pose was tilted with it, and no seated pose could satisfy both cameras - camera A confirmed 86% of
-lines at one pose and camera B 87% at another 2.25 deg away, which read as the cameras disagreeing. Board
-raised onto the tower: the cameras agree there to 2-4 mm and 0.4 deg. With height and tilt free, five of six
-starts reach one pose, 2.2 deg tilted the same way as the table, 88% / 89% confirmed by the two cameras,
-accurate score 94 / 76% against 60 / 56% seated.
+The tilt is not optional. Every pose so far was "seated": resting on a stored hull face, flat on the board's
+plane. On tower09 (2026-09-17) no seated pose satisfied both cameras - camera A confirmed 86% of lines at one
+pose and camera B 87% at another 2.25 deg away, which read as the cameras disagreeing. They do not: with the
+board raised onto the tower they agree to 2-4 mm and 0.4 deg. The stored rests were upside down
+(resting_faces.py, fixed the same day), pitching the tower 2.19 deg the wrong way, and even the corrected hull
+rest is not how the real part lay - the photographs say level. With height and tilt free, five of six starts
+reach one pose, 88% / 89% confirmed by the two cameras, accurate score 94 / 76% against 60 / 56% seated; on
+tower01-04 silhouette 47-62% -> 70-85%. A real part sits on dunnage, a mat or a fixture, not on its convex
+hull, so the rest is a starting point and the photographs decide the last few degrees.
 
 Timing on tower09, both cameras: edge maps 0.5 s for both photographs, edge points 0.4 s per target, search
 about 2 s.
