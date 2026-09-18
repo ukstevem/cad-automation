@@ -52,7 +52,8 @@ import cv2  # noqa: E402
 
 import fast_pose as FP  # noqa: E402
 
-STATUS_COLOUR = {"in_place": "#1f8a4c", "move": "#b7791f", "not_found": "#b83232", "wrong_way": "#b83232"}
+STATUS_COLOUR = {"in_place": "#1f8a4c", "move": "#b7791f", "uncertain": "#8a5a1f", "not_found": "#b83232",
+                 "wrong_way": "#b83232"}
 
 
 # ---------------------------------------------------------------------------------------------------- geometry
@@ -223,19 +224,22 @@ def check(plan, views, mesh, fr):
     maps = [FP.edge_maps(v) for v in views]
     end, in_master = master_region(mesh, fr, plan["master"]["end"], plan["master"]["depth_mm"])
     tol = plan["tolerance"]
-    tries = {}
-    for name, (R0, t0) in (("planned", (R_tgt, t_tgt)), ("turned", turned_end_for_end(R_tgt, t_tgt, fr["centre"]))):
-        res = FP.finish(mesh, views, FP._vec(R0), t0, polish=False, maps=maps)
+    def attempt(R0, t0, accurate=True):
+        res = FP.finish(mesh, views, FP._vec(R0), t0, polish=False, maps=maps, accurate=accurate)
         R, t = FP._rot(res["rvec"]), np.asarray(res["tvec"])
         samples = FP.prepare_samples(mesh, res["rvec"], t, views)
         keep = [in_master((s["model"] - fr["centre"]) @ L) for s in samples]
         res["master_pct"] = fraction_within(R, t, FP.subset(samples, keep), maps)
-        res["whole_pct"] = fraction_within(R, t, samples, maps)
-        tries[name] = res
+        return res
 
-    p, q = tries["planned"], tries["turned"]
-    wrong_way = (q["silhouette"] >= tol["min_silhouette"] and q["master_pct"] > p["master_pct"] + 10.0
-                 and q["silhouette"] >= p["silhouette"] - 5.0)
+    # The end-for-end try costs a second search, and the master part settles it on its own: it confirms 60-65%
+    # the right way round and 9-18% turned (rig, 2026-09-18). So only spend it when the master part is unhappy.
+    p = attempt(R_tgt, t_tgt)
+    q = attempt(*turned_end_for_end(R_tgt, t_tgt, fr["centre"]), accurate=False) if p["master_pct"] < 35.0 else None
+    wrong_way = bool(q and q["master_pct"] > p["master_pct"] + 15.0 and q["share_pct"] >= p["share_pct"] - 5.0)
+    if wrong_way and np.isnan(q["silhouette"]):
+        import pose_refine as PR
+        q["confirmed"], q["silhouette"] = PR.score(mesh, q["rvec"], np.asarray(q["tvec"]), views)
     use = q if wrong_way else p
     R, t = FP._rot(use["rvec"]), np.asarray(use["tvec"])
     # what the operator must do: take the found part onto the target
@@ -252,37 +256,40 @@ def check(plan, views, mesh, fr):
     inside = margin >= -tol.get("zone_slack_mm", 15.0)
     found = use["silhouette"] >= tol["min_silhouette"] and not use["at_bound"]
 
+    # ONE action at a time, the biggest first: a turn and a slide at once is hard to act on, and the next
+    # shot will ask for the other half anyway.
     if wrong_way:
         status = "wrong_way"
         say = "Turn the part end for end: the %s goes at the marked end." % plan["master"]["name"]
     elif not found:
-        status = "not_found"
-        say = ("Cannot find the part near the target. Check it is lying on the marked face, inside the outline, and "
-               "that the board is in both views.")
+        status = "uncertain"
+        say = ("Found the part, but only %.0f%% of its outline matches. Check nothing is resting on it or in front "
+               "of it, and that it is lying on the face shown." % use["silhouette"])
     elif dist <= tol["mm"] and abs(turn) <= tol["deg"] and inside:
         status = "in_place"
         say = "In place."
     else:
-        bits = []
-        if dist > tol["mm"] or not inside:
-            bits.append("move %.0f mm along the arrow" % dist)
-        if abs(turn) > tol["deg"] or (bits and abs(turn) >= 1.0):
-            bits.append(turn_words(turn))
-        say = ("%s." % "; ".join(bits)).capitalize() if bits else "Nearly there."
-        if not inside:
-            say += " Part of it is outside the well-calibrated area."
         status = "move"
+        if abs(turn) > tol["deg"] and abs(turn) >= dist / 10.0:
+            say = "%s." % turn_words(turn).capitalize()
+        else:
+            say = "Slide it %.0f mm along the arrows." % dist
+            if not inside:
+                say += " Part of it is outside the well-calibrated area."
+    lo_hi = [fr["centre"] + float(fr[k][0]) * L for k in ("lo", "hi")]
     return {
         "status": status, "say": say,
         "distance_mm": dist, "along_mm": float(d @ master_dir), "across_mm": float(d @ A_t),
         "turn_deg": turn, "inside_zone": inside, "zone_margin_mm": margin,
         "silhouette": use["silhouette"], "confirmed": use["confirmed"],
-        "master_pct": {"planned": p["master_pct"], "turned": q["master_pct"]},
-        "silhouette_both": {"planned": p["silhouette"], "turned": q["silhouette"]},
+        # the turned try is only run when the master part is unhappy, so it is often not there at all
+        "master_pct": {"planned": p["master_pct"], "turned": q["master_pct"] if q else None},
+        "silhouette_both": {"planned": p["silhouette"], "turned": q["silhouette"] if q else None},
         "tilt_deg": use["tilt_deg"], "height_mm": use["height_mm"], "at_bound": use["at_bound"],
         "found": {"rvec": use["rvec"], "tvec": use["tvec"]}, "target": {"rvec": FP._vec(R_tgt).tolist(), "tvec": t_tgt.tolist()},
+        "share_pct": use.get("share_pct"),
         "_draw": {"R_tgt": R_tgt, "t_tgt": t_tgt, "R": R, "t": t, "c_found": c_found, "c_tgt": c_tgt,
-                  "in_master": in_master, "to_live": to_live},
+                  "in_master": in_master, "to_live": to_live, "ends_model": lo_hi},
     }
 
 
@@ -308,28 +315,42 @@ def draw(view, mesh, fr, result, plan, scale=0.5):
         for x, y in pts:
             cv2.circle(img, (int(round(x)), int(round(y))), r, colour, -1, cv2.LINE_AA)
 
+    # the OUTLINE ON THE TABLE is what the operator lines the part up with: a flat shape on a flat surface,
+    # unlike a wireframe hanging in the air, which is hard to judge from one viewpoint
+    P = np.asarray(mesh).reshape(-1, 3) @ dr["R_tgt"].T + dr["t_tgt"]
+    hull = cv2.convexHull(P[:, :2].astype(np.float32)).reshape(-1, 2)
+    floor = np.hstack([hull, np.zeros((len(hull), 1), np.float32)]).astype(np.float64)
+    uv, _ = cv2.projectPoints(floor, rc, tc, K, dist)
+    uv = uv.reshape(-1, 1, 2).astype(np.int32)
+    cv2.polylines(img, [uv], True, (0, 0, 0), 9, cv2.LINE_AA)
+    cv2.polylines(img, [uv], True, (235, 170, 60), 4, cv2.LINE_AA)
+
     pts, s = edges(dr["R_tgt"], dr["t_tgt"])
     master = dr["in_master"](s)
     dots(pts[~master], (235, 170, 60), 2)                    # target: blue
     dots(pts[master], (0, 140, 255), 4)                      # master part on the target: orange, heavier
-    if result["status"] != "not_found":
-        colour = (80, 200, 60) if result["status"] == "in_place" else (0, 200, 255)
+    if True:
+        colour = {"in_place": (80, 200, 60), "move": (0, 200, 255)}.get(result["status"], (60, 60, 235))
         fp, _s = edges(dr["R"], dr["t"])
         dots(fp, colour, 1)
-        # only while there is something to do: an arrow under a green "in place" reads as a contradiction
-        if result["status"] == "move" and result["distance_mm"] > 2.0:
-            # drawn level with the top of the part, where it is not hidden, and at least 80 mm long so the direction
-            # can be seen - the page gives the distance
-            step = dr["c_tgt"] - dr["c_found"]
-            step[2] = 0.0
-            step *= max(1.0, 80.0 / max(np.linalg.norm(step), 1e-9))
+        # one arrow at EACH end, from where that end is to where it should be: together they show the slide and
+        # the turn at once, which a single arrow at the centre cannot. Only while there is something to do.
+        if result["status"] == "move":
             top = float((np.asarray(mesh).reshape(-1, 3) @ dr["R"].T + dr["t"])[:, 2].min())
-            ends = np.vstack([dr["c_found"], dr["c_found"] + step])
-            ends[:, 2] = top
-            uv, _ = cv2.projectPoints(ends, rc, tc, K, dist)
-            a, b = uv.reshape(-1, 2).astype(int)
-            cv2.arrowedLine(img, tuple(a), tuple(b), (0, 0, 0), 14, cv2.LINE_AA, tipLength=0.25)
-            cv2.arrowedLine(img, tuple(a), tuple(b), (255, 255, 255), 6, cv2.LINE_AA, tipLength=0.25)
+            for e in dr["ends_model"]:
+                a3 = dr["R"] @ e + dr["t"]
+                b3 = dr["R_tgt"] @ e + dr["t_tgt"]
+                step = b3 - a3
+                step[2] = 0.0
+                if np.linalg.norm(step) < 1.0:
+                    continue
+                step *= max(1.0, 70.0 / np.linalg.norm(step))      # at least 70 mm, so the direction is visible
+                ends = np.vstack([a3, a3 + step])
+                ends[:, 2] = top
+                uv, _ = cv2.projectPoints(ends, rc, tc, K, dist)
+                a, b = uv.reshape(-1, 2).astype(int)
+                cv2.arrowedLine(img, tuple(a), tuple(b), (0, 0, 0), 14, cv2.LINE_AA, tipLength=0.3)
+                cv2.arrowedLine(img, tuple(a), tuple(b), (255, 255, 255), 6, cv2.LINE_AA, tipLength=0.3)
     M, m = dr["to_live"]
     zone = np.hstack([np.asarray(plan["zone_mm"], float), np.zeros((len(plan["zone_mm"]), 1))]) @ M.T + m
     uv, _ = cv2.projectPoints(zone, rc, tc, K, dist)
@@ -368,7 +389,8 @@ font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px 32px
 <span><i class="sw" style="background:#787878"></i>well-calibrated area</span></div>
 </body></html>"""
 
-STATE_LABEL = {"in_place": "In place", "move": "Adjust", "not_found": "Not found", "wrong_way": "Wrong way round"}
+STATE_LABEL = {"in_place": "In place", "move": "Adjust", "uncertain": "Check the part", "not_found": "Not found",
+               "wrong_way": "Wrong way round"}
 
 
 def write_page(out, result, plan, images, capture, seconds, refresh=5):
@@ -389,8 +411,9 @@ def write_page(out, result, plan, images, capture, seconds, refresh=5):
     if result.get("silhouette") is not None:
         facts.append("outline found <b>%.0f%%</b>" % result["silhouette"])
     if result.get("master_pct"):
-        facts.append("%s this way <b>%.0f%%</b> / turned <b>%.0f%%</b>"
-                     % (html.escape(plan["master"]["name"]), result["master_pct"]["planned"], result["master_pct"]["turned"]))
+        turned = result["master_pct"]["turned"]
+        facts.append("%s matched <b>%.0f%%</b>%s" % (html.escape(plan["master"]["name"]), result["master_pct"]["planned"],
+                                                    "" if turned is None else " (turned round <b>%.0f%%</b>)" % turned))
     if result.get("tilt_deg") is not None:
         facts.append("tilt <b>%.1f&deg;</b>, height <b>%+.0f mm</b>" % (result["tilt_deg"], result["height_mm"]))
     facts.append("shot <b>%s</b> checked in %.0f s at %s" % (html.escape(os.path.basename(os.path.normpath(capture))), seconds,
@@ -435,9 +458,10 @@ def cmd_check(args) -> int:
               % (result["distance_mm"], result["along_mm"], plan["master"]["name"], result["across_mm"],
                  "n/a" if result["turn_deg"] is None else "%+.2f deg" % result["turn_deg"],
                  "inside" if result["inside_zone"] else "OUTSIDE", result["zone_margin_mm"]))
-        print("  silhouette %.0f%% (planned %.0f / turned %.0f); %s confirmed planned %.0f%% / turned %.0f%%; tilt %.2f deg, height %+.1f mm"
-              % (result["silhouette"], result["silhouette_both"]["planned"], result["silhouette_both"]["turned"],
-                 plan["master"]["name"], result["master_pct"]["planned"], result["master_pct"]["turned"],
+        turned = result["master_pct"]["turned"]
+        print("  silhouette %.0f%%; %s confirmed %.0f%%%s; tilt %.2f deg, height %+.1f mm"
+              % (result["silhouette"], plan["master"]["name"], result["master_pct"]["planned"],
+                 "" if turned is None else " (turned round: %.0f%%)" % turned,
                  result["tilt_deg"], result["height_mm"]))
     print("  %.1f s; page %s" % (seconds, os.path.join(args.out or args.plan, "guide.html")))
     return 0

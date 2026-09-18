@@ -154,6 +154,31 @@ def chamfer(R, t, samples, maps, cap_px):
     return total / max(n, 1)
 
 
+def share_within(R, t, samples, maps, px=2.5):
+    """Share of the model's visible edge points that have a same-direction photo edge within ``px``.
+
+    Unlike the chamfer this is COMPARABLE between poses with different sample sets, because it is a share of
+    that pose's own visible edges. That matters: each pass of ``finish`` re-takes the edge points at its own
+    answer, so comparing chamfers across passes compares two different measurements, and a pass that drifted
+    could look like an improvement (on the rig, 2026-09-18: a good 94% lock followed by two more passes ended
+    at 65% and was reported as "cannot find the part")."""
+    hit = n = 0
+    for s, m in zip(samples, maps):
+        if not len(s["model"]):
+            continue
+        c = (s["model"] @ R.T + t) @ m["Rc"].T + m["tc"]
+        u = m["K"][0, 0] * c[:, 0] / c[:, 2] + m["K"][0, 2]
+        v = m["K"][1, 1] * c[:, 1] / c[:, 2] + m["K"][1, 2]
+        ok = (c[:, 2] > 1) & (u >= 0) & (v >= 0) & (u < m["w"] - 1) & (v < m["h"] - 1)
+        for k in range(N_BINS):
+            a, b = s["start"][k], s["start"][k + 1]
+            sel = np.nonzero(ok[a:b])[0] + a
+            if len(sel):
+                hit += int((_bilinear(m["dt"][k], u[sel], v[sel]) <= px).sum())
+        n += len(s["model"])
+    return 100.0 * hit / max(n, 1)
+
+
 class LockedPose:
     """Poses near a base pose that keep its orientation up to small changes: a slide along and across the part's
     length on the table, a turn about the vertical, a height change, and a tilt about the length and about the
@@ -247,7 +272,7 @@ def locate(mesh, views, maps, rvec, tvec, model_centre, model_length_axis, cap_p
 
 
 def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, tilt=5.0, polish=True, passes=4,
-           maps=None):
+           maps=None, accurate=True):
     """Take a rough pose - from clicks, a placement target, a previous fit - to the pose the photographs support.
 
     Fast locate first (slide, turn, height and a bounded tilt), then, with ``polish``, a short pass of the
@@ -275,21 +300,26 @@ def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, t
     # tower02 needed a third, 61/53% -> 84/70%. Putting tilt kicks into the first stage got there too, slower.
     pts = mesh.reshape(-1, 3)[:: max(1, len(mesh) // 400)]
     timing = {"passes": [timing]}
+    best = (share_within(R, t, prepare_samples(mesh, _vec(R), t, views), maps), R, t, cham)
     for _ in range(max(0, passes - 1)):
         R1, t1, cham1, again = locate(mesh, views, maps, _vec(R), t, fr["centre"], fr["axes"][:, 0],
                                       along=min(15.0, along), across=min(15.0, across), yaw=min(3.0, yaw),
                                       dz=dz, tilt=tilt)
         timing["passes"].append(again)
         moved = float(np.linalg.norm(pts @ R1.T + t1 - (pts @ R.T + t), axis=1).mean())
-        R, t, cham = R1, t1, cham1
+        share = share_within(R1, t1, prepare_samples(mesh, _vec(R1), t1, views), maps)
+        if share > best[0]:
+            best = (share, R1, t1, cham1)
+        R, t = R1, t1
         if moved < 0.5:
             break
+    share, R, t, cham = best                                   # the best pass, not the last one
     rv = _vec(R)
     if polish:
         rv, t = PR.refine(mesh, rv, t, views, schedule=(3.0, 2.0), iters=4, dof="seated", verbose=False)
         rv, t = np.ravel(rv).astype(float), np.ravel(t).astype(float)
         R = _rot(rv)
-    conf, sil = PR.score(mesh, rv, t, views)
+    conf, sil = PR.score(mesh, rv, t, views) if accurate else (float("nan"), float("nan"))
     frame = LockedPose(_vec(R0), t0, fr["centre"], fr["axes"][:, 0])
     up = (R @ R0.T)[:, 2]                                        # where the start's vertical went
     tilt_length = float(np.degrees(np.arcsin(np.clip(up @ frame.A, -1, 1))))
@@ -297,7 +327,7 @@ def finish(mesh, views, rvec, tvec, along=40.0, across=30.0, yaw=6.0, dz=25.0, t
     c1 = R @ fr["centre"] + t
     height = float(frame.c_w[2] - c1[2])                         # board z points down: up is positive here
     return {"rvec": [float(x) for x in rv], "tvec": [float(x) for x in t],
-            "confirmed": float(conf), "silhouette": float(sil), "chamfer_px": float(cham),
+            "confirmed": float(conf), "silhouette": float(sil), "chamfer_px": float(cham), "share_pct": float(share),
             "tilt_deg": float(np.degrees(np.arccos(np.clip(up[2], -1.0, 1.0)))),
             "tilt_about_length_deg": tilt_length, "tilt_about_across_deg": tilt_across, "height_mm": height,
             "moved_mm": float(np.linalg.norm((c1 - frame.c_w)[:2])),
