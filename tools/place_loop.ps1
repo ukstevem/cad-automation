@@ -19,34 +19,57 @@ param(
     [int]$Rounds = 0,
     [string]$Rig = "administrator@10.0.0.36",
     [string]$Welds = "outputs/welds/mainframe_ifc.json",
-    [double]$Scale = 0.2
+    [double]$Scale = 0.2,
+    [switch]$Stream,                       # camera A live for the eye, camera B for the checks
+    [string]$StreamCam = "52FD1B1F",
+    [string]$CheckCam = "B68DE55F",
+    [int]$StreamPort = 8088
 )
+$dev = { param($serial) "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_${serial}-video-index0" }
 $ErrorActionPreference = "Continue"
 Set-Location (Join-Path $PSScriptRoot "..")
 $label = "place_live"
 $live = "outputs/ar_captures/$label"
 
-Write-Host "page: http://localhost:8000/$Plan/guide.html"
+if ($Stream) {
+    # one camera live for the operator's eye, the other doing the measuring: a shot of one camera is 5.9 s
+    # against 11 s for both, and the live view has no wait at all
+    $busy = Test-NetConnection -ComputerName 127.0.0.1 -Port $StreamPort -InformationLevel Quiet -WarningAction SilentlyContinue
+    if (-not $busy) {
+        Start-Process -WindowStyle Hidden ssh -ArgumentList @("-o", "BatchMode=yes", "-f", "-N", "-L",
+            "${StreamPort}:127.0.0.1:${StreamPort}", $Rig)
+        Start-Sleep -Seconds 2
+    }
+    ssh -o BatchMode=yes $Rig "pgrep -f webcam_preview.py > /dev/null || (cd ~ && nohup python3 webcam_preview.py --devices $(& $dev $StreamCam) --port $StreamPort > /tmp/preview.log 2>&1 &)"
+    Start-Sleep -Seconds 3
+    Write-Host "LIVE PAGE: http://localhost:8000/$Plan/live.html    <- place against the box on this"
+    Write-Host "checks run on camera $CheckCam every few seconds; the Set button lights up when it is in place"
+} else {
+    Write-Host "page: http://localhost:8000/$Plan/guide.html"
+}
 Write-Host "Ctrl+C to stop"
 $n = 0
 while ($true) {
     $n++
     $start = Get-Date
-    ssh -o BatchMode=yes -o ConnectTimeout=8 $Rig "cd ~ && python3 webcam_capture.py shot $label > /dev/null 2>&1"
+    $only = if ($Stream) { "--devices $(& $dev $CheckCam) --" } else { "" }
+    ssh -o BatchMode=yes -o ConnectTimeout=8 $Rig "cd ~ && python3 webcam_capture.py $only shot $label > /dev/null 2>&1"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "round $n`: the rig did not take the shot"
         [console]::beep(400, 600)
         Start-Sleep -Seconds 3
         continue
     }
-    $files = ssh -o BatchMode=yes $Rig "ls -t ~/captures/${label}_*.png 2>/dev/null | head -2 | xargs -n1 basename"
+    $want = if ($Stream) { 1 } else { 2 }
+    $files = ssh -o BatchMode=yes $Rig "ls -t ~/captures/${label}_*.png 2>/dev/null | head -$want | xargs -n1 basename"
     if (-not (Test-Path $live)) { New-Item -ItemType Directory -Force $live | Out-Null }
     Remove-Item "$live/*.png" -ErrorAction SilentlyContinue
     foreach ($f in $files) { scp -o BatchMode=yes -q "${Rig}:captures/$f" "$live/" }
     ssh -o BatchMode=yes $Rig "rm -f ~/captures/${label}_*.png"
 
-    $out = docker exec -w /app cad-automation-api python tools/place_guide.py check --plan $Plan --captures $live 2>&1
-    $line = $out | Select-String -Pattern "^(IN PLACE|ADJUST|NOT FOUND|WRONG WAY ROUND):" | Select-Object -First 1
+    $one = if ($Stream) { @("--view", $CheckCam) } else { @() }
+    $out = docker exec -w /app cad-automation-api python tools/place_guide.py check --plan $Plan --captures $live @one 2>&1
+    $line = $out | Select-String -Pattern "^(IN PLACE|ADJUST|CHECK THE PART|NOT FOUND|WRONG WAY ROUND):" | Select-Object -First 1
     $secs = [int]((Get-Date) - $start).TotalSeconds
     if ($line) {
         Write-Host "round $n ($secs s): $line"
@@ -65,6 +88,17 @@ while ($true) {
     if (Test-Path $request) {
         Remove-Item $request -Force
         Write-Host "set: measuring this placement..."
+        if ($Stream) {
+            # both cameras for the measurement, so the live one has to let go of its stream first. The shot
+            # re-applies and verifies the locked controls, so no re-lock is needed afterwards.
+            ssh -o BatchMode=yes $Rig "pkill -f webcam_preview.py" 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+            ssh -o BatchMode=yes $Rig "cd ~ && python3 webcam_capture.py shot $label > /dev/null 2>&1"
+            $files = ssh -o BatchMode=yes $Rig "ls -t ~/captures/${label}_*.png | head -2 | xargs -n1 basename"
+            Remove-Item "$live/*.png" -ErrorAction SilentlyContinue
+            foreach ($f in $files) { scp -o BatchMode=yes -q "${Rig}:captures/$f" "$live/" }
+            ssh -o BatchMode=yes $Rig "rm -f ~/captures/${label}_*.png"
+        }
         docker exec -w /app cad-automation-api python tools/place_guide.py set --plan $Plan --captures $live
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  not set - carry on placing"

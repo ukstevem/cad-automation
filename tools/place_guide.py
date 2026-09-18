@@ -186,6 +186,55 @@ def _views(plan, captures):
     return WL.load_views(captures, plan["profile"], plan["cam_profile"], stereo=plan.get("stereo"))
 
 
+def overlay_svg(view, plan, mesh, fr, R, t):
+    """The target, its slack and the master end as SVG in ONE camera's image, for drawing over its live stream.
+
+    It never moves: the cameras are fixed and the target is fixed to them, so the operator can place the part
+    against it in real time with nothing to compute per frame. (The board may move; the target does not follow it -
+    it is where the part goes, not where the board is.) The rig's preview stream is the same field of view scaled
+    by 1.5 with no crop, measured 2026-09-18 at 0.1 px, so image coordinates carry straight over."""
+    K = np.asarray(view["K"], float).reshape(3, 3)
+    dist = np.asarray(view["dist"], float)
+    rc = np.asarray(view["rvec_cam"], float).reshape(3, 1)
+    tc = np.asarray(view["tvec_cam"], float).reshape(3, 1)
+
+    def flat(poly_xy):
+        pts = np.hstack([np.asarray(poly_xy, float), np.zeros((len(poly_xy), 1))])
+        uv, _ = cv2.projectPoints(pts, rc, tc, K, dist)
+        return uv.reshape(-1, 2)
+
+    def points(uv):
+        return " ".join("%.1f,%.1f" % (x, y) for x, y in uv)
+
+    outline = table_outline(mesh, R, t)
+    band = grown(outline, plan["tolerance"]["mm"])
+    s_end = float(fr["lo"][0] if plan["master"]["end"] == "lo" else fr["hi"][0])
+    bar = np.array([fr["centre"] + s_end * fr["axes"][:, 0] + w * fr["axes"][:, 1]
+                    for w in (fr["lo"][1], fr["hi"][1])]) @ R.T + t
+    bar[:, 2] = 0.0
+    uv_bar, _ = cv2.projectPoints(bar, rc, tc, K, dist)
+    (x1, y1), (x2, y2) = uv_bar.reshape(-1, 2)
+    return ('<polygon points="%s" fill="#a0cdeb" fill-opacity="0.22" stroke="#a0cdeb" stroke-width="3"/>'
+            '<polygon points="%s" fill="none" stroke="#000" stroke-width="10" stroke-opacity="0.45"/>'
+            '<polygon points="%s" fill="none" stroke="#3caaeb" stroke-width="6"/>'
+            '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#000" stroke-width="16" stroke-opacity="0.45"/>'
+            '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="#ff8c00" stroke-width="10"/>'
+            % (points(flat(band)), points(flat(outline)), points(flat(outline)),
+               x1, y1, x2, y2, x1, y1, x2, y2))
+
+
+def write_live_page(out, plan, view, mesh, fr, R, t, stream_url, plan_dir):
+    os.makedirs(out, exist_ok=True)
+    page = (LIVE_PAGE.replace("__STREAM__", html.escape(stream_url))
+            .replace("__W__", str(int(view["width"]))).replace("__H__", str(int(view["height"])))
+            .replace("__OVERLAY__", overlay_svg(view, plan, mesh, fr, R, t))
+            .replace("__PLAN__", html.escape(plan_dir)).replace("__MASTER__", html.escape(plan["master"]["name"]))
+            .replace("__CAM__", html.escape(_camera_key(view["tag"]))))
+    with open(os.path.join(out, "live.html"), "w", encoding="utf-8") as fh:
+        fh.write(page)
+    return os.path.join(out, "live.html")
+
+
 def cmd_plan(args) -> int:
     from app.services import visibility as VIS
     from weld_faces import article_frame
@@ -225,6 +274,15 @@ def cmd_plan(args) -> int:
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "plan.json"), "w", encoding="utf-8") as fh:
         json.dump(plan, fh, indent=2)
+    if args.stream_camera:
+        live = next((v for v in views if args.stream_camera in v["tag"]), None)
+        if live is None:
+            print("no photograph from camera %s in %s" % (args.stream_camera, args.home), file=sys.stderr)
+            return 2
+        url = args.stream_url or "http://localhost:8088/stream/%s" % _camera_key(live["tag"])
+        path = write_live_page(args.out, plan, live, mesh, fr, R, t, url,
+                               args.out.replace("\\", "/").strip("/"))
+        print("live page %s (stream %s)" % (path, url))
     print("target: resting face %d, %s at the %s end, centre (%.0f, %.0f) mm, length at %.0f deg on the home board"
           % (args.rest, args.master_name, end, tgt["centre_mm"][0], tgt["centre_mm"][1], tgt["long_axis_deg"]))
     print("the target's outline is %s the zone (%.0f mm margin)" % ("inside" if inside else "NOT inside", margin))
@@ -238,8 +296,11 @@ def _camera_key(tag):
     return next((p for p in parts if len(p) == 8 and all(ch in "0123456789ABCDEF" for ch in p)), base)
 
 
-def check(plan, views, mesh, fr):
-    """Everything the page shows, for one shot."""
+def check(plan, views, mesh, fr, plane_only=False):
+    """Everything the page shows, for one shot.
+
+    ``plane_only`` is for a single camera: height and tilt are the two things one view cannot pin (they move the
+    part along its own line of sight), so they are held at the plan's and only the slide and turn are searched."""
     L = fr["axes"][:, 0]
     homes = {_camera_key(k): v for k, v in plan["home_cameras"].items()}
     match = next(((v, serial) for v in views for serial in homes if serial in os.path.basename(v["tag"])), None)
@@ -254,8 +315,12 @@ def check(plan, views, mesh, fr):
     maps = [FP.edge_maps(v) for v in views]
     end, in_master = master_region(mesh, fr, plan["master"]["end"], plan["master"]["depth_mm"])
     tol = plan["tolerance"]
+    # not exactly zero: a search bound of zero width is a degenerate box for the optimiser, and half a millimetre
+    # of height is pinned for any purpose here
+    free = {"dz": 0.5, "tilt": 0.1} if plane_only else {}
+
     def attempt(R0, t0, accurate=True):
-        res = FP.finish(mesh, views, FP._vec(R0), t0, polish=False, maps=maps, accurate=accurate)
+        res = FP.finish(mesh, views, FP._vec(R0), t0, polish=False, maps=maps, accurate=accurate, **free)
         R, t = FP._rot(res["rvec"]), np.asarray(res["tvec"])
         samples = FP.prepare_samples(mesh, res["rvec"], t, views)
         keep = [in_master((s["model"] - fr["centre"]) @ L) for s in samples]
@@ -286,7 +351,8 @@ def check(plan, views, mesh, fr):
     inside = margin >= -tol.get("zone_slack_mm", 15.0)
     band = plan.get("band_mm") or grown(table_outline(mesh, R_tgt, t_tgt), tol["mm"])
     in_band, band_margin = footprint_inside(mesh, R, t, band, to_home=to_live if plan.get("band_mm") else None)
-    found = use["silhouette"] >= tol["min_silhouette"] and not use["at_bound"]
+    # in plane-only mode height and tilt are pinned ON PURPOSE, so "it reached the edge of the search" says nothing
+    found = use["silhouette"] >= tol["min_silhouette"] and (plane_only or not use["at_bound"])
 
     # ONE action at a time, the biggest first: a turn and a slide at once is hard to act on, and the next
     # shot will ask for the other half anyway.
@@ -408,6 +474,55 @@ def draw(view, mesh, fr, result, plan, scale=0.5):
     return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
 
+LIVE_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Place the part</title>
+<style>
+:root{--bg:#f4f5f3;--ink:#1d2320;--muted:#5d6661;--card:#fff;--line:#d9ddd8}
+@media (prefers-color-scheme:dark){:root{--bg:#141816;--ink:#e6ebe7;--muted:#9aa49e;--card:#1d2320;--line:#2e3632}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px 28px}
+.state{background:#5d6661;color:#fff;margin:0 -16px;padding:14px 20px;transition:background .2s}
+.state .say{font-size:clamp(20px,2.8vw,30px);font-weight:650;text-wrap:balance}
+.state .facts{display:flex;flex-wrap:wrap;gap:4px 20px;margin-top:6px;opacity:.9;font-size:14px;
+font-variant-numeric:tabular-nums}
+.stage{position:relative;margin:12px 0;background:#000;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.stage img,.stage svg{display:block;width:100%;height:auto}
+.stage svg{position:absolute;inset:0}
+form{margin:10px 0}button{font:600 17px/1 system-ui;background:#1f8a4c;color:#fff;border:0;border-radius:6px;
+padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-allowed}
+.key{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted);font-size:13px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+</style></head><body>
+<div class="state" id="state"><div class="say" id="say">Waiting for the first check...</div>
+<div class="facts" id="facts"></div></div>
+<div class="stage"><img src="__STREAM__" alt="live view">
+<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg></div>
+<form method="post" action="/api/v1/place/set"><input type="hidden" name="plan" value="__PLAN__">
+<button id="set" type="submit" disabled>Set this placement</button></form>
+<div class="key"><span><i class="sw" style="background:#3caaeb"></i>where the part goes</span>
+<span><i class="sw" style="background:#a0cdeb"></i>close enough (shaded)</span>
+<span><i class="sw" style="background:#ff8c00"></i>__MASTER__ end</span>
+<span>live view: camera __CAM__ &mdash; the checks run on the other camera</span></div>
+<script>
+const COL = {in_place:"#1f8a4c", move:"#b7791f", uncertain:"#8a5a1f", not_found:"#b83232", wrong_way:"#b83232"};
+async function poll(){
+  try{
+    const r = await fetch("status.json?t=" + Date.now(), {cache:"no-store"});
+    const d = await r.json();
+    document.getElementById("state").style.background = COL[d.status] || "#5d6661";
+    document.getElementById("say").textContent = d.say;
+    const f = [];
+    if (d.distance_mm != null) f.push(Math.round(d.distance_mm) + " mm off");
+    if (d.turn_deg != null) f.push(d.turn_deg.toFixed(1) + "° turn");
+    if (d.silhouette != null) f.push(Math.round(d.silhouette) + "% outline");
+    if (d.checked_at) f.push("checked " + d.checked_at.slice(11));
+    document.getElementById("facts").textContent = f.join("  ·  ");
+    document.getElementById("set").disabled = d.status !== "in_place";
+  }catch(e){}
+}
+poll(); setInterval(poll, 1500);
+</script></body></html>"""
+
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="refresh" content="__REFRESH__">
@@ -504,6 +619,8 @@ def cmd_check(args) -> int:
     fr = article_frame(mesh)
     try:
         views = _views(plan, args.captures)
+        if args.view:
+            views = [v for v in views if args.view in v["tag"]]
     except Exception as exc:                                    # no board, wrong resolution, ...
         views, why = [], str(exc)
     else:
@@ -511,7 +628,7 @@ def cmd_check(args) -> int:
     if not views:
         result = {"status": "not_found", "say": "Cannot see the board: %s" % why}
     else:
-        result = check(plan, views, mesh, fr)
+        result = check(plan, views, mesh, fr, plane_only=bool(args.view))
     images = [(_camera_key(v["tag"]), draw(v, mesh, fr, result, plan)) for v in views]
     seconds = time.perf_counter() - t0
     write_page(args.out or args.plan, result, plan, images, args.captures, seconds, refresh=args.refresh,
@@ -609,12 +726,19 @@ def main() -> int:
     p.add_argument("--zone-slack-mm", type=float, default=15.0,
                    help="how far past the zone's edge still counts as inside: the zone is traced on a 10 mm grid, and "
                         "the calibration does not fall off a cliff at its line")
+    p.add_argument("--stream-camera", default=None,
+                   help="serial of the camera that will show a live stream: writes live.html with the target drawn "
+                        "over it, so placing is by eye at full speed and the checks run on the other camera")
+    p.add_argument("--stream-url", default=None, help="default: http://localhost:8088/stream/<serial>")
     p.add_argument("--out", required=True)
     c = sub.add_parser("check", help="find the part in a shot and say what to do")
     c.add_argument("--plan", required=True, help="directory holding plan.json")
     c.add_argument("--captures", required=True)
     c.add_argument("--out", default=None, help="where the page goes (default: the plan directory)")
     c.add_argument("--refresh", type=int, default=5, help="page refresh, seconds")
+    c.add_argument("--view", default=None,
+                   help="check with only the photographs whose name holds this (one camera). Height and tilt are then "
+                        "held at the plan's, because one camera cannot see them")
     t = sub.add_parser("set", help="the operator accepted the placement: measure it and write the fit")
     t.add_argument("--plan", required=True)
     t.add_argument("--captures", required=True, help="the shot the operator was looking at")
