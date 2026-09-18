@@ -44,7 +44,13 @@ while :; do
     rm -f "$PLAN/set.request"
     echo "set: measuring this placement..."
     if docker exec -w //app cad-automation-api python tools/place_guide.py set --plan "$PLAN" --captures "$LIVE"; then
-      docker exec -w //app cad-automation-api python tools/ar_view.py --captures "$LIVE" --fit "$PLAN/fit"         --welds "${WELDS:-outputs/welds/mainframe_ifc.json}" --scale "${SCALE:-0.2}" --out "$PLAN/fit"         | grep -E "welds shown|pose trust|typical"
+      # the same calibration the placement was measured with, or camera B is scored against camera A's lens
+      extra=$(python -c "import json,sys; p=json.load(open('$PLAN/plan.json')); a=[]
+[a.extend(['--cam-profile', c]) for c in p.get('cam_profile') or []]
+a += ['--stereo', p['stereo']] if p.get('stereo') else []
+a += ['--profile', p['profile']] if p.get('profile') else []
+print(' '.join(a))")
+      docker exec -w //app cad-automation-api python tools/ar_view.py --captures "$LIVE" --fit "$PLAN/fit"         --welds "${WELDS:-outputs/welds/mainframe_ifc.json}" --scale "${SCALE:-0.2}" --out "$PLAN/fit" $extra         | grep -E "welds shown|pose trust|typical|DEPARTS"
       echo "weld view: http://localhost:8000/$PLAN/fit/ar_view.html"
       beep "[console]::beep(1200,150);[console]::beep(1600,150);[console]::beep(2000,150);[console]::beep(2400,400)"
       break

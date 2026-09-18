@@ -105,8 +105,15 @@ while ($true) {
             [console]::beep(400, 600)
         } else {
             $fit = "$Plan/fit"
+            # the same calibration the placement was measured with: without it camera B is scored against camera
+            # A's lens, which cost 15 points of silhouette and doubled the deviation the first time round
+            $cfg = Get-Content (Join-Path $Plan "plan.json") -Raw | ConvertFrom-Json
+            $extra = @()
+            foreach ($c in $cfg.cam_profile) { $extra += @("--cam-profile", $c) }
+            if ($cfg.stereo) { $extra += @("--stereo", $cfg.stereo) }
+            if ($cfg.profile) { $extra += @("--profile", $cfg.profile) }
             docker exec -w /app cad-automation-api python tools/ar_view.py --captures $live --fit $fit `
-                --welds $Welds --scale $Scale --out $fit | Select-String -Pattern "welds shown|pose trust|typical"
+                --welds $Welds --scale $Scale --out $fit @extra | Select-String -Pattern "welds shown|pose trust|typical|DEPARTS"
             Write-Host ""
             Write-Host "weld view: http://localhost:8000/$fit/ar_view.html"
             [console]::beep(1200, 150); [console]::beep(1600, 150); [console]::beep(2000, 150); [console]::beep(2400, 400)
