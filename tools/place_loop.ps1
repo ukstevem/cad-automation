@@ -10,11 +10,16 @@
 # running API container, and the laptop beeps: three rising notes for IN PLACE, one low note otherwise.
 # Leave the page open - it refreshes itself.
 #
+# When the part is in place the page offers a SET button. Pressing it leaves a request beside the plan; the
+# next round here measures that placement properly, builds the weld view, prints the link and stops.
+#
 # The board must stay in both views; the part can move freely between rounds.
 param(
     [string]$Plan = "outputs/ar_fits/place/tower",
     [int]$Rounds = 0,
-    [string]$Rig = "administrator@10.0.0.36"
+    [string]$Rig = "administrator@10.0.0.36",
+    [string]$Welds = "outputs/welds/mainframe_ifc.json",
+    [double]$Scale = 0.2
 )
 $ErrorActionPreference = "Continue"
 Set-Location (Join-Path $PSScriptRoot "..")
@@ -54,6 +59,25 @@ while ($true) {
         Write-Host "round $n ($secs s): check failed"
         $out | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
         [console]::beep(400, 600)
+    }
+    # the operator pressed Set on the page
+    $request = Join-Path $Plan "set.request"
+    if (Test-Path $request) {
+        Remove-Item $request -Force
+        Write-Host "set: measuring this placement..."
+        docker exec -w /app cad-automation-api python tools/place_guide.py set --plan $Plan --captures $live
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  not set - carry on placing"
+            [console]::beep(400, 600)
+        } else {
+            $fit = "$Plan/fit"
+            docker exec -w /app cad-automation-api python tools/ar_view.py --captures $live --fit $fit `
+                --welds $Welds --scale $Scale --out $fit | Select-String -Pattern "welds shown|pose trust|typical"
+            Write-Host ""
+            Write-Host "weld view: http://localhost:8000/$fit/ar_view.html"
+            [console]::beep(1200, 150); [console]::beep(1600, 150); [console]::beep(2000, 150); [console]::beep(2400, 400)
+            break
+        }
     }
     if ($Rounds -gt 0 -and $n -ge $Rounds) { break }
 }

@@ -330,78 +330,81 @@ def check(plan, views, mesh, fr):
         "found": {"rvec": use["rvec"], "tvec": use["tvec"]}, "target": {"rvec": FP._vec(R_tgt).tolist(), "tvec": t_tgt.tolist()},
         "share_pct": use.get("share_pct"),
         "_draw": {"R_tgt": R_tgt, "t_tgt": t_tgt, "R": R, "t": t, "c_found": c_found, "c_tgt": c_tgt,
-                  "in_master": in_master, "to_live": to_live, "ends_model": lo_hi},
+                  "in_master": in_master, "to_live": to_live, "ends_model": lo_hi, "master_end": end},
     }
 
 
 def draw(view, mesh, fr, result, plan, scale=0.5):
-    """One camera's photograph with the target (blue, master part orange), the part as found, and the arrow."""
-    from critical_edges import visible_feature_edges
+    """One camera's photograph with flat outlines on the table: where the part goes, the slack around it, where it
+    is now, and the end-plate end.
 
+    Flat outlines only, no wireframe. A wireframe of the target and the outline of where it goes are the same
+    colour over the same lines, and on the rig it was impossible to tell which was which (2026-09-18) - and a
+    shape lying on the table is what a person can line a part up with anyway."""
     img = view["image"].copy()
     dr = result.get("_draw")
     if dr is None:
         return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     K, dist = np.asarray(view["K"], float).reshape(3, 3), np.asarray(view["dist"], float)
     rc, tc = np.asarray(view["rvec_cam"], float).reshape(3, 1), np.asarray(view["tvec_cam"], float).reshape(3, 1)
-    L = fr["axes"][:, 0]
-
-    def edges(R, t):
-        pts, _tan, _z, world = visible_feature_edges(mesh, FP._vec(R).reshape(3, 1), t.reshape(3, 1), view,
-                                                     step_px=1.5, with_world=True)
-        s = ((world - t) @ R - fr["centre"]) @ L
-        return pts, s
-
-    def dots(pts, colour, r):
-        for x, y in pts:
-            cv2.circle(img, (int(round(x)), int(round(y))), r, colour, -1, cv2.LINE_AA)
-
-    # The OUTLINES ON THE TABLE are what the operator lines the part up with: flat shapes on a flat surface,
-    # unlike a wireframe hanging in the air. Inner: where it goes. Outer: the slack - anywhere inside is green.
     M, m = dr["to_live"]
 
-    def on_table(poly_home, colour, thick):
-        if poly_home is None or not len(poly_home):
-            return
-        pts = np.hstack([np.asarray(poly_home, float), np.zeros((len(poly_home), 1))]) @ M.T + m
-        pts[:, 2] = 0.0
-        uv, _ = cv2.projectPoints(pts, rc, tc, K, dist)
-        uv = uv.reshape(-1, 1, 2).astype(np.int32)
+    def project(pts_xyz):
+        uv, _ = cv2.projectPoints(np.asarray(pts_xyz, float), rc, tc, K, dist)
+        return uv.reshape(-1, 2)
+
+    def flat(poly_xy, frame="home"):
+        pts = np.hstack([np.asarray(poly_xy, float), np.zeros((len(poly_xy), 1))])
+        return (pts @ M.T + m) * [1, 1, 0] if frame == "home" else pts * [1, 1, 0]
+
+    def ring(pts_xyz, colour, thick):
+        uv = project(pts_xyz).reshape(-1, 1, 2).astype(np.int32)
         cv2.polylines(img, [uv], True, (0, 0, 0), thick + 5, cv2.LINE_AA)
         cv2.polylines(img, [uv], True, colour, thick, cv2.LINE_AA)
 
-    on_table(plan.get("band_mm"), (235, 200, 150), 2)
-    on_table(plan.get("outline_mm") or table_outline(mesh, dr["R_tgt"], dr["t_tgt"]), (235, 170, 60), 4)
+    if plan.get("band_mm"):
+        # SHADED, not another outline: a second thin line beside the first is exactly what made the page unreadable.
+        # Anywhere in the shading is green.
+        band_uv = project(flat(plan["band_mm"])).reshape(-1, 1, 2).astype(np.int32)
+        shade = img.copy()
+        cv2.fillPoly(shade, [band_uv], (235, 205, 160))
+        cv2.addWeighted(shade, 0.22, img, 0.78, 0, img)
+        cv2.polylines(img, [band_uv], True, (235, 205, 160), 2, cv2.LINE_AA)
+    target = flat(plan["outline_mm"]) if plan.get("outline_mm") else flat(table_outline(mesh, dr["R_tgt"], dr["t_tgt"]), "live")
+    ring(target, (235, 170, 60), 5)                                           # where the part goes
 
-    pts, s = edges(dr["R_tgt"], dr["t_tgt"])
-    master = dr["in_master"](s)
-    dots(pts[~master], (235, 170, 60), 2)                    # target: blue
-    dots(pts[master], (0, 140, 255), 4)                      # master part on the target: orange, heavier
-    if True:
-        colour = {"in_place": (80, 200, 60), "move": (0, 200, 255)}.get(result["status"], (60, 60, 235))
-        fp, _s = edges(dr["R"], dr["t"])
-        dots(fp, colour, 1)
-        # one arrow at EACH end, from where that end is to where it should be: together they show the slide and
-        # the turn at once, which a single arrow at the centre cannot. Only while there is something to do.
+    if result["status"] != "not_found":
+        # magenta for "where it is now": amber sat too close to the orange end marker to tell apart on the rig
+        colour = {"in_place": (80, 200, 60), "move": (220, 60, 200)}.get(result["status"], (60, 60, 235))
+        ring(flat(table_outline(mesh, dr["R"], dr["t"]), "live"), colour, 3)  # where the part is now
+        # one arrow at EACH end, from where that end is to where it should be: together they show the slide and the
+        # turn at once, which a single arrow at the centre cannot. Only while there is something to do.
         if result["status"] == "move":
             top = float((np.asarray(mesh).reshape(-1, 3) @ dr["R"].T + dr["t"])[:, 2].min())
             for e in dr["ends_model"]:
-                a3 = dr["R"] @ e + dr["t"]
-                b3 = dr["R_tgt"] @ e + dr["t_tgt"]
-                step = b3 - a3
-                step[2] = 0.0
+                a3, b3 = dr["R"] @ e + dr["t"], dr["R_tgt"] @ e + dr["t_tgt"]
+                step = (b3 - a3) * [1, 1, 0]
                 if np.linalg.norm(step) < 1.0:
                     continue
-                step *= max(1.0, 70.0 / np.linalg.norm(step))      # at least 70 mm, so the direction is visible
+                step *= max(1.0, 70.0 / np.linalg.norm(step))                 # at least 70 mm, so it can be seen
                 ends = np.vstack([a3, a3 + step])
                 ends[:, 2] = top
-                uv, _ = cv2.projectPoints(ends, rc, tc, K, dist)
-                a, b = uv.reshape(-1, 2).astype(int)
+                a, b = project(ends).astype(int)
                 cv2.arrowedLine(img, tuple(a), tuple(b), (0, 0, 0), 14, cv2.LINE_AA, tipLength=0.3)
                 cv2.arrowedLine(img, tuple(a), tuple(b), (255, 255, 255), 6, cv2.LINE_AA, tipLength=0.3)
-    zone = np.hstack([np.asarray(plan["zone_mm"], float), np.zeros((len(plan["zone_mm"]), 1))]) @ M.T + m
-    uv, _ = cv2.projectPoints(zone, rc, tc, K, dist)
-    cv2.polylines(img, [uv.reshape(-1, 1, 2).astype(np.int32)], True, (120, 120, 120), 2, cv2.LINE_AA)
+
+    # last, so nothing covers it: the end the master part goes at, as a bar right across that end of the target,
+    # taken from the part's own width rather than from two hull vertices that happen to be neighbours
+    s_end = float(fr["lo"][0] if dr["master_end"] == "lo" else fr["hi"][0])
+    corners = np.array([fr["centre"] + s_end * fr["axes"][:, 0] + w * fr["axes"][:, 1]
+                        for w in (fr["lo"][1], fr["hi"][1])])
+    bar = corners @ dr["R_tgt"].T + dr["t_tgt"]
+    bar[:, 2] = 0.0
+    a, b = project(bar).astype(int)
+    cv2.line(img, tuple(a), tuple(b), (0, 0, 0), 15, cv2.LINE_AA)
+    cv2.line(img, tuple(a), tuple(b), (0, 140, 255), 8, cv2.LINE_AA)
+
+    ring(flat(plan["zone_mm"]), (120, 120, 120), 2)
     return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
 
@@ -417,6 +420,10 @@ font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px 32px
 .banner{background:var(--state);color:#fff;margin:0 -16px;padding:18px 24px}
 .banner .state{font:600 13px/1 system-ui;letter-spacing:.08em;text-transform:uppercase;opacity:.9}
 .banner .say{font-size:clamp(22px,3.2vw,34px);font-weight:650;margin-top:6px;text-wrap:balance}
+.banner form{margin-top:14px}
+.banner button{font:600 18px/1 system-ui;background:#fff;color:#1d2320;border:0;border-radius:6px;
+padding:14px 34px;cursor:pointer}
+.banner button:hover{background:#f0f0ee}.banner .note{opacity:.85;font-size:14px;margin-top:10px}
 .facts{display:flex;flex-wrap:wrap;gap:8px 22px;margin:14px 0;color:var(--muted);font-variant-numeric:tabular-nums}
 .facts b{color:var(--ink);font-weight:600}
 .views{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
@@ -426,12 +433,13 @@ font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px 32px
 .key{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted);font-size:13px;margin-top:10px}
 .sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
 </style></head><body>
-<div class="banner"><div class="state">__STATE__</div><div class="say">__SAY__</div></div>
+<div class="banner"><div class="state">__STATE__</div><div class="say">__SAY__</div>__SET__</div>
 <div class="facts">__FACTS__</div>
 <div class="views">__VIEWS__</div>
 <div class="key"><span><i class="sw" style="background:#3caaeb"></i>where the part goes</span>
+<span><i class="sw" style="background:#a0cdeb"></i>close enough (shaded)</span>
 <span><i class="sw" style="background:#ff8c00"></i>__MASTER__ end</span>
-<span><i class="sw" style="background:#ffc800"></i>where it is now</span>
+<span><i class="sw" style="background:#dc3cc8"></i>where it is now</span>
 <span><i class="sw" style="background:#3cc850"></i>in place</span>
 <span><i class="sw" style="background:#787878"></i>well-calibrated area</span></div>
 </body></html>"""
@@ -440,7 +448,7 @@ STATE_LABEL = {"in_place": "In place", "move": "Adjust", "uncertain": "Check the
                "wrong_way": "Wrong way round"}
 
 
-def write_page(out, result, plan, images, capture, seconds, refresh=5):
+def write_page(out, result, plan, images, capture, seconds, refresh=5, plan_dir=""):
     os.makedirs(out, exist_ok=True)
     figs = []
     for name, img in images:
@@ -465,7 +473,15 @@ def write_page(out, result, plan, images, capture, seconds, refresh=5):
         facts.append("tilt <b>%.1f&deg;</b>, height <b>%+.0f mm</b>" % (result["tilt_deg"], result["height_mm"]))
     facts.append("shot <b>%s</b> checked in %.0f s at %s" % (html.escape(os.path.basename(os.path.normpath(capture))), seconds,
                                                              datetime.datetime.now().strftime("%H:%M:%S")))
+    # the operator is at the rig with the page in front of them, so the decision to accept a placement belongs
+    # here, not at the terminal. Only offered once it is actually in place.
+    if result["status"] == "in_place":
+        setter = ('<form method="post" action="/api/v1/place/set"><input type="hidden" name="plan" value="%s">'
+                  '<button type="submit">Set this placement</button></form>' % html.escape(plan_dir))
+    else:
+        setter = '<div class="note">The Set button appears once the part is in place.</div>'
     page = (PAGE.replace("__REFRESH__", str(refresh)).replace("__COLOUR__", STATUS_COLOUR[result["status"]])
+            .replace("__SET__", setter)
             .replace("__STATE__", STATE_LABEL[result["status"]]).replace("__SAY__", html.escape(result["say"]))
             .replace("__FACTS__", "".join("<span>%s</span>" % f for f in facts)).replace("__VIEWS__", "".join(figs))
             .replace("__MASTER__", html.escape(plan["master"]["name"])))
@@ -498,7 +514,8 @@ def cmd_check(args) -> int:
         result = check(plan, views, mesh, fr)
     images = [(_camera_key(v["tag"]), draw(v, mesh, fr, result, plan)) for v in views]
     seconds = time.perf_counter() - t0
-    write_page(args.out or args.plan, result, plan, images, args.captures, seconds, refresh=args.refresh)
+    write_page(args.out or args.plan, result, plan, images, args.captures, seconds, refresh=args.refresh,
+               plan_dir=args.plan.replace("\\", "/").strip("/"))
     print("%s: %s" % (STATE_LABEL[result["status"]].upper(), result["say"]))
     if result.get("distance_mm") is not None:
         print("  off target %.1f mm (along %+.1f toward the %s end, across %+.1f), turn %s, zone %s (margin %.0f mm)"
@@ -511,6 +528,56 @@ def cmd_check(args) -> int:
                  "" if turned is None else " (turned round: %.0f%%)" % turned,
                  result["tilt_deg"], result["height_mm"]))
     print("  %.1f s; page %s" % (seconds, os.path.join(args.out or args.plan, "guide.html")))
+    return 0
+
+
+def cmd_set(args) -> int:
+    """The operator says this placement is the one: measure it properly and write the fit the AR view needs.
+
+    The guide's own checks skip the accurate refinement to stay quick; this does not. It starts from the pose the
+    last check found - already within a millimetre or two - so the extra work is the measurement, not a search."""
+    from app.services import visibility as VIS
+    from weld_faces import article_frame
+
+    t0 = time.perf_counter()
+    plan = json.load(open(os.path.join(args.plan, "plan.json"), encoding="utf-8"))
+    mesh = VIS.load_stl(plan["mesh"])
+    fr = article_frame(mesh)
+    views = _views(plan, args.captures)
+    if not views:
+        print("no usable photographs in %s" % args.captures, file=sys.stderr)
+        return 2
+    prev = os.path.join(args.plan, "status.json")
+    start = None
+    if os.path.exists(prev):
+        st = json.load(open(prev, encoding="utf-8"))
+        if st.get("found") and os.path.abspath(st.get("capture", "")) == os.path.abspath(args.captures):
+            start = (st["found"]["rvec"], np.asarray(st["found"]["tvec"], float))
+    if start is None:                                        # no usable check to build on: find it again
+        res = check(plan, views, mesh, fr)
+        if "_draw" not in res:
+            print("cannot find the part: %s" % res["say"], file=sys.stderr)
+            return 3
+        start = (res["found"]["rvec"], np.asarray(res["found"]["tvec"], float))
+
+    res = FP.finish(mesh, views, start[0], start[1], along=15.0, across=15.0, yaw=4.0, polish=True)
+    if res["silhouette"] < plan["tolerance"].get("min_present", 45.0):
+        print("refusing to set: only %.0f%% of the outline matches - that is not the part in place"
+              % res["silhouette"], file=sys.stderr)
+        return 3
+    out = args.out or os.path.join(args.plan, "fit")
+    os.makedirs(out, exist_ok=True)
+    fit = {"rvec": res["rvec"], "tvec": res["tvec"], "mesh": os.path.basename(plan["mesh"]),
+           "init": "placement guide (operator pressed Set)", "confirmed": res["confirmed"],
+           "silhouette": res["silhouette"], "captures": os.path.abspath(args.captures),
+           "plan": os.path.abspath(args.plan), "rest": plan["rest"], "end": plan["end"],
+           "set_at": datetime.datetime.now().isoformat(timespec="seconds"),
+           "finish": {k: res[k] for k in ("tilt_deg", "height_mm", "moved_mm", "at_bound", "share_pct")}}
+    with open(os.path.join(out, "fit.json"), "w", encoding="utf-8") as fh:
+        json.dump(fit, fh, indent=2)
+    print("set: confirmed %.0f%%, silhouette %.0f%% (tilt %.2f deg, height %+.1f mm) in %.1f s"
+          % (res["confirmed"], res["silhouette"], res["tilt_deg"], res["height_mm"], time.perf_counter() - t0))
+    print("wrote %s" % os.path.join(out, "fit.json"))
     return 0
 
 
@@ -548,8 +615,12 @@ def main() -> int:
     c.add_argument("--captures", required=True)
     c.add_argument("--out", default=None, help="where the page goes (default: the plan directory)")
     c.add_argument("--refresh", type=int, default=5, help="page refresh, seconds")
+    t = sub.add_parser("set", help="the operator accepted the placement: measure it and write the fit")
+    t.add_argument("--plan", required=True)
+    t.add_argument("--captures", required=True, help="the shot the operator was looking at")
+    t.add_argument("--out", default=None, help="where fit.json goes (default: <plan>/fit)")
     args = ap.parse_args()
-    return {"plan": cmd_plan, "check": cmd_check}[args.cmd](args)
+    return {"plan": cmd_plan, "check": cmd_check, "set": cmd_set}[args.cmd](args)
 
 
 if __name__ == "__main__":

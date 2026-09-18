@@ -39,5 +39,18 @@ while :; do
     "IN PLACE"*) beep "[console]::beep(1200,150);[console]::beep(1600,150);[console]::beep(2000,300)" ;;
     *) beep "[console]::beep(700,250)" ;;
   esac
+  # the operator pressed Set on the page
+  if [ -f "$PLAN/set.request" ]; then
+    rm -f "$PLAN/set.request"
+    echo "set: measuring this placement..."
+    if docker exec -w //app cad-automation-api python tools/place_guide.py set --plan "$PLAN" --captures "$LIVE"; then
+      docker exec -w //app cad-automation-api python tools/ar_view.py --captures "$LIVE" --fit "$PLAN/fit"         --welds "${WELDS:-outputs/welds/mainframe_ifc.json}" --scale "${SCALE:-0.2}" --out "$PLAN/fit"         | grep -E "welds shown|pose trust|typical"
+      echo "weld view: http://localhost:8000/$PLAN/fit/ar_view.html"
+      beep "[console]::beep(1200,150);[console]::beep(1600,150);[console]::beep(2000,150);[console]::beep(2400,400)"
+      break
+    fi
+    echo "  not set - carry on placing"
+    beep "[console]::beep(400,600)"
+  fi
   if [ "$ROUNDS" -gt 0 ] && [ "$n" -ge "$ROUNDS" ]; then break; fi
 done
