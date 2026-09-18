@@ -190,7 +190,7 @@ def cmd_plan(args) -> int:
                                     "tvec_cam": np.ravel(v["tvec_cam"]).tolist()} for v in views},
         "master": {"end": end, "depth_mm": args.master_mm, "name": args.master_name},
         "tolerance": {"mm": args.tol_mm, "deg": args.tol_deg, "min_silhouette": args.min_silhouette,
-                      "zone_slack_mm": args.zone_slack_mm},
+                      "min_present": args.min_present, "zone_slack_mm": args.zone_slack_mm},
     })
     os.makedirs(args.out, exist_ok=True)
     with open(os.path.join(args.out, "plan.json"), "w", encoding="utf-8") as fh:
@@ -261,10 +261,17 @@ def check(plan, views, mesh, fr):
     if wrong_way:
         status = "wrong_way"
         say = "Turn the part end for end: the %s goes at the marked end." % plan["master"]["name"]
+    elif use["silhouette"] < tol.get("min_present", 45.0):
+        # nothing there at all: with the part off the table this reads about 29%, against 94% for a good lock. The
+        # search always returns SOME pose, so a low score is the only thing that says "no part", and it must not be
+        # dressed up as "found" (rig, 2026-09-18).
+        status = "not_found"
+        say = ("No part where the outline is - only %.0f%% of an outline matches. Put it inside the blue outline, "
+               "%s at the orange end." % (use["silhouette"], plan["master"]["name"]))
     elif not found:
         status = "uncertain"
-        say = ("Found the part, but only %.0f%% of its outline matches. Check nothing is resting on it or in front "
-               "of it, and that it is lying on the face shown." % use["silhouette"])
+        say = ("The part is roughly there, but only %.0f%% of its outline matches. Check nothing is resting on it or "
+               "in front of it, and that it is lying on the face shown." % use["silhouette"])
     elif dist <= tol["mm"] and abs(turn) <= tol["deg"] and inside:
         status = "in_place"
         say = "In place."
@@ -487,6 +494,8 @@ def main() -> int:
     p.add_argument("--tol-mm", type=float, default=25.0, help="in place within this distance of the target")
     p.add_argument("--tol-deg", type=float, default=4.0, help="and within this turn")
     p.add_argument("--min-silhouette", type=float, default=75.0, help="found only when this much outline is confirmed")
+    p.add_argument("--min-present", type=float, default=45.0,
+                   help="below this much outline there is no part there at all, rather than a part that fits badly")
     p.add_argument("--zone-slack-mm", type=float, default=15.0,
                    help="how far past the zone's edge still counts as inside: the zone is traced on a 10 mm grid, and "
                         "the calibration does not fall off a cliff at its line")
