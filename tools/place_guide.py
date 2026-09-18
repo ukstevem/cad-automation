@@ -457,16 +457,18 @@ def check(plan, views, mesh, fr, plane_only=False):
 
     # ONE action at a time, the biggest first: a turn and a slide at once is hard to act on, and the next
     # shot will ask for the other half anyway.
-    if wrong_way:
-        status = "wrong_way"
-        say = "Turn the part end for end: the %s goes at the marked end." % plan["master"]["name"]
-    elif use["silhouette"] < tol.get("min_present", 45.0):
+    if use["silhouette"] < tol.get("min_present", 45.0):
         # nothing there at all: with the part off the table this reads about 29%, against 94% for a good lock. The
         # search always returns SOME pose, so a low score is the only thing that says "no part", and it must not be
         # dressed up as "found" (rig, 2026-09-18).
+        # before anything else: with the wrong part on the table - or none - the two ways round are both wrong,
+        # and "turn it end for end" is nonsense (Steve, 2026-09-18, tower on the mat against the bracket's plan)
         status = "not_found"
         say = ("No part where the outline is - only %.0f%% of an outline matches. Put it inside the blue outline, "
                "%s at the orange end." % (use["silhouette"], plan["master"]["name"]))
+    elif wrong_way:
+        status = "wrong_way"
+        say = "Turn the part end for end: the %s goes at the marked end." % plan["master"]["name"]
     elif not found:
         status = "uncertain"
         say = ("The part is roughly there, but only %.0f%% of its outline matches. Check nothing is resting on it or "
@@ -622,7 +624,7 @@ setInterval(() => {
   if (!dead.hidden) {
     document.getElementById("retry").textContent = "retrying (" + (++tries) + ")...";
     cam.hidden = false;
-    cam.src = cam.src.split("?")[0] + "?t=" + Date.now();
+    cam.src = "__STREAM__#" + Date.now();   // fragment, not query: the preview 404s on /stream/<serial>?t=...
   }
 }, 4000);
 async function poll(){
