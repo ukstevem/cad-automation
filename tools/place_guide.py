@@ -589,6 +589,10 @@ font-variant-numeric:tabular-nums}
 .stage{position:relative;margin:12px 0;background:#000;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .stage img,.stage svg{display:block;width:100%;height:auto}
 .stage svg{position:absolute;inset:0}
+.stage .dead{position:absolute;inset:0;display:grid;align-content:center;justify-items:center;gap:6px;
+background:#141816;color:#e6ebe7;text-align:center;padding:24px;line-height:1.7}
+.stage .dead code{background:#00000055;padding:6px 10px;border-radius:4px;font-size:13px}
+.stage img[hidden]{display:none}
 form{margin:10px 0}button{font:600 17px/1 system-ui;background:#1f8a4c;color:#fff;border:0;border-radius:6px;
 padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-allowed}
 .key{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted);font-size:13px}
@@ -596,8 +600,10 @@ padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-
 </style></head><body>
 <div class="state" id="state"><div class="say" id="say">Waiting for the first check...</div>
 <div class="facts" id="facts"></div></div>
-<div class="stage"><img src="__STREAM__" alt="live view">
-<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg></div>
+<div class="stage" id="stage"><img id="cam" src="__STREAM__" alt="live view">
+<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg>
+<div class="dead" id="dead" hidden><b>No live view.</b><br>Start it from the laptop:<br>
+<code>tools/place_loop.ps1 -Stream -Plan __PLAN__</code><br><span id="retry">retrying...</span></div></div>
 <form method="post" action="/api/v1/place/set"><input type="hidden" name="plan" value="__PLAN__">
 <button id="set" type="submit" disabled>Set this placement</button></form>
 <div class="key"><span><i class="sw" style="background:#3caaeb"></i>where the part goes</span>
@@ -606,9 +612,23 @@ padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-
 <span>live view: camera __CAM__ &mdash; the checks run on the other camera</span></div>
 <script>
 const COL = {in_place:"#1f8a4c", move:"#b7791f", uncertain:"#8a5a1f", not_found:"#b83232", wrong_way:"#b83232"};
+// the stream comes from the rig through an SSH tunnel the loop opens; say so plainly when it is not there,
+// and keep trying, so the page recovers on its own once the loop is started
+const cam = document.getElementById("cam"), dead = document.getElementById("dead");
+let tries = 0;
+cam.onerror = () => { dead.hidden = false; cam.hidden = true; };
+cam.onload = () => { dead.hidden = true; cam.hidden = false; tries = 0; };
+setInterval(() => {
+  if (!dead.hidden) {
+    document.getElementById("retry").textContent = "retrying (" + (++tries) + ")...";
+    cam.hidden = false;
+    cam.src = cam.src.split("?")[0] + "?t=" + Date.now();
+  }
+}, 4000);
 async function poll(){
   try{
     const r = await fetch("status.json?t=" + Date.now(), {cache:"no-store"});
+    if (!r.ok) throw new Error("no status");
     const d = await r.json();
     document.getElementById("state").style.background = COL[d.status] || "#5d6661";
     document.getElementById("say").textContent = d.say;
@@ -619,7 +639,10 @@ async function poll(){
     if (d.checked_at) f.push("checked " + d.checked_at.slice(11));
     document.getElementById("facts").textContent = f.join("  ·  ");
     document.getElementById("set").disabled = d.status !== "in_place";
-  }catch(e){}
+  }catch(e){
+    document.getElementById("say").textContent = "No checks yet - start the loop on the laptop.";
+    document.getElementById("facts").textContent = "";
+  }
 }
 poll(); setInterval(poll, 1500);
 </script></body></html>"""

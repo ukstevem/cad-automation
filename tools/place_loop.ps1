@@ -40,7 +40,9 @@ if ($Stream) {
             "${StreamPort}:127.0.0.1:${StreamPort}", $Rig)
         Start-Sleep -Seconds 2
     }
-    ssh -o BatchMode=yes $Rig "pgrep -f webcam_preview.py > /dev/null || (cd ~ && nohup python3 webcam_preview.py --devices $(& $dev $StreamCam) --port $StreamPort > /tmp/preview.log 2>&1 &)"
+    # [w]ebcam, not webcam: run over ssh, the remote command line holds the pattern and pgrep matches ITSELF,
+    # so the stream was never started and the page sat blank
+    ssh -o BatchMode=yes $Rig "pgrep -f '[w]ebcam_preview.py' > /dev/null || (cd ~ && nohup python3 webcam_preview.py --devices $(& $dev $StreamCam) --port $StreamPort > /tmp/preview.log 2>&1 &)"
     Start-Sleep -Seconds 3
     Write-Host "LIVE PAGE: http://localhost:8000/$Plan/live.html    <- place against the box on this"
     Write-Host "checks run on camera $CheckCam every few seconds; the Set button lights up when it is in place"
