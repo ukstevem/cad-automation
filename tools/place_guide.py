@@ -132,6 +132,33 @@ def footprint_inside(mesh, R, t, poly_xy, to_home=None):
     return worst >= 0.0, float(worst)
 
 
+def table_outline(mesh, R, t):
+    """The part's outline on the table: the convex hull of everything, flattened. A flat shape on a flat surface is
+    what an operator can line a part up with - a wireframe hanging in the air is not."""
+    P = np.asarray(mesh).reshape(-1, 3) @ R.T + t
+    return cv2.convexHull(P[:, :2].astype(np.float32)).reshape(-1, 2).astype(float)
+
+
+def grown(poly_xy, margin_mm):
+    """``poly_xy`` pushed out by ``margin_mm``: every edge offset along its outward normal, corners cut square.
+
+    This is the tolerance made visible. Green has to agree with something the operator can see, so rather than a
+    tighter number the page draws the slack as a second outline - aim at the inner one, green anywhere inside the
+    outer one (bd 6et, 2026-09-18: Steve wanted the looser tolerance back, and a number alone could not be judged)."""
+    poly = np.asarray(poly_xy, float).reshape(-1, 2)
+    if len(poly) < 3 or margin_mm <= 0:
+        return poly
+    inner = poly if cv2.contourArea(poly.astype(np.float32)) > 0 else poly[::-1]
+    out = []
+    for i in range(len(inner)):
+        a, b = inner[i], inner[(i + 1) % len(inner)]
+        e = b - a
+        n = np.array([e[1], -e[0]])                       # outward for an anticlockwise ring in x-y
+        n /= max(np.linalg.norm(n), 1e-9)
+        out += [a + n * margin_mm, b + n * margin_mm]
+    return cv2.convexHull(np.asarray(out, np.float32)).reshape(-1, 2).astype(float)
+
+
 def fraction_within(R, t, samples, maps, px=2.5):
     """Share of model edge points with a same-direction photo edge within ``px`` - the fast stand-in for the
     accurate 'confirmed' score, cheap enough to use on a region."""
@@ -180,12 +207,15 @@ def cmd_plan(args) -> int:
         return 2
     end, test = master_region(mesh, fr, args.master_end, args.master_mm)
     inside, margin = footprint_inside(mesh, R, t, zone["poly_mm"])
+    outline = table_outline(mesh, R, t)
+    band = grown(outline, args.tol_mm)
     plan.update({
         "schema": "PSS-PlaceGuide/0.1", "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "model": os.path.abspath(args.model), "mesh": os.path.abspath(args.mesh), "rest": args.rest, "end": args.end,
         "target": {"rvec": FP._vec(R).tolist(), "tvec": t.tolist(), "frame": "home board",
                    "centre_mm": tgt["centre_mm"], "long_axis_deg": tgt["long_axis_deg"]},
         "zone_mm": zone["poly_mm"], "home": os.path.abspath(args.home),
+        "outline_mm": outline.tolist(), "band_mm": band.tolist(),
         "home_cameras": {v["tag"]: {"rvec_cam": np.ravel(v["rvec_cam"]).tolist(),
                                     "tvec_cam": np.ravel(v["tvec_cam"]).tolist()} for v in views},
         "master": {"end": end, "depth_mm": args.master_mm, "name": args.master_name},
@@ -254,6 +284,8 @@ def check(plan, views, mesh, fr):
     dist = float(np.hypot(d[0], d[1]))
     _strict, margin = footprint_inside(mesh, R, t, plan["zone_mm"], to_home=to_live)
     inside = margin >= -tol.get("zone_slack_mm", 15.0)
+    band = plan.get("band_mm") or grown(table_outline(mesh, R_tgt, t_tgt), tol["mm"])
+    in_band, band_margin = footprint_inside(mesh, R, t, band, to_home=to_live if plan.get("band_mm") else None)
     found = use["silhouette"] >= tol["min_silhouette"] and not use["at_bound"]
 
     # ONE action at a time, the biggest first: a turn and a slide at once is hard to act on, and the next
@@ -272,15 +304,16 @@ def check(plan, views, mesh, fr):
         status = "uncertain"
         say = ("The part is roughly there, but only %.0f%% of its outline matches. Check nothing is resting on it or "
                "in front of it, and that it is lying on the face shown." % use["silhouette"])
-    elif dist <= tol["mm"] and abs(turn) <= tol["deg"] and inside:
+    elif in_band and inside:
         status = "in_place"
         say = "In place."
     else:
         status = "move"
+        out_by = max(0.0, -band_margin)
         if abs(turn) > tol["deg"] and abs(turn) >= dist / 10.0:
             say = "%s." % turn_words(turn).capitalize()
         else:
-            say = "Slide it %.0f mm along the arrows." % dist
+            say = "Slide it %.0f mm along the arrows, into the outer outline." % max(out_by, dist - tol["mm"])
             if not inside:
                 say += " Part of it is outside the well-calibrated area."
     lo_hi = [fr["centre"] + float(fr[k][0]) * L for k in ("lo", "hi")]
@@ -288,6 +321,7 @@ def check(plan, views, mesh, fr):
         "status": status, "say": say,
         "distance_mm": dist, "along_mm": float(d @ master_dir), "across_mm": float(d @ A_t),
         "turn_deg": turn, "inside_zone": inside, "zone_margin_mm": margin,
+        "inside_band": in_band, "band_margin_mm": band_margin,
         "silhouette": use["silhouette"], "confirmed": use["confirmed"],
         # the turned try is only run when the master part is unhappy, so it is often not there at all
         "master_pct": {"planned": p["master_pct"], "turned": q["master_pct"] if q else None},
@@ -322,15 +356,22 @@ def draw(view, mesh, fr, result, plan, scale=0.5):
         for x, y in pts:
             cv2.circle(img, (int(round(x)), int(round(y))), r, colour, -1, cv2.LINE_AA)
 
-    # the OUTLINE ON THE TABLE is what the operator lines the part up with: a flat shape on a flat surface,
-    # unlike a wireframe hanging in the air, which is hard to judge from one viewpoint
-    P = np.asarray(mesh).reshape(-1, 3) @ dr["R_tgt"].T + dr["t_tgt"]
-    hull = cv2.convexHull(P[:, :2].astype(np.float32)).reshape(-1, 2)
-    floor = np.hstack([hull, np.zeros((len(hull), 1), np.float32)]).astype(np.float64)
-    uv, _ = cv2.projectPoints(floor, rc, tc, K, dist)
-    uv = uv.reshape(-1, 1, 2).astype(np.int32)
-    cv2.polylines(img, [uv], True, (0, 0, 0), 9, cv2.LINE_AA)
-    cv2.polylines(img, [uv], True, (235, 170, 60), 4, cv2.LINE_AA)
+    # The OUTLINES ON THE TABLE are what the operator lines the part up with: flat shapes on a flat surface,
+    # unlike a wireframe hanging in the air. Inner: where it goes. Outer: the slack - anywhere inside is green.
+    M, m = dr["to_live"]
+
+    def on_table(poly_home, colour, thick):
+        if poly_home is None or not len(poly_home):
+            return
+        pts = np.hstack([np.asarray(poly_home, float), np.zeros((len(poly_home), 1))]) @ M.T + m
+        pts[:, 2] = 0.0
+        uv, _ = cv2.projectPoints(pts, rc, tc, K, dist)
+        uv = uv.reshape(-1, 1, 2).astype(np.int32)
+        cv2.polylines(img, [uv], True, (0, 0, 0), thick + 5, cv2.LINE_AA)
+        cv2.polylines(img, [uv], True, colour, thick, cv2.LINE_AA)
+
+    on_table(plan.get("band_mm"), (235, 200, 150), 2)
+    on_table(plan.get("outline_mm") or table_outline(mesh, dr["R_tgt"], dr["t_tgt"]), (235, 170, 60), 4)
 
     pts, s = edges(dr["R_tgt"], dr["t_tgt"])
     master = dr["in_master"](s)
@@ -358,7 +399,6 @@ def draw(view, mesh, fr, result, plan, scale=0.5):
                 a, b = uv.reshape(-1, 2).astype(int)
                 cv2.arrowedLine(img, tuple(a), tuple(b), (0, 0, 0), 14, cv2.LINE_AA, tipLength=0.3)
                 cv2.arrowedLine(img, tuple(a), tuple(b), (255, 255, 255), 6, cv2.LINE_AA, tipLength=0.3)
-    M, m = dr["to_live"]
     zone = np.hstack([np.asarray(plan["zone_mm"], float), np.zeros((len(plan["zone_mm"]), 1))]) @ M.T + m
     uv, _ = cv2.projectPoints(zone, rc, tc, K, dist)
     cv2.polylines(img, [uv.reshape(-1, 1, 2).astype(np.int32)], True, (120, 120, 120), 2, cv2.LINE_AA)
