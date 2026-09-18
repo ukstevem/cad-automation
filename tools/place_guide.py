@@ -235,6 +235,107 @@ def write_live_page(out, plan, view, mesh, fr, R, t, stream_url, plan_dir):
     return os.path.join(out, "live.html")
 
 
+def best_position(hull_xy, zone_xy, yaw_deg, step_mm=10.0):
+    """Where to put a footprint of this shape, turned this way, to sit deepest inside the zone.
+
+    The zone is where the calibration is good (both cameras, measured, not assumed), so 'deepest inside' is the
+    honest objective - and the clearance it returns is what the guide's slack is then drawn against."""
+    c, s_ = np.cos(np.radians(yaw_deg)), np.sin(np.radians(yaw_deg))
+    R2 = np.array([[c, -s_], [s_, c]])
+    hull = np.asarray(hull_xy, float) @ R2.T
+    hull -= hull.mean(axis=0)
+    poly = np.asarray(zone_xy, np.float32).reshape(-1, 1, 2)
+    lo, hi = np.asarray(zone_xy, float).min(axis=0), np.asarray(zone_xy, float).max(axis=0)
+    best = (-1e9, None)
+    for x in np.arange(lo[0], hi[0] + 1e-9, step_mm):
+        for y in np.arange(lo[1], hi[1] + 1e-9, step_mm):
+            if cv2.pointPolygonTest(poly, (float(x), float(y)), False) < 0:
+                continue
+            d = min(cv2.pointPolygonTest(poly, (float(px + x), float(py + y)), True) for px, py in hull)
+            if d > best[0]:
+                best = (d, (float(x), float(y)))
+    return best
+
+
+def cmd_suggest(args) -> int:
+    """Pick the resting face, the way round and the spot on the table, from the model and the welds.
+
+    Two things decide it, in this order:
+      1. how many welds BOTH cameras can see - a weld on a face neither camera looks at cannot be ratified, and
+         the whole point of the placement is to present the work to the cameras;
+      2. how deep inside the well-calibrated zone the part sits.
+    The operator still owns the choice; this writes the plan they would otherwise have to reason out."""
+    from app.services import visibility as VIS
+    from weld_faces import article_frame
+    import weld_faces as WF
+    import weld_locate as WL
+
+    model = json.load(open(args.model, encoding="utf-8"))
+    mesh = VIS.load_stl(args.mesh)
+    fr = article_frame(mesh)
+    zone = json.load(open(args.zone, encoding="utf-8"))["poly_mm"]
+    welds = json.load(open(args.welds, encoding="utf-8"))
+    welds = welds if isinstance(welds, list) else (welds.get("welds") or welds.get("items") or [])
+    plan0 = {"profile": args.profile, "cam_profile": args.cam_profile, "stereo": args.stereo}
+    views = _views(plan0, args.home)
+    band = WF.default_band(fr)
+    faces_by_weld, _computed = WF.faces_for_welds(welds, fr, args.scale, band)
+    rows = []
+    for i, rest in enumerate(model.get("resting_faces") or []):
+        R0 = FP._rot(rest["rvec"])
+        hull = table_outline(mesh, R0, np.zeros(3))
+        for yaw in np.arange(0.0, 180.0, args.yaw_step):
+            clear, centre = best_position(hull, zone, yaw, args.grid_mm)
+            if centre is None or clear < 0:
+                continue
+            rows.append({"rest": i, "yaw": float(yaw), "clear": float(clear), "centre": centre})
+    if not rows:
+        print("no resting face fits inside the zone", file=sys.stderr)
+        return 2
+    # the best few placements by clearance, then judged on what the cameras would see
+    rows.sort(key=lambda r: -r["clear"])
+    tried, out = set(), []
+    for r in rows:
+        key = (r["rest"], round(r["yaw"] / 30.0))
+        if key in tried:
+            continue
+        tried.add(key)
+        R = FP._rot([0.0, 0.0, np.radians(r["yaw"])]) @ FP._rot(model["resting_faces"][r["rest"]]["rvec"])
+        P = np.asarray(mesh).reshape(-1, 3) @ R.T
+        t = np.array([r["centre"][0], r["centre"][1], 0.0]) - R @ fr["centre"]
+        t[2] = -P[:, 2].max()
+        placed = WL.place_welds(welds, FP._vec(R), t, args.scale)
+        seen = {}
+        for v in views:
+            _lines, status, _pres, _cos = WF.visible_weld_points(placed, faces_by_weld, mesh, FP._vec(R), t, v, fr)
+            for name, st in status.items():
+                seen.setdefault(name, []).append(st == "shown")
+        both = sum(1 for v in seen.values() if all(v) and v)
+        any_ = sum(1 for v in seen.values() if any(v))
+        out.append({**r, "both": both, "any": any_, "R": R, "t": t})
+        if len(out) >= args.tries:
+            break
+    out.sort(key=lambda r: (-r["both"], -r["any"], -r["clear"]))
+    print("%-6s %-8s %-10s %-12s %s" % ("rest", "turn", "clearance", "welds both", "welds either"))
+    for r in out[:8]:
+        print("%-6d %-8.0f %-10.0f %-12d %d" % (r["rest"], r["yaw"], r["clear"], r["both"], r["any"]))
+    b = out[0]
+    print("")
+    print("chosen: resting face %d, length at %.0f deg, centre (%.0f, %.0f) mm, %.0f mm clear of the zone edge; "
+          "%d of %d welds seen by both cameras" % (b["rest"], b["yaw"], b["centre"][0], b["centre"][1], b["clear"],
+                                                   b["both"], len(welds)))
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+        tgt = {"frame": "home board, chosen by tools/place_guide.py suggest", "centre_mm": list(b["centre"]),
+               "long_axis_deg": float(b["yaw"]), "footprint_mm": table_outline(mesh, b["R"], b["t"]).tolist(),
+               "welds_seen_by_both": b["both"], "welds_total": len(welds)}
+        path = os.path.join(args.out, "placement_target.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(tgt, fh, indent=2)
+        print("wrote %s  - now run: place_guide.py plan --rest %d --target %s ..." % (path, b["rest"], path))
+    return 0
+
+
 def cmd_plan(args) -> int:
     from app.services import visibility as VIS
     from weld_faces import article_frame
@@ -739,12 +840,26 @@ def main() -> int:
     c.add_argument("--view", default=None,
                    help="check with only the photographs whose name holds this (one camera). Height and tilt are then "
                         "held at the plan's, because one camera cannot see them")
+    g = sub.add_parser("suggest", help="choose the resting face, the way round and the spot from the model and welds")
+    g.add_argument("--model", required=True)
+    g.add_argument("--mesh", required=True)
+    g.add_argument("--welds", required=True)
+    g.add_argument("--zone", required=True)
+    g.add_argument("--home", required=True)
+    g.add_argument("--scale", type=float, default=1.0, help="model units per weld-sidecar unit, e.g. 0.2 for 1:5")
+    g.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
+    g.add_argument("--cam-profile", action="append", default=[], metavar="SUBSTR=PATH")
+    g.add_argument("--stereo", default=None)
+    g.add_argument("--grid-mm", type=float, default=10.0)
+    g.add_argument("--yaw-step", type=float, default=15.0)
+    g.add_argument("--tries", type=int, default=10, help="how many placements to judge on weld visibility")
+    g.add_argument("--out", default=None, help="write placement_target.json here")
     t = sub.add_parser("set", help="the operator accepted the placement: measure it and write the fit")
     t.add_argument("--plan", required=True)
     t.add_argument("--captures", required=True, help="the shot the operator was looking at")
     t.add_argument("--out", default=None, help="where fit.json goes (default: <plan>/fit)")
     args = ap.parse_args()
-    return {"plan": cmd_plan, "check": cmd_check, "set": cmd_set}[args.cmd](args)
+    return {"plan": cmd_plan, "check": cmd_check, "set": cmd_set, "suggest": cmd_suggest}[args.cmd](args)
 
 
 if __name__ == "__main__":
