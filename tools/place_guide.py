@@ -316,7 +316,8 @@ def draw(view, mesh, fr, result, plan, scale=0.5):
         colour = (80, 200, 60) if result["status"] == "in_place" else (0, 200, 255)
         fp, _s = edges(dr["R"], dr["t"])
         dots(fp, colour, 1)
-        if result["distance_mm"] > 2.0:
+        # only while there is something to do: an arrow under a green "in place" reads as a contradiction
+        if result["status"] == "move" and result["distance_mm"] > 2.0:
             # drawn level with the top of the part, where it is not hidden, and at least 80 mm long so the direction
             # can be seen - the page gives the distance
             step = dr["c_tgt"] - dr["c_found"]
