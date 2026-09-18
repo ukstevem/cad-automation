@@ -491,8 +491,11 @@ def main() -> int:
     p.add_argument("--master-end", choices=("auto", "lo", "hi"), default="auto")
     p.add_argument("--master-mm", type=float, default=15.0, help="how far in from its end the master part reaches")
     p.add_argument("--master-name", default="master part")
-    p.add_argument("--tol-mm", type=float, default=25.0, help="in place within this distance of the target")
-    p.add_argument("--tol-deg", type=float, default=4.0, help="and within this turn")
+    p.add_argument("--tol-mm", type=float, default=10.0,
+                   help="in place within this distance of the target. Keep it tight enough that green agrees with the "
+                        "drawn outline: at 25 mm the guide called a part green while it sat visibly outside the box, "
+                        "which costs the operator's trust in every later green")
+    p.add_argument("--tol-deg", type=float, default=2.0, help="and within this turn")
     p.add_argument("--min-silhouette", type=float, default=75.0, help="found only when this much outline is confirmed")
     p.add_argument("--min-present", type=float, default=45.0,
                    help="below this much outline there is no part there at all, rather than a part that fits badly")
