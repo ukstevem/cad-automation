@@ -380,7 +380,7 @@ def cmd_plan(args) -> int:
         if live is None:
             print("no photograph from camera %s in %s" % (args.stream_camera, args.home), file=sys.stderr)
             return 2
-        url = args.stream_url or "http://localhost:8088/stream/%s" % _camera_key(live["tag"])
+        url = args.stream_url or "http://127.0.0.1:8088/stream/%s" % _camera_key(live["tag"])
         path = write_live_page(args.out, plan, live, mesh, fr, R, t, url,
                                args.out.replace("\\", "/").strip("/"))
         print("live page %s (stream %s)" % (path, url))
@@ -591,10 +591,8 @@ font-variant-numeric:tabular-nums}
 .stage{position:relative;margin:12px 0;background:#000;border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .stage img,.stage svg{display:block;width:100%;height:auto}
 .stage svg{position:absolute;inset:0}
-.stage .dead{position:absolute;inset:0;display:grid;align-content:center;justify-items:center;gap:6px;
-background:#141816;color:#e6ebe7;text-align:center;padding:24px;line-height:1.7}
-.stage .dead code{background:#00000055;padding:6px 10px;border-radius:4px;font-size:13px}
-.stage img[hidden]{display:none}
+.dead{margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:13px}
+.dead code{background:#8884;padding:4px 8px;border-radius:4px}
 form{margin:10px 0}button{font:600 17px/1 system-ui;background:#1f8a4c;color:#fff;border:0;border-radius:6px;
 padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-allowed}
 .key{display:flex;flex-wrap:wrap;gap:6px 18px;color:var(--muted);font-size:13px}
@@ -603,9 +601,9 @@ padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-
 <div class="state" id="state"><div class="say" id="say">Waiting for the first check...</div>
 <div class="facts" id="facts"></div></div>
 <div class="stage" id="stage"><img id="cam" src="__STREAM__" alt="live view">
-<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg>
-<div class="dead" id="dead" hidden><b>No live view.</b><br>Start it from the laptop:<br>
-<code>tools/place_loop.ps1 -Stream -Plan __PLAN__</code><br><span id="retry">retrying...</span></div></div>
+<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg></div>
+<div class="dead" id="dead" hidden>No live view yet - if it stays blank, start it from the laptop:
+<code>tools/place_loop.ps1 -Stream -Plan __PLAN__</code> <span id="retry"></span></div>
 <form method="post" action="/api/v1/place/set"><input type="hidden" name="plan" value="__PLAN__">
 <button id="set" type="submit" disabled>Set this placement</button></form>
 <div class="key"><span><i class="sw" style="background:#3caaeb"></i>where the part goes</span>
@@ -618,12 +616,11 @@ const COL = {in_place:"#1f8a4c", move:"#b7791f", uncertain:"#8a5a1f", not_found:
 // and keep trying, so the page recovers on its own once the loop is started
 const cam = document.getElementById("cam"), dead = document.getElementById("dead");
 let tries = 0;
-cam.onerror = () => { dead.hidden = false; cam.hidden = true; };
-cam.onload = () => { dead.hidden = true; cam.hidden = false; tries = 0; };
+cam.onerror = () => { dead.hidden = false; };
+cam.onload = () => { dead.hidden = true; tries = 0; };   // may never fire for a multipart stream; that is fine
 setInterval(() => {
   if (!dead.hidden) {
-    document.getElementById("retry").textContent = "retrying (" + (++tries) + ")...";
-    cam.hidden = false;
+    document.getElementById("retry").textContent = "(retry " + (++tries) + ")";
     cam.src = "__STREAM__#" + Date.now();   // fragment, not query: the preview 404s on /stream/<serial>?t=...
   }
 }, 4000);
@@ -855,7 +852,9 @@ def main() -> int:
     p.add_argument("--stream-camera", default=None,
                    help="serial of the camera that will show a live stream: writes live.html with the target drawn "
                         "over it, so placing is by eye at full speed and the checks run on the other camera")
-    p.add_argument("--stream-url", default=None, help="default: http://localhost:8088/stream/<serial>")
+    p.add_argument("--stream-url", default=None,
+                   help="default: http://127.0.0.1:8088/stream/<serial>. NOT localhost: ssh -L binds IPv4 only and a "
+                        "browser resolving localhost to ::1 is refused")
     p.add_argument("--out", required=True)
     c = sub.add_parser("check", help="find the part in a shot and say what to do")
     c.add_argument("--plan", required=True, help="directory holding plan.json")
