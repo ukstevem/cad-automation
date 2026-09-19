@@ -292,7 +292,19 @@ def write_live_page(out, plan, view, mesh, fr, R, t, stream_url, plan_dir):
     return os.path.join(out, "live.html")
 
 
-def best_position(hull_xy, zone_xy, yaw_deg, step_mm=10.0):
+def board_keep_out(board_cfg, margin_mm=20.0):
+    """Where the part must NOT go: over the board.
+
+    Every check puts the cameras from the board, so a part sitting on it blinds the whole thing. The board lies at
+    the origin of the home frame, its own frame, so its rectangle is simply its squares - grown by a margin,
+    because a part overhanging the edge shadows the corners next to it."""
+    w = float(board_cfg["squares_x"]) * float(board_cfg["square_mm"])
+    h = float(board_cfg["squares_y"]) * float(board_cfg["square_mm"])
+    m = margin_mm
+    return np.array([[-m, -m], [w + m, -m], [w + m, h + m], [-m, h + m]], float)
+
+
+def best_position(hull_xy, zone_xy, yaw_deg, step_mm=10.0, keep_out=None):
     """Where to put a footprint of this shape, turned this way, to sit deepest inside the zone.
 
     The zone is where the calibration is good (both cameras, measured, not assumed), so 'deepest inside' is the
@@ -302,13 +314,17 @@ def best_position(hull_xy, zone_xy, yaw_deg, step_mm=10.0):
     hull = np.asarray(hull_xy, float) @ R2.T
     hull -= hull.mean(axis=0)
     poly = np.asarray(zone_xy, np.float32).reshape(-1, 1, 2)
+    out = None if keep_out is None else np.asarray(keep_out, np.float32).reshape(-1, 1, 2)
     lo, hi = np.asarray(zone_xy, float).min(axis=0), np.asarray(zone_xy, float).max(axis=0)
     best = (-1e9, None)
     for x in np.arange(lo[0], hi[0] + 1e-9, step_mm):
         for y in np.arange(lo[1], hi[1] + 1e-9, step_mm):
             if cv2.pointPolygonTest(poly, (float(x), float(y)), False) < 0:
                 continue
-            d = min(cv2.pointPolygonTest(poly, (float(px + x), float(py + y)), True) for px, py in hull)
+            pts = [(float(px + x), float(py + y)) for px, py in hull]
+            if out is not None and any(cv2.pointPolygonTest(out, q, False) >= 0 for q in pts):
+                continue                                   # over the board: the checks would go blind
+            d = min(cv2.pointPolygonTest(poly, q, True) for q in pts)
             if d > best[0]:
                 best = (d, (float(x), float(y)))
     return best
@@ -331,6 +347,8 @@ def cmd_suggest(args) -> int:
     mesh = VIS.load_stl(args.mesh)
     fr = article_frame(mesh)
     zone = json.load(open(args.zone, encoding="utf-8"))["poly_mm"]
+    from app.services import multiview_fit as MVF
+    keep_out = board_keep_out(MVF.load_profile(args.profile)["board"], args.board_margin_mm)
     welds = json.load(open(args.welds, encoding="utf-8"))
     welds = welds if isinstance(welds, list) else (welds.get("welds") or welds.get("items") or [])
     plan0 = {"profile": args.profile, "cam_profile": args.cam_profile, "stereo": args.stereo}
@@ -339,10 +357,12 @@ def cmd_suggest(args) -> int:
     faces_by_weld, _computed = WF.faces_for_welds(welds, fr, args.scale, band)
     rows = []
     for i, rest in enumerate(model.get("resting_faces") or []):
+        if args.rest is not None and i != args.rest:
+            continue
         R0 = FP._rot(rest["rvec"])
         hull = table_outline(mesh, R0, np.zeros(3))
         for yaw in np.arange(0.0, 180.0, args.yaw_step):
-            clear, centre = best_position(hull, zone, yaw, args.grid_mm)
+            clear, centre = best_position(hull, zone, yaw, args.grid_mm, keep_out)
             if centre is None or clear < 0:
                 continue
             rows.append({"rest": i, "yaw": float(yaw), "clear": float(clear), "centre": centre})
@@ -946,6 +966,13 @@ def main() -> int:
     g.add_argument("--profile", default="outputs/calibration/RigCam_52FD1B1F.json")
     g.add_argument("--cam-profile", action="append", default=[], metavar="SUBSTR=PATH")
     g.add_argument("--stereo", default=None)
+    g.add_argument("--rest", type=int, default=None,
+                   help="only this resting face. Weld visibility cannot tell which way UP a part belongs - on the "
+                        "14121 bracket the inverted face shows 13 of 22 welds against 3 for the welding attitude - "
+                        "so the operator picks the face and this picks the turn and the spot")
+    g.add_argument("--board-margin-mm", type=float, default=20.0,
+                   help="how far clear of the board the part must stay: the cameras are placed from the board every "
+                        "check, so a part on top of it blinds them")
     g.add_argument("--grid-mm", type=float, default=10.0)
     g.add_argument("--yaw-step", type=float, default=15.0)
     g.add_argument("--tries", type=int, default=10, help="how many placements to judge on weld visibility")
