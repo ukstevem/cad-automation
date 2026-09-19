@@ -186,6 +186,50 @@ def _views(plan, captures):
     return WL.load_views(captures, plan["profile"], plan["cam_profile"], stereo=plan.get("stereo"))
 
 
+def render_ghost(view, mesh, fr, R, t, master_end, light=(0.3, -0.5, -0.8)):
+    """The part as it will look from this camera when it is in place: a shaded ghost, master end tinted.
+
+    An outline on the table says where, but not WHICH WAY ROUND - Steve, at the rig, on the real thing: "I can't
+    guess which way round the weldment needs to be". A shaded picture of the part in the target pose can be matched
+    by eye without reading anything, and on a fixed camera it never moves, so it costs one render at plan time.
+
+    Returns BGRA at the camera's resolution: transparent where the part is not."""
+    K = np.asarray(view["K"], float).reshape(3, 3)
+    dist = np.asarray(view["dist"], float)
+    rc = np.asarray(view["rvec_cam"], float).reshape(3, 1)
+    tc = np.asarray(view["tvec_cam"], float).reshape(3, 1)
+    Rc = FP._rot(view["rvec_cam"])
+    tcam = np.asarray(view["tvec_cam"], float).ravel()
+    h, w = int(view["height"]), int(view["width"])
+
+    tris = np.asarray(mesh).reshape(-1, 3, 3) @ R.T + t
+    cam_z = (tris.reshape(-1, 3) @ Rc.T + tcam)[:, 2].reshape(-1, 3).mean(axis=1)
+    uv, _ = cv2.projectPoints(tris.reshape(-1, 1, 3), rc, tc, K, dist)
+    uv = uv.reshape(-1, 3, 2)
+    n = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
+    lit = np.abs(n @ (np.asarray(light) / np.linalg.norm(light)))
+    s_along = ((np.asarray(mesh).reshape(-1, 3, 3).mean(axis=1) - fr["centre"]) @ fr["axes"][:, 0])
+    lo, hi = float(fr["lo"][0]), float(fr["hi"][0])
+    is_master = (s_along < lo + 0.12 * (hi - lo)) if master_end == "lo" else (s_along > hi - 0.12 * (hi - lo))
+
+    img = np.zeros((h, w, 3), np.uint8)
+    alpha = np.zeros((h, w), np.uint8)
+    for i in np.argsort(-cam_z):                                  # painter's: far first
+        if cam_z[i] <= 1.0:
+            continue
+        poly = np.round(uv[i] * 16).astype(np.int32)
+        base = (200, 130, 40) if not is_master[i] else (0, 110, 210)
+        shade = 0.45 + 0.55 * float(lit[i])
+        cv2.fillConvexPoly(img, poly, tuple(int(min(255, c * shade)) for c in base), cv2.LINE_AA, shift=4)
+        cv2.fillConvexPoly(alpha, poly, 255, cv2.LINE_AA, shift=4)
+    # a crisp edge, so the eye has something definite to line the real part up against
+    edge = cv2.morphologyEx(alpha, cv2.MORPH_GRADIENT, np.ones((5, 5), np.uint8))
+    img[edge > 60] = (255, 235, 200)
+    alpha = np.maximum(alpha, edge)
+    return np.dstack([img, alpha])
+
+
 def overlay_svg(view, plan, mesh, fr, R, t):
     """The target, its slack and the master end as SVG in ONE camera's image, for drawing over its live stream.
 
@@ -225,10 +269,23 @@ def overlay_svg(view, plan, mesh, fr, R, t):
 
 def write_live_page(out, plan, view, mesh, fr, R, t, stream_url, plan_dir):
     os.makedirs(out, exist_ok=True)
+    ghost = render_ghost(view, mesh, fr, R, t, plan["master"]["end"])
+    cv2.imwrite(os.path.join(out, "ghost.png"), ghost)
+    ys, xs = np.nonzero(ghost[:, :, 3])
+    h, w = ghost.shape[:2]
+    if len(xs):
+        # zoom so the target fills about half the width, centred on it, and never past 3x
+        span = max(xs.max() - xs.min(), ys.max() - ys.min(), 1)
+        z = float(np.clip(0.5 * w / span, 1.0, 3.0))
+        zx, zy = 100.0 * xs.mean() / w, 100.0 * ys.mean() / h
+    else:
+        z, zx, zy = 1.0, 50.0, 50.0
     page = (LIVE_PAGE.replace("__STREAM__", html.escape(stream_url))
             .replace("__W__", str(int(view["width"]))).replace("__H__", str(int(view["height"])))
             .replace("__OVERLAY__", overlay_svg(view, plan, mesh, fr, R, t))
             .replace("__PLAN__", html.escape(plan_dir)).replace("__MASTER__", html.escape(plan["master"]["name"]))
+            .replace("__V__", str(int(time.time())))
+            .replace("__ZOOM__", "%.2f" % z).replace("__ZX__", "%.1f" % zx).replace("__ZY__", "%.1f" % zy)
             .replace("__CAM__", html.escape(_camera_key(view["tag"]))))
     with open(os.path.join(out, "live.html"), "w", encoding="utf-8") as fh:
         fh.write(page)
@@ -589,8 +646,13 @@ font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 16px 28px
 .state .facts{display:flex;flex-wrap:wrap;gap:4px 20px;margin-top:6px;opacity:.9;font-size:14px;
 font-variant-numeric:tabular-nums}
 .stage{position:relative;margin:12px 0;background:#000;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.stage{overflow:hidden}.inner{position:relative;transform-origin:__ZX__% __ZY__%;transition:transform .2s}
+.inner.zoom{transform:scale(__ZOOM__)}
 .stage img,.stage svg{display:block;width:100%;height:auto}
-.stage svg{position:absolute;inset:0}
+.stage svg,.stage #ghost{position:absolute;inset:0;pointer-events:none}
+.stage #ghost{opacity:.55}
+.fade{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;color:var(--muted);font-size:13px;margin:8px 0}
+.fade input{vertical-align:middle}
 .dead{margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:6px;color:var(--muted);font-size:13px}
 .dead code{background:#8884;padding:4px 8px;border-radius:4px}
 form{margin:10px 0}button{font:600 17px/1 system-ui;background:#1f8a4c;color:#fff;border:0;border-radius:6px;
@@ -600,8 +662,12 @@ padding:14px 30px;cursor:pointer}button[disabled]{background:#9aa49e;cursor:not-
 </style></head><body>
 <div class="state" id="state"><div class="say" id="say">Waiting for the first check...</div>
 <div class="facts" id="facts"></div></div>
-<div class="stage" id="stage"><img id="cam" src="__STREAM__" alt="live view">
-<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg></div>
+<div class="stage"><div class="inner" id="inner"><img id="cam" src="__STREAM__" alt="live view">
+<img id="ghost" src="ghost.png?v=__V__" alt="where the part goes">
+<svg viewBox="0 0 __W__ __H__" preserveAspectRatio="none">__OVERLAY__</svg></div></div>
+<div class="fade"><label>ghost <input id="op" type="range" min="0" max="100" value="55"></label>
+<label><input id="zoom" type="checkbox" checked> zoom to the target</label>
+<span class="hint">line the part up with the shaded ghost - the lighter end is the __MASTER__</span></div>
 <div class="dead" id="dead" hidden>No live view yet - if it stays blank, start it from the laptop:
 <code>tools/place_loop.ps1 -Stream -Plan __PLAN__</code> <span id="retry"></span></div>
 <form method="post" action="/api/v1/place/set"><input type="hidden" name="plan" value="__PLAN__">
@@ -644,6 +710,12 @@ async function poll(){
   }
 }
 poll(); setInterval(poll, 1500);
+const op = document.getElementById("op"), ghost = document.getElementById("ghost");
+op.addEventListener("input", () => { ghost.style.opacity = op.value / 100; });
+// a small part is a few per cent of the frame; zoom on the target so the eye has something to work with
+const inner = document.getElementById("inner"), zoom = document.getElementById("zoom");
+const setZoom = () => inner.classList.toggle("zoom", zoom.checked);
+zoom.addEventListener("change", setZoom); setZoom();
 </script></body></html>"""
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
